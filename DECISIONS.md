@@ -38,3 +38,11 @@ Recorded in `notes/`. Corrections to the original handoff document:
 | Transactional steps | `sameAsSystemDB` single-transaction path first. Separate-database Layer 2 only on demand. | The common Elixir deployment shares one database. |
 | Migrations | Verify at launch, refuse to start on mismatch. Opt-in creation for dev. | |
 | Workflow processes | `DynamicSupervisor` children, `:temporary`. | An OTP restart would re-invoke the body outside the replay path. |
+
+## Phase 1
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Serialization column encoding | `Dbos.Serialization.encode/1` is `:erlang.term_to_binary/1` then `Base.encode64/1`; `decode/1` reverses it. | The `inputs`/`output`/`error` columns are `TEXT`, not `BYTEA`. Raw ETF bytes are not guaranteed valid UTF-8 and cannot be stored in a `TEXT` column safely; base64 makes the column contents plain ASCII. |
+| `nil` round-trip | No sentinel marker (unlike upstream's `"__DBOS_NIL"` string for `DBOS_JSON`). `nil` is a native ETF term and round-trips through `encode/1`/`decode/1` like any other value. | ETF, unlike JSON-over-a-string-column, has no ambiguity between "absent" and "the value nil" to work around. |
+| Decoding unsafe terms | `decode/1` uses `:erlang.binary_to_term(binary, [:safe])` and additionally walks the result rejecting any pid, port, or reference, raising `ArgumentError`. | `:safe` alone does not reject pids/ports/refs already present in the source binary (verified empirically) — only atom-table growth. Workflow inputs/outputs are not process identities and should never contain one. |
