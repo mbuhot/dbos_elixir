@@ -37,6 +37,20 @@ defmodule Dbos.Serialization do
   def decode(binary, @format_name), do: {:ok, decode(binary)}
   def decode(_binary, other), do: {:error, {:unsupported_serialization, other}}
 
+  @doc """
+  Encodes a step or workflow failure: which kind it was raised as (`:error`, `:throw`, or
+  `:exit`), the value (the exception struct itself for `:error`, so its type survives), and
+  the stacktrace captured at the point of failure.
+  """
+  def encode_failure(kind, value, stacktrace) when kind in [:error, :throw, :exit] do
+    encode(%{kind: kind, value: value, stacktrace: stacktrace})
+  end
+
+  @doc "Reproduces a failure captured by `encode_failure/3` and decoded by `decode/1`, re-raising it with its original stacktrace attached."
+  def reraise_failure(%{kind: kind, value: value, stacktrace: stacktrace}) do
+    :erlang.raise(kind, value, stacktrace)
+  end
+
   defp contains_unsafe?(term) when is_pid(term) or is_port(term) or is_reference(term), do: true
 
   defp contains_unsafe?(term) when is_tuple(term) do
