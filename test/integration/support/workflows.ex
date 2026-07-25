@@ -28,6 +28,12 @@ defmodule Dbos.Integration.Workflows do
     value
   end
 
+  @doc "A single checkpointed step, used to exercise two nodes racing to dequeue the same queue's backlog."
+  def queue_competition_workflow(value) do
+    Runtime.run_step("record/1", [], fn -> record_execution("record/1") end)
+    value
+  end
+
   @doc "Inserts one durable, deduplicated execution row and one append-only attempt row for the current workflow."
   def record_execution(step_name) do
     conn = execution_conn()

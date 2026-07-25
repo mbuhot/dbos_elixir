@@ -41,6 +41,35 @@ defmodule Dbos.SampleWorkflows do
     result
   end
 
+  @doc """
+  Runs holding a concurrency slot on `table` (a pre-created public named ETS table with a
+  `{:hold_ms, integer}` entry): bumps `:running`, records the high-water mark into `:max`,
+  appends a `{{:event, seq}, workflow_id, monotonic_ms}` row, sleeps `:hold_ms`, then releases
+  the slot. Used by queue concurrency/rate-limit/priority acceptance tests.
+  """
+  def instrumented(table) do
+    running = :ets.update_counter(table, :running, {2, 1}, {:running, 0})
+    bump_max(table, running)
+    seq = :ets.update_counter(table, :seq, {2, 1}, {:seq, 0})
+
+    :ets.insert(
+      table,
+      {{:event, seq}, Dbos.Runtime.current_workflow_id(), System.monotonic_time(:millisecond)}
+    )
+
+    hold_ms = :ets.lookup_element(table, :hold_ms, 2)
+    Process.sleep(hold_ms)
+    :ets.update_counter(table, :running, {2, -1}, {:running, 0})
+    seq
+  end
+
+  defp bump_max(table, running) do
+    case :ets.lookup(table, :max) do
+      [{:max, current}] when current >= running -> :ok
+      _ -> :ets.insert(table, {:max, running})
+    end
+  end
+
   defp bump_counter do
     key = {__MODULE__, :counter, Dbos.Runtime.current_workflow_id()}
     count = :persistent_term.get(key, 0) + 1

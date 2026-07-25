@@ -29,16 +29,24 @@ defmodule Dbos.SystemDb do
     assumed_role queue_name deduplication_id priority queue_partition_key
     application_version created_at updated_at recovery_attempts workflow_timeout_ms
     workflow_deadline_epoch_ms parent_workflow_id owner_xid serialization
+    delay_until_epoch_ms
   )
 
-  @doc "Inserts a workflow directly onto a queue, `status = 'ENQUEUED'`. Idempotent on `workflow_uuid`."
+  @doc """
+  Inserts a workflow directly onto a queue: `status = 'ENQUEUED'`, or `'DELAYED'` with
+  `delay_until_epoch_ms` set if `params[:delay_ms]` is a positive integer, per
+  `notes/queues.md` §7. Idempotent on `workflow_uuid`. Raises `Dbos.QueueDeduplicatedError` if
+  `params[:deduplication_id]` is already held by another workflow on the same queue.
+  """
   def insert_enqueued_workflow(%Config{} = config, params) do
     workflow_id = Map.get(params, :workflow_id) || Uuid.v4()
     now = System.os_time(:millisecond)
+    delay_ms = Map.get(params, :delay_ms)
+    {status, delay_until_epoch_ms} = enqueue_status(delay_ms, now)
 
     values = [
       workflow_id,
-      Status.to_string(:enqueued),
+      Status.to_string(status),
       Serialization.encode(Map.fetch!(params, :inputs)),
       Map.fetch!(params, :name),
       Map.get(params, :class_name),
@@ -57,7 +65,8 @@ defmodule Dbos.SystemDb do
       Map.get(params, :workflow_deadline_epoch_ms),
       nil,
       Uuid.v4(),
-      Serialization.format_name()
+      Serialization.format_name(),
+      delay_until_epoch_ms
     ]
 
     placeholders = 1..length(@enqueue_columns) |> Enum.map_join(", ", &"$#{&1}")
@@ -68,8 +77,45 @@ defmodule Dbos.SystemDb do
     ON CONFLICT (workflow_uuid) DO UPDATE SET updated_at = EXCLUDED.updated_at
     """
 
-    {:ok, _result} = config.db.query(config.conn, sql, values)
-    {:ok, workflow_id}
+    case config.db.query(config.conn, sql, values) do
+      {:ok, _result} ->
+        {:ok, workflow_id}
+
+      {:error, error} ->
+        handle_enqueue_error(error, workflow_id, params)
+    end
+  end
+
+  defp enqueue_status(delay_ms, now) when is_integer(delay_ms) and delay_ms > 0,
+    do: {:delayed, now + delay_ms}
+
+  defp enqueue_status(_delay_ms, _now), do: {:enqueued, nil}
+
+  defp handle_enqueue_error(error, workflow_id, params) do
+    if dedup_unique_violation?(error) do
+      raise Dbos.QueueDeduplicatedError,
+        workflow_id: workflow_id,
+        queue_name: Map.fetch!(params, :queue_name),
+        deduplication_id: Map.get(params, :deduplication_id)
+    else
+      raise error
+    end
+  end
+
+  defp dedup_unique_violation?(%{postgres: %{code: :unique_violation}}), do: true
+  defp dedup_unique_violation?(_error), do: false
+
+  @doc "The workflow id currently holding `(queue_name, deduplication_id)`'s slot, or `nil` if it's free."
+  def get_deduplicated_workflow(%Config{} = config, queue_name, deduplication_id) do
+    sql = """
+    SELECT workflow_uuid FROM #{table(config, "workflow_status")}
+    WHERE queue_name = $1 AND deduplication_id = $2
+    """
+
+    case config.db.query(config.conn, sql, [queue_name, deduplication_id]) do
+      {:ok, %{rows: [[workflow_id]]}} -> workflow_id
+      {:ok, %{rows: []}} -> nil
+    end
   end
 
   @doc "Fetches one workflow's status row by id."
@@ -299,6 +345,427 @@ defmodule Dbos.SystemDb do
       ])
 
     if num_rows > 0, do: :cleared, else: :not_cleared
+  end
+
+  @doc "Registers `version_name` as a known application version, if not already present. Idempotent."
+  def create_application_version(%Config{} = config, version_name) do
+    sql = """
+    INSERT INTO #{table(config, "application_versions")} (version_id, version_name, version_timestamp, created_at)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (version_name) DO NOTHING
+    """
+
+    now = System.os_time(:millisecond)
+    {:ok, _result} = config.db.query(config.conn, sql, [Uuid.v4(), version_name, now, now])
+    :ok
+  end
+
+  @doc "The most recently registered application version, or `:none` if none are registered."
+  def get_latest_application_version(%Config{} = config) do
+    sql = """
+    SELECT version_name FROM #{table(config, "application_versions")}
+    ORDER BY version_timestamp DESC LIMIT 1
+    """
+
+    case config.db.query(config.conn, sql, []) do
+      {:ok, %{rows: [[name]]}} -> {:ok, name}
+      {:ok, %{rows: []}} -> :none
+    end
+  end
+
+  @doc """
+  Promotes every `DELAYED` workflow whose `delay_until_epoch_ms` has passed to `ENQUEUED`, per
+  `notes/queues.md` §7 (`TransitionDelayedWorkflows`). Run once per reconcile tick by
+  `Dbos.Queue.Sup`, globally across all queues.
+  """
+  def transition_delayed_workflows(%Config{} = config) do
+    sql = """
+    UPDATE #{table(config, "workflow_status")}
+        SET status = $1, updated_at = $2
+        WHERE status = $3 AND delay_until_epoch_ms <= $2
+    """
+
+    now = System.os_time(:millisecond)
+
+    {:ok, _result} =
+      config.db.query(config.conn, sql, [
+        Status.to_string(:enqueued),
+        now,
+        Status.to_string(:delayed)
+      ])
+
+    :ok
+  end
+
+  @doc """
+  Registers or updates a queue's persisted configuration in the `queues` table, per
+  `notes/queues.md` §1. Mirrors upstream's default `QueueConflictUpdateIfLatestVersion`
+  resolution: an existing row is overwritten only if this executor's application version is the
+  latest registered version, or if no version has been registered yet. Returns the row actually
+  persisted (which may differ from `queue` if an existing row was left untouched).
+  """
+  def register_queue(%Config{} = config, %Dbos.Queue{} = queue) do
+    update_existing =
+      case get_latest_application_version(config) do
+        :none -> true
+        {:ok, latest} -> latest == config.application_version
+      end
+
+    now = System.os_time(:millisecond)
+
+    insert_sql = """
+    INSERT INTO #{table(config, "queues")}
+        (queue_id, name, concurrency, worker_concurrency, rate_limit_max, rate_limit_period_sec,
+         priority_enabled, partition_queue, polling_interval_sec, created_at, updated_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    ON CONFLICT (name) DO NOTHING
+    """
+
+    {rate_limit_max, rate_limit_period_sec} = queue_rate_limit_columns(queue.rate_limit)
+
+    {:ok, %{num_rows: inserted_rows}} =
+      config.db.query(config.conn, insert_sql, [
+        Uuid.v4(),
+        queue.name,
+        queue.global_concurrency,
+        queue.worker_concurrency,
+        rate_limit_max,
+        rate_limit_period_sec,
+        queue.priority_enabled,
+        queue.partition_queue,
+        queue.base_polling_interval_ms / 1000.0,
+        now,
+        now
+      ])
+
+    if inserted_rows == 0 and update_existing do
+      update_queue_row(config, queue)
+    end
+
+    get_queue(config, queue.name)
+  end
+
+  defp update_queue_row(config, queue) do
+    sql = """
+    UPDATE #{table(config, "queues")}
+        SET concurrency = $1, worker_concurrency = $2, rate_limit_max = $3,
+            rate_limit_period_sec = $4, priority_enabled = $5, partition_queue = $6,
+            polling_interval_sec = $7, updated_at = $8
+        WHERE name = $9
+    """
+
+    {rate_limit_max, rate_limit_period_sec} = queue_rate_limit_columns(queue.rate_limit)
+
+    {:ok, _result} =
+      config.db.query(config.conn, sql, [
+        queue.global_concurrency,
+        queue.worker_concurrency,
+        rate_limit_max,
+        rate_limit_period_sec,
+        queue.priority_enabled,
+        queue.partition_queue,
+        queue.base_polling_interval_ms / 1000.0,
+        System.os_time(:millisecond),
+        queue.name
+      ])
+
+    :ok
+  end
+
+  defp queue_rate_limit_columns(nil), do: {nil, nil}
+
+  defp queue_rate_limit_columns(%{limit: limit, period_ms: period_ms}),
+    do: {limit, period_ms / 1000.0}
+
+  @doc "Fetches one queue's persisted configuration, or `:not_found`."
+  def get_queue(%Config{} = config, name) do
+    sql = """
+    SELECT name, concurrency, worker_concurrency, rate_limit_max, rate_limit_period_sec,
+           priority_enabled, partition_queue, polling_interval_sec
+    FROM #{table(config, "queues")} WHERE name = $1
+    """
+
+    case config.db.query(config.conn, sql, [name]) do
+      {:ok, %{rows: [row]}} -> {:ok, queue_from_row(row)}
+      {:ok, %{rows: []}} -> :not_found
+    end
+  end
+
+  @doc "Every persisted queue's configuration."
+  def list_queues(%Config{} = config) do
+    sql = """
+    SELECT name, concurrency, worker_concurrency, rate_limit_max, rate_limit_period_sec,
+           priority_enabled, partition_queue, polling_interval_sec
+    FROM #{table(config, "queues")}
+    """
+
+    {:ok, result} = config.db.query(config.conn, sql, [])
+    {:ok, Enum.map(result.rows, &queue_from_row/1)}
+  end
+
+  defp queue_from_row([
+         name,
+         concurrency,
+         worker_concurrency,
+         rate_limit_max,
+         rate_limit_period_sec,
+         priority_enabled,
+         partition_queue,
+         polling_interval_sec
+       ]) do
+    %Dbos.Queue{
+      name: name,
+      global_concurrency: concurrency,
+      worker_concurrency: worker_concurrency,
+      rate_limit: queue_rate_limit_from_row(rate_limit_max, rate_limit_period_sec),
+      priority_enabled: priority_enabled,
+      partition_queue: partition_queue,
+      base_polling_interval_ms: round(polling_interval_sec * 1000.0)
+    }
+  end
+
+  defp queue_rate_limit_from_row(nil, _period_sec), do: nil
+
+  defp queue_rate_limit_from_row(limit, period_sec),
+    do: %{limit: limit, period_ms: round(period_sec * 1000.0)}
+
+  @doc """
+  The distinct, non-null partition keys among `ENQUEUED` workflows on `queue_name`, per
+  `notes/queues.md` §6 (`GetQueuePartitions`).
+  """
+  def get_queue_partitions(%Config{} = config, queue_name) do
+    sql = """
+    SELECT DISTINCT queue_partition_key FROM #{table(config, "workflow_status")}
+    WHERE queue_name = $1 AND status = $2 AND queue_partition_key IS NOT NULL
+    """
+
+    {:ok, result} = config.db.query(config.conn, sql, [queue_name, Status.to_string(:enqueued)])
+    Enum.map(result.rows, fn [key] -> key end)
+  end
+
+  @doc """
+  Whether `error` is a Postgres row-lock contention failure (`NOWAIT` finding a held lock), the
+  only error `Dbos.Queue.Runner` treats as retryable backoff rather than a logged failure, per
+  `notes/queues.md` §2.
+  """
+  def contention_error?(%{postgres: %{code: :lock_not_available}}), do: true
+  def contention_error?(_error), do: false
+
+  @doc """
+  Claims up to a concurrency- and rate-limit-derived number of `ENQUEUED` workflows from `queue`
+  for this executor, transitioning them to `PENDING`. Literal port of `DequeueWorkflows`,
+  `notes/queues.md` §2. `opts`: `:partition_key` (default `nil`), `:local_running_count` (default
+  `0`, the caller's in-process count of workflows already running for this queue/partition).
+  Returns a list of `%{workflow_id:, name:, inputs:, config_name:}`, `inputs` already decoded.
+  """
+  def dequeue_workflows(%Config{} = config, %Dbos.Queue{} = queue, opts \\ []) do
+    partition_key = Keyword.get(opts, :partition_key)
+    local_running_count = Keyword.get(opts, :local_running_count, 0)
+
+    isolation =
+      if queue.global_concurrency || queue.rate_limit, do: :repeatable_read, else: :read_committed
+
+    result =
+      config.db.transaction(config.conn, [isolation: isolation], fn conn ->
+        tx_config = %{config | conn: conn}
+        do_dequeue_workflows(tx_config, queue, partition_key, local_running_count)
+      end)
+
+    case result do
+      {:ok, workflows} -> workflows
+      {:error, :nothing_claimed} -> []
+    end
+  end
+
+  defp do_dequeue_workflows(config, queue, partition_key, local_running_count) do
+    with {:ok, num_recent} <- rate_limiter_precheck(config, queue, partition_key),
+         {:ok, max_tasks} <- concurrency_limit(config, queue, partition_key, local_running_count) do
+      candidate_ids = dequeue_candidate_ids(config, queue, partition_key, max_tasks)
+      claimed = claim_candidates(config, queue, candidate_ids, num_recent)
+
+      if claimed == [] do
+        config.db.rollback(config.conn, :nothing_claimed)
+      else
+        claimed
+      end
+    else
+      :rate_limited -> config.db.rollback(config.conn, :nothing_claimed)
+      :no_capacity -> config.db.rollback(config.conn, :nothing_claimed)
+    end
+  end
+
+  defp rate_limiter_precheck(_config, %Dbos.Queue{rate_limit: nil}, _partition_key), do: {:ok, 0}
+
+  defp rate_limiter_precheck(config, %Dbos.Queue{rate_limit: rate_limit} = queue, partition_key) do
+    cutoff_ms = System.os_time(:millisecond) - rate_limit.period_ms
+
+    {partition_sql, partition_params} = partition_clause(partition_key, 5)
+
+    sql = """
+    SELECT COUNT(*) FROM #{table(config, "workflow_status")}
+    WHERE queue_name = $1 AND rate_limited = TRUE
+      AND status NOT IN ($2, $3) AND started_at_epoch_ms > $4
+      #{partition_sql}
+    """
+
+    params =
+      [queue.name, Status.to_string(:enqueued), Status.to_string(:delayed), cutoff_ms] ++
+        partition_params
+
+    {:ok, %{rows: [[num_recent]]}} = config.db.query(config.conn, sql, params)
+
+    if num_recent >= rate_limit.limit, do: :rate_limited, else: {:ok, num_recent}
+  end
+
+  defp concurrency_limit(config, queue, partition_key, local_running_count) do
+    max_tasks =
+      -1
+      |> narrow_by_worker_concurrency(queue, local_running_count)
+      |> narrow_by_global_concurrency(config, queue, partition_key)
+
+    if max_tasks == 0, do: :no_capacity, else: {:ok, max_tasks}
+  end
+
+  defp narrow_by_worker_concurrency(max_tasks, %Dbos.Queue{worker_concurrency: nil}, _local),
+    do: max_tasks
+
+  defp narrow_by_worker_concurrency(max_tasks, %Dbos.Queue{worker_concurrency: limit}, local) do
+    available = max(limit - local, 0)
+    if max_tasks < 0 or available < max_tasks, do: available, else: max_tasks
+  end
+
+  defp narrow_by_global_concurrency(
+         max_tasks,
+         _config,
+         %Dbos.Queue{global_concurrency: nil},
+         _pk
+       ),
+       do: max_tasks
+
+  defp narrow_by_global_concurrency(
+         max_tasks,
+         config,
+         %Dbos.Queue{global_concurrency: limit} = queue,
+         partition_key
+       ) do
+    {partition_sql, partition_params} = partition_clause(partition_key, 3)
+
+    sql = """
+    SELECT COUNT(*) FROM #{table(config, "workflow_status")}
+    WHERE queue_name = $1 AND status = $2 #{partition_sql}
+    """
+
+    {:ok, %{rows: [[pending_count]]}} =
+      config.db.query(
+        config.conn,
+        sql,
+        [queue.name, Status.to_string(:pending)] ++ partition_params
+      )
+
+    available = max(limit - pending_count, 0)
+    if max_tasks < 0 or available < max_tasks, do: available, else: max_tasks
+  end
+
+  defp partition_clause(nil, _param_index), do: {"", []}
+  defp partition_clause("", _param_index), do: {"", []}
+
+  defp partition_clause(partition_key, param_index),
+    do: {"AND queue_partition_key = $#{param_index}", [partition_key]}
+
+  defp dequeue_candidate_ids(config, queue, partition_key, max_tasks) do
+    is_latest_version = latest_version?(config)
+    application_version = config.application_version
+
+    version_clause =
+      if is_latest_version,
+        do: "(application_version = $3 OR application_version IS NULL)",
+        else: "application_version = $3"
+
+    {partition_sql, partition_params} = partition_clause(partition_key, 4)
+
+    lock_clause =
+      if queue.global_concurrency == nil, do: "FOR UPDATE SKIP LOCKED", else: "FOR UPDATE NOWAIT"
+
+    limit_clause = if max_tasks >= 0, do: "LIMIT #{max_tasks}", else: ""
+
+    sql = """
+    SELECT workflow_uuid FROM #{table(config, "workflow_status")}
+    WHERE queue_name = $1 AND status = $2 AND #{version_clause}
+      #{partition_sql}
+    ORDER BY priority ASC, created_at ASC
+    #{lock_clause}
+    #{limit_clause}
+    """
+
+    params = [queue.name, Status.to_string(:enqueued), application_version] ++ partition_params
+
+    {:ok, result} = config.db.query(config.conn, sql, params)
+    Enum.map(result.rows, fn [id] -> id end)
+  end
+
+  defp latest_version?(config) do
+    case get_latest_application_version(config) do
+      :none -> true
+      {:ok, latest} -> latest == config.application_version
+    end
+  end
+
+  defp claim_candidates(config, queue, candidate_ids, num_recent) do
+    rate_limited = queue.rate_limit != nil
+
+    {claimed, _count} =
+      Enum.reduce_while(candidate_ids, {[], num_recent}, fn id, {claimed, count} ->
+        if rate_limited and count >= queue.rate_limit.limit do
+          {:halt, {claimed, count}}
+        else
+          case claim_one(config, id, rate_limited) do
+            nil -> {:cont, {claimed, count}}
+            workflow -> {:cont, {[workflow | claimed], count + 1}}
+          end
+        end
+      end)
+
+    Enum.reverse(claimed)
+  end
+
+  defp claim_one(config, workflow_id, rate_limited) do
+    now = System.os_time(:millisecond)
+
+    sql = """
+    UPDATE #{table(config, "workflow_status")}
+        SET status = $1, application_version = $2, executor_id = $3, started_at_epoch_ms = $4,
+            rate_limited = $5,
+            workflow_deadline_epoch_ms = CASE
+                WHEN workflow_timeout_ms IS NOT NULL AND workflow_deadline_epoch_ms IS NULL
+                THEN $4 + workflow_timeout_ms
+                ELSE workflow_deadline_epoch_ms
+            END
+        WHERE workflow_uuid = $6 AND status = $7
+        RETURNING name, inputs, serialization, config_name
+    """
+
+    params = [
+      Status.to_string(:pending),
+      config.application_version,
+      config.executor_id,
+      now,
+      rate_limited,
+      workflow_id,
+      Status.to_string(:enqueued)
+    ]
+
+    case config.db.query(config.conn, sql, params) do
+      {:ok, %{rows: [[name, inputs, _serialization, config_name]]}} ->
+        %{
+          workflow_id: workflow_id,
+          name: name,
+          inputs: decode_or_nil(inputs),
+          config_name: config_name
+        }
+
+      {:ok, %{rows: []}} ->
+        nil
+    end
   end
 
   defp handle_update_outcome_conflict(config, workflow_id) do
@@ -566,9 +1033,10 @@ defmodule Dbos.SystemDb do
         reconcile_operation_output_row(workflow_id, function_id, attrs, row)
 
       {:ok, %{rows: []}} ->
-        raise RuntimeError,
-          message:
-            "workflow #{workflow_id} step #{function_id}: conflicting checkpoint row was deleted concurrently"
+        raise Dbos.ConcurrentCheckpointConflictError,
+          workflow_id: workflow_id,
+          function_id: function_id,
+          reason: "conflicting checkpoint row was deleted concurrently"
     end
   end
 
@@ -603,9 +1071,10 @@ defmodule Dbos.SystemDb do
           recorded: stored_name
 
       true ->
-        raise RuntimeError,
-          message:
-            "workflow #{workflow_id} step #{function_id}: a concurrent execution already checkpointed this step"
+        raise Dbos.ConcurrentCheckpointConflictError,
+          workflow_id: workflow_id,
+          function_id: function_id,
+          reason: "a concurrent execution already checkpointed this step"
     end
   end
 
@@ -634,6 +1103,9 @@ defmodule Dbos.SystemDb do
 
   defp encode_or_nil(nil), do: nil
   defp encode_or_nil(term), do: Serialization.encode(term)
+
+  defp decode_or_nil(nil), do: nil
+  defp decode_or_nil(binary), do: Serialization.decode(binary)
 
   defp select_list(struct_module) do
     struct_module.columns() |> Enum.join(", ")

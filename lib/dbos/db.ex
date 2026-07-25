@@ -13,4 +13,6 @@ defmodule Dbos.DB do
   @callback transaction(conn, opts :: keyword, (conn -> term)) :: {:ok, term} | {:error, term}
 
   @callback in_transaction?(conn) :: boolean
+
+  @callback rollback(conn, reason :: term) :: no_return
 end

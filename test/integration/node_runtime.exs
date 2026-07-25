@@ -17,8 +17,12 @@ Code.require_file("support/workflows.ex", __DIR__)
     migrations: :verify,
     workflows: [
       {"hard_kill_workflow/1", {Dbos.Integration.Workflows, :hard_kill_workflow, 1}},
-      {"concurrent_start_workflow/1", {Dbos.Integration.Workflows, :concurrent_start_workflow, 1}}
-    ]
+      {"concurrent_start_workflow/1",
+       {Dbos.Integration.Workflows, :concurrent_start_workflow, 1}},
+      {"queue_competition_workflow/1",
+       {Dbos.Integration.Workflows, :queue_competition_workflow, 1}}
+    ],
+    queues: [Dbos.Queue.new("queue-competition", base_polling_interval_ms: 200)]
   )
 
 Process.sleep(:infinity)

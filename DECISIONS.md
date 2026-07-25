@@ -65,6 +65,21 @@ Recorded in `notes/`. Corrections to the original handoff document:
 | Child workflow start point | `Dbos.start/3`, called from inside a workflow, detects the ambient context via `Dbos.Runtime.in_workflow?/0` and reads its `Dbos.Config`/engine from `Dbos.Runtime.current_config/0` rather than from the caller's `opts[:engine]`. | A workflow body calling `Dbos.start` for a child should always target the same engine it is itself running under; requiring the body to know and repeat its own engine name would be redundant and error-prone. **Invented** — the reference has no concept of a separate "engine" to disambiguate, so there is no equivalent upstream behavior to match against. |
 | Workflow process failure handling | `Dbos.WorkflowProcess` classifies a rescued/caught failure by matching `%Dbos.WorkflowCancelledError{}` specifically (kind `:error`) and skips calling `update_workflow_outcome` entirely in that case, rather than calling it and relying on its own cancellation guard. `update_workflow_outcome`'s own `WorkflowCancelledError` (raised if the row was cancelled concurrently, underneath the call) is also rescued and treated as `:ok`. | Belt-and-suspenders: covers both "the body itself observed cancellation and raised" and "cancellation landed in the gap between the body finishing and the outcome write," per `notes/engine-core.md` §5. |
 
+## Dead-executor recovery (agreed, to build in Phase 3)
+
+The reference has no executor heartbeat and no liveness table. `recoverPendingWorkflows(ctx, executorIDs)` takes a list of executor ids, boot calls it with its own, and `POST /dbos-workflow-recovery` lets an operator name any others. Deciding who is dead belongs to the Conductor control plane, which is out of scope. The BEAM already knows when a node dies, so we close the gap ourselves.
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Reclaim primitive | `Dbos.Recovery.reclaim/2` takes a list of executor ids, matching upstream's signature. `recover_pending/1` becomes the special case of "my own id". | Restores the upstream primitive we had narrowed. |
+| Node to executor mapping | A `:pg` group per engine carrying `{node, executor_id}` pairs, cached locally by every engine and refreshed on join. Nothing persisted. | One node can host several engines with distinct executor ids, so the mapping is many-to-one. Keeps the schema untouched. |
+| Detection | `:net_kernel.monitor_nodes`, behind an opt-in flag. | Immediate and exact. A heartbeat table is slower, chattier, and equally wrong when a node pauses. The engine must never require distributed Erlang. |
+| Orphan sweep | Periodic scan for `PENDING` rows whose `executor_id` is absent from the live roster and whose `updated_at` exceeds a conservative threshold. Off by default. | Covers executors no live node ever saw: a whole-cluster restart, or a pod that is permanently gone. The only piece needing a time heuristic, so it stays a slow safety net. |
+| Choosing the survivor | No election. Every survivor may run `UPDATE ... WHERE executor_id = ANY($dead) AND status = 'PENDING' LIMIT $batch RETURNING ...` and redispatch only the rows its own statement returned. | The UPDATE is the serialization point, so the database decides atomically. The `LIMIT` spreads a dead node's backlog across whoever is polling, the same shape as `DequeueWorkflows`. |
+| Queued workflows | Excluded from reclaim. They go through `ClearQueueAssignment` back to `ENQUEUED` and the queue redistributes them. | The queue already balances work. |
+
+Accepted risk: under a network partition each side sees the other as dead and both reclaim, so a step body can run twice on two live nodes. `owner_xid` detects this after the fact. A quorum would trade it for refusing to recover during a partition, which is its own outage.
+
 ## Deviations and invented behavior needing review
 
 - `max_recovery_attempts` as an engine-level `Dbos.Config` field (see table above) — the reference has no equivalent single knob; a later phase should replace this with whatever per-workflow retry configuration surface it introduces.

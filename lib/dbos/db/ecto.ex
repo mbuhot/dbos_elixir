@@ -39,6 +39,9 @@ if Code.ensure_loaded?(Ecto) do
     @impl Dbos.DB
     def in_transaction?(repo), do: repo.in_transaction?()
 
+    @impl Dbos.DB
+    def rollback(repo, reason), do: repo.rollback(reason)
+
     defp set_isolation_level(_repo, nil), do: :ok
 
     defp set_isolation_level(repo, isolation) do

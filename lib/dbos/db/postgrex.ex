@@ -34,6 +34,9 @@ defmodule Dbos.DB.Postgrex do
   @impl Dbos.DB
   def in_transaction?(conn), do: DBConnection.status(conn) == :transaction
 
+  @impl Dbos.DB
+  def rollback(conn, reason), do: Postgrex.rollback(conn, reason)
+
   defp set_isolation_level(_conn, nil), do: :ok
 
   defp set_isolation_level(conn, isolation) do

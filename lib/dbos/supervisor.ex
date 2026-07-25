@@ -9,14 +9,16 @@ defmodule Dbos.Supervisor do
 
   alias Dbos.Config
   alias Dbos.Migrator
+  alias Dbos.SystemDb
   alias Dbos.Version
   alias Dbos.WorkflowSup
 
   @doc """
   Starts the engine. `opts`: `:name` (default `Dbos`), `:db` (`{adapter_module, conn}`),
   `:executor_id`, `:application_version`, `:schema` (default `"dbos"`), `:workflows` (a list of
-  `{name, {module, function, arity}}`), `:migrations` (`:verify` (default), `:create_if_absent`,
-  or `:skip`), `:max_recovery_attempts` (default `3`).
+  `{name, {module, function, arity}}`), `:queues` (a list of `Dbos.Queue`, default `[]`),
+  `:migrations` (`:verify` (default), `:create_if_absent`, or `:skip`), `:max_recovery_attempts`
+  (default `3`).
   """
   def start_link(opts) do
     name = Keyword.get(opts, :name, Dbos)
@@ -41,12 +43,16 @@ defmodule Dbos.Supervisor do
 
     Dbos.put_config(config)
     run_migrations(Keyword.get(opts, :migrations, :verify), config)
+    SystemDb.create_application_version(config, config.application_version)
+
+    queues = Keyword.get(opts, :queues, [])
 
     children = [
       {Dbos.Registry, name: name, workflows: workflows},
       {Registry, keys: :unique, name: WorkflowSup.process_registry_name(name)},
       {WorkflowSup, name: name},
-      {Dbos.Recovery, name: name}
+      {Dbos.Recovery, name: name},
+      {Dbos.Queue.Sup, name: name, queues: queues}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

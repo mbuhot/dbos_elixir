@@ -77,6 +77,48 @@ defmodule Dbos.NotInWorkflowError do
   end
 end
 
+defmodule Dbos.InvalidQueueOptionError do
+  @moduledoc "Raised when a `Dbos.Queue` configuration is invalid, per `notes/queues.md` §1."
+
+  defexception [:reason]
+
+  @impl true
+  def message(%__MODULE__{reason: reason}), do: "invalid queue configuration: #{reason}"
+end
+
+defmodule Dbos.QueueDeduplicatedError do
+  @moduledoc """
+  Raised when an enqueue's deduplication id already has a live holder on the same queue, per
+  `notes/queues.md` §10.
+  """
+
+  defexception [:workflow_id, :queue_name, :deduplication_id]
+
+  @impl true
+  def message(%__MODULE__{
+        workflow_id: workflow_id,
+        queue_name: queue_name,
+        deduplication_id: deduplication_id
+      }) do
+    "workflow #{workflow_id} was not enqueued: deduplication id #{inspect(deduplication_id)} " <>
+      "is already held on queue #{inspect(queue_name)}"
+  end
+end
+
+defmodule Dbos.ConcurrentCheckpointConflictError do
+  @moduledoc """
+  Raised when a step checkpoint write races another write for the same `(workflow_uuid,
+  function_id)` and neither is a byte-for-byte match, per `notes/engine-core.md` §3.
+  """
+
+  defexception [:workflow_id, :function_id, :reason]
+
+  @impl true
+  def message(%__MODULE__{workflow_id: workflow_id, function_id: function_id, reason: reason}) do
+    "workflow #{workflow_id} step #{function_id}: #{reason}"
+  end
+end
+
 defmodule Dbos.MaxStepRetriesExceededError do
   @moduledoc """
   Raised when a step exhausts its configured retry budget. Mirrors upstream's

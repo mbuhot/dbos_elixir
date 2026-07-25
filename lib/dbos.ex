@@ -40,6 +40,42 @@ defmodule Dbos do
   end
 
   @doc """
+  Enqueues a workflow onto `opts[:queue_name]` rather than starting it directly: the row is
+  inserted `ENQUEUED` (or `DELAYED` if `opts[:delay_ms]` is a positive integer, promoted to
+  `ENQUEUED` by `Dbos.Queue.Runner`'s per-tick sweep once it elapses) and a `Dbos.Queue.Runner`
+  claims and dispatches it later. `opts`: `:queue_name` (required), `:engine` (default `Dbos`),
+  `:workflow_id`, `:priority` (default `0`, lower runs first), `:deduplication_id`,
+  `:partition_key`, `:delay_ms`, `:application_version`. `:deduplication_id` and `:partition_key`
+  are mutually exclusive. Raises `Dbos.QueueDeduplicatedError` if `:deduplication_id` is already
+  held by another workflow on the same queue.
+  """
+  def enqueue(name_or_capture, args, opts \\ []) do
+    if Keyword.has_key?(opts, :deduplication_id) and Keyword.has_key?(opts, :partition_key) do
+      raise ArgumentError, "deduplication_id and partition_key cannot be used together"
+    end
+
+    engine = Keyword.get(opts, :engine, Dbos)
+    config = config(engine)
+    {name, _mfa} = resolve_workflow(engine, name_or_capture)
+    queue_name = Keyword.fetch!(opts, :queue_name)
+
+    params = %{
+      workflow_id: Keyword.get_lazy(opts, :workflow_id, &Uuid.v4/0),
+      name: name,
+      queue_name: queue_name,
+      inputs: args,
+      priority: Keyword.get(opts, :priority, 0),
+      deduplication_id: Keyword.get(opts, :deduplication_id),
+      queue_partition_key: Keyword.get(opts, :partition_key),
+      delay_ms: Keyword.get(opts, :delay_ms),
+      application_version: Keyword.get(opts, :application_version, config.application_version)
+    }
+
+    {:ok, workflow_id} = SystemDb.insert_enqueued_workflow(config, params)
+    {:ok, %WorkflowHandle{engine: engine, workflow_id: workflow_id}}
+  end
+
+  @doc """
   Polls `workflow_status` until `handle`'s workflow reaches a terminal status, returning
   `{:ok, output}`, `{:error, exception}`, or `{:error, :timeout}`. `opts[:poll_interval_ms]`
   defaults to `100`; `opts[:timeout_ms]`, if given, bounds how long this call waits.
