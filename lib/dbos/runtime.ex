@@ -325,7 +325,14 @@ defmodule Dbos.Runtime do
 
         Task.start(fn ->
           Process.sleep(remaining_ms)
-          Dbos.cancel(workflow_id, engine: engine)
+
+          try do
+            Dbos.cancel(workflow_id, engine: engine)
+          rescue
+            _ -> :ok
+          catch
+            _, _ -> :ok
+          end
         end)
 
         :ok

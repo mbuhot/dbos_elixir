@@ -41,6 +41,53 @@ defmodule Dbos.SampleWorkflows do
     result
   end
 
+  @doc "Bumps `table`'s `:count` entry once per invocation, for asserting a workflow body ran exactly once."
+  def counting_workflow(table) do
+    :ets.update_counter(table, :count, {2, 1}, {:count, 0})
+  end
+
+  @doc """
+  Starts a `counting_workflow/1` child then kills itself, but only the first time it runs: a
+  replay after recovery finds the same child (already recorded) and awaits it instead, for
+  crash-and-recover tests.
+  """
+  def spawn_child_and_die(table) do
+    {:ok, handle} = Dbos.start("counting_child/1", [table])
+
+    case :ets.insert_new(table, {:crashed_once, true}) do
+      true -> Process.exit(self(), :kill)
+      false -> Dbos.await(handle)
+    end
+  end
+
+  @doc """
+  Registers its own pid under a fresh `{:pid, tag}` slot in `table`, then checkpoints step 0
+  directly (bypassing the check-first replay path) with `tag` as the output, and blocks on
+  `:go`. Two concurrent executions of the same workflow id race to checkpoint the same step;
+  the loser observes `Dbos.ConcurrentCheckpointConflictError` before ever reaching the receive.
+  """
+  def gated_racing_step(table) do
+    tag = :ets.update_counter(table, :next_tag, 1, {:next_tag, -1})
+    :ets.insert(table, {{:pid, tag}, self()})
+
+    config = Dbos.Runtime.current_config()
+    workflow_id = Dbos.Runtime.current_workflow_id()
+    now = System.os_time(:millisecond)
+
+    Dbos.SystemDb.record_operation_result(config, %{
+      workflow_id: workflow_id,
+      function_id: 0,
+      function_name: "gated_racing_step/1",
+      output: Dbos.Serialization.encode(tag),
+      started_at: now,
+      completed_at: now
+    })
+
+    receive do
+      :go -> :ok
+    end
+  end
+
   def spawn_child_then_step(_arg) do
     {:ok, handle} = Dbos.start("add/2", [1, 2])
     {:ok, result} = Dbos.await(handle)

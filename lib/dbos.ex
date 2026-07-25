@@ -370,19 +370,22 @@ defmodule Dbos do
 
   defp start_root_workflow(config, engine, name, mfa, args, opts) do
     workflow_id = Keyword.get_lazy(opts, :workflow_id, &Uuid.v4/0)
+    owner_xid = Uuid.v4()
 
-    SystemDb.insert_workflow_status(config, %{
-      workflow_id: workflow_id,
-      status: :pending,
-      name: name,
-      inputs: args,
-      deduplication_id: Keyword.get(opts, :deduplication_id),
-      priority: Keyword.get(opts, :priority, 0),
-      application_version: Keyword.get(opts, :application_version, config.application_version),
-      workflow_timeout_ms: Keyword.get(opts, :timeout_ms)
-    })
+    result =
+      SystemDb.insert_workflow_status(config, %{
+        workflow_id: workflow_id,
+        status: :pending,
+        name: name,
+        inputs: args,
+        deduplication_id: Keyword.get(opts, :deduplication_id),
+        priority: Keyword.get(opts, :priority, 0),
+        application_version: Keyword.get(opts, :application_version, config.application_version),
+        workflow_timeout_ms: Keyword.get(opts, :timeout_ms),
+        owner_xid: owner_xid
+      })
 
-    {:ok, _pid} = WorkflowSup.start_workflow(engine, workflow_id, mfa, args)
+    maybe_start_workflow(engine, workflow_id, mfa, args, owner_xid, result)
 
     {:ok, %WorkflowHandle{engine: engine, workflow_id: workflow_id}}
   end
@@ -397,33 +400,57 @@ defmodule Dbos do
 
       :none ->
         child_id = Keyword.get(opts, :workflow_id, "#{parent_id}-#{step_id}")
+        owner_xid = Uuid.v4()
 
-        SystemDb.insert_workflow_status(config, %{
-          workflow_id: child_id,
-          status: :pending,
-          name: name,
-          inputs: args,
-          parent_workflow_id: parent_id,
-          application_version:
-            Keyword.get(opts, :application_version, config.application_version),
-          workflow_deadline_epoch_ms: Runtime.current_deadline_epoch_ms()
-        })
+        {:ok, result} =
+          config.db.transaction(config.conn, [], fn conn ->
+            tx_config = %{config | conn: conn}
 
-        {:ok, _pid} = WorkflowSup.start_workflow(engine, child_id, mfa, args)
+            insert_result =
+              SystemDb.insert_workflow_status(tx_config, %{
+                workflow_id: child_id,
+                status: :pending,
+                name: name,
+                inputs: args,
+                parent_workflow_id: parent_id,
+                application_version:
+                  Keyword.get(opts, :application_version, config.application_version),
+                workflow_deadline_epoch_ms: Runtime.current_deadline_epoch_ms(),
+                owner_xid: owner_xid
+              })
 
-        now = System.os_time(:millisecond)
+            now = System.os_time(:millisecond)
 
-        SystemDb.record_operation_result(config, %{
-          workflow_id: parent_id,
-          function_id: step_id,
-          function_name: name,
-          child_workflow_id: child_id,
-          started_at: now,
-          completed_at: now
-        })
+            SystemDb.record_operation_result(tx_config, %{
+              workflow_id: parent_id,
+              function_id: step_id,
+              function_name: name,
+              child_workflow_id: child_id,
+              started_at: now,
+              completed_at: now
+            })
+
+            insert_result
+          end)
+
+        maybe_start_workflow(engine, child_id, mfa, args, owner_xid, result)
 
         {:ok, %WorkflowHandle{engine: engine, workflow_id: child_id}}
     end
+  end
+
+  defp maybe_start_workflow(engine, workflow_id, mfa, args, owner_xid, result) do
+    unless skip_start?(engine, workflow_id, owner_xid, result) do
+      {:ok, _pid} = WorkflowSup.start_workflow(engine, workflow_id, mfa, args)
+    end
+
+    :ok
+  end
+
+  defp skip_start?(engine, workflow_id, owner_xid, result) do
+    result.status in [:success, :error] or
+      result.owner_xid != owner_xid or
+      match?({:ok, _pid}, WorkflowSup.whereis(engine, workflow_id))
   end
 
   defp poll_for_outcome(config, engine, workflow_id, poll_interval_ms, deadline) do

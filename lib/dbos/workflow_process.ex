@@ -13,6 +13,7 @@ defmodule Dbos.WorkflowProcess do
   alias Dbos.Serialization
   alias Dbos.SystemDb
   alias Dbos.Telemetry
+  alias Dbos.WorkflowHandle
   alias Dbos.WorkflowSup
 
   @doc "Starts the process for `process_args` (see `Dbos.WorkflowSup.start_workflow/5`)."
@@ -60,9 +61,17 @@ defmodule Dbos.WorkflowProcess do
   defp classify_failure(:error, %Dbos.WorkflowCancelledError{}, _stacktrace),
     do: :already_cancelled
 
+  defp classify_failure(:error, %Dbos.ConcurrentCheckpointConflictError{}, _stacktrace),
+    do: :concurrent_conflict
+
   defp classify_failure(kind, value, stacktrace), do: {:failure, kind, value, stacktrace}
 
   defp record_outcome(_config, _engine, _workflow_id, :already_cancelled), do: :ok
+
+  defp record_outcome(_config, engine, workflow_id, :concurrent_conflict) do
+    Dbos.await(%WorkflowHandle{engine: engine, workflow_id: workflow_id})
+    :ok
+  end
 
   defp record_outcome(config, engine, workflow_id, {:success, value}) do
     write_outcome(config, engine, workflow_id, %{

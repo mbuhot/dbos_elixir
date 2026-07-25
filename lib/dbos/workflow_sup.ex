@@ -56,12 +56,14 @@ defmodule Dbos.WorkflowSup do
     end
   end
 
-  @doc "The pid of the running workflow process for `workflow_id`, if any."
+  @doc "The pid of the running workflow process for `workflow_id`, if any. `:error` if the engine's process registry is no longer running."
   def whereis(engine_name, workflow_id) do
     case Registry.lookup(process_registry_name(engine_name), workflow_id) do
       [{pid, _queue_key}] -> {:ok, pid}
       [] -> :error
     end
+  rescue
+    ArgumentError -> :error
   end
 
   @doc "How many workflow processes are currently running for `queue_name`/`partition_key`."
