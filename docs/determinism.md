@@ -64,6 +64,33 @@ output or the workflow's own input — never from a live read of mutable state.
 | Direct repo calls outside a transactional step | Side effect with no checkpoint; re-runs for real on every replay | A transactional step |
 | Reading mutable module/application state (ETS, `Application.get_env` for values that can change, global counters, in-memory caches) | Value can differ between original run and replay | A step that reads and returns the value |
 
+## Enforced at compile time vs. guidance only
+
+`defworkflow` (`Dbos.Macros`, `Dbos.Determinism`) runs a compile-time checker over a workflow
+body's AST and rejects the following with a `CompileError` naming the call, the file/line, and
+the fix: `:rand.*`, `DateTime.utc_now`, `NaiveDateTime.utc_now`, `Date.utc_today`,
+`System.system_time`/`os_time`/`monotonic_time`/`unique_integer`, `Process.sleep`, `receive`,
+`spawn`/`spawn_link`/`spawn_monitor`, `Task.async`/`await`/`async_stream`/`start`, `send/2`,
+`make_ref`, and a direct call to the module passed as `use Dbos, repo: ...`. It also warns
+(suppressible with `use Dbos, warn_cross_module_calls: false`) on a call to a public function in
+another module that is not a registered `defstep`/`deftransaction`.
+
+`self()`-dependent logic, `node()`-dependent logic, and reads of mutable module/application state
+(ETS, `Application.get_env`, global counters, in-memory caches) are **not** mechanically detected
+— there is no fixed list of function names to match against (any expression can read `self()` or
+touch an ETS table), so these remain guidance enforced by code review, not the compiler. The
+banned-construct table above is the full contract either way; the checker automates the part of
+it that is a closed set of function names.
+
+## `mix dbos.explain`
+
+`mix dbos.explain Mod.function/arity` prints a `defworkflow`'s statically-derivable step-id
+sequence — which durable operation each step id maps to — and flags a `case`/`cond`/`if` whose
+branches consume a different number of ids, the "classic bug" from the Step IDs section below.
+Where the sequence depends on a call this tool cannot resolve to a step, a child workflow, or a
+control-flow construct it recurses into, it reports that position as indeterminate instead of
+guessing.
+
 ## Task is the quiet one
 
 A `Task` does not inherit the calling process's process dictionary. This engine tracks

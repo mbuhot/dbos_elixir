@@ -20,6 +20,16 @@ defmodule Dbos do
   alias Dbos.WorkflowSup
 
   @doc """
+  Brings in `defstep/2`, `deftransaction/2`, and `defworkflow/2` — see `Dbos.Macros`. `opts`:
+  `:repo`, `:warn_cross_module_calls` (default `true`).
+  """
+  defmacro __using__(opts) do
+    quote do
+      use Dbos.Macros, unquote(opts)
+    end
+  end
+
+  @doc """
   Starts a workflow. `name_or_capture` is either a registered workflow name, or a capture
   (`&Mod.fun/n`) resolved through the registry via `Function.info/1`. `args` is the list of
   positional arguments to apply. Called from inside a workflow, this starts a *child* workflow:

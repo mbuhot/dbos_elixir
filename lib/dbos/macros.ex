@@ -1,0 +1,293 @@
+defmodule Dbos.Macros do
+  @moduledoc """
+  `use Dbos` brings in `defstep/2`, `deftransaction/2`, and `defworkflow/2`, per `DECISIONS.md`.
+  `defstep`/`deftransaction` wrap a plain function body in `Dbos.Runtime.run_step/3` /
+  `Dbos.transaction/3`; `defworkflow` additionally runs `Dbos.Determinism.check!/2` over the body
+  at compile time and generates a durable dispatcher (`DECISIONS.md`'s "bare workflow call").
+
+  `defworkflow` calls are captured (not expanded immediately) and processed once, in
+  `@before_compile`, alongside every other `defworkflow` in the module — this is deliberate, not
+  incidental: reading a plain `Module.put_attribute/3` write back out from a *later*, separately
+  macro-expanded top-level form is unreliable in this compiler (each top-level form's compile-time
+  side effects are only guaranteed visible once the whole module's forms have all been processed),
+  so anything that must see "every `defworkflow` in this module" — the determinism checker's
+  repo/warn config, and duplicate-name-or-arity detection — has to run after every form has been
+  captured via a real `@attr` push, not read speculatively mid-module.
+
+  `use Dbos` options: `:repo` — the module direct calls to which are banned inside a workflow
+  body (see `docs/determinism.md`); `:warn_cross_module_calls` (default `true`) — set `false` to
+  suppress the undeclared-cross-module-call warning for the whole module.
+  """
+
+  defmacro __using__(opts) do
+    repo = Keyword.get(opts, :repo)
+    warn_cross_module_calls = Keyword.get(opts, :warn_cross_module_calls, true)
+
+    quote do
+      import Dbos.Macros,
+        only: [
+          defstep: 2,
+          defstep: 3,
+          deftransaction: 2,
+          deftransaction: 3,
+          defworkflow: 2,
+          defworkflow: 3
+        ]
+
+      Module.register_attribute(__MODULE__, :dbos_steps, accumulate: true)
+      Module.register_attribute(__MODULE__, :dbos_workflow_defs, accumulate: true)
+      @dbos_repo unquote(repo)
+      @dbos_warn_cross_module_calls unquote(warn_cross_module_calls)
+
+      @before_compile Dbos.Macros
+    end
+  end
+
+  defmacro __before_compile__(env) do
+    steps = env.module |> Module.get_attribute(:dbos_steps, []) |> List.wrap() |> Enum.reverse()
+
+    workflow_defs =
+      env.module |> Module.get_attribute(:dbos_workflow_defs, []) |> List.wrap() |> Enum.reverse()
+
+    repo = Module.get_attribute(env.module, :dbos_repo)
+
+    warn_cross_module_calls =
+      Module.get_attribute(env.module, :dbos_warn_cross_module_calls, true)
+
+    reject_duplicate_workflows!(workflow_defs, env)
+
+    {workflow_asts, workflows_meta} =
+      workflow_defs
+      |> Enum.map(&build_workflow(&1, env, repo, warn_cross_module_calls))
+      |> Enum.unzip()
+
+    quote do
+      unquote_splicing(workflow_asts)
+
+      @doc "This module's registered workflows: `[{name, {module, function, arity}}]`."
+      def __dbos_workflows__, do: unquote(Macro.escape(workflows_meta))
+
+      @doc false
+      def __dbos_steps__, do: unquote(Macro.escape(steps))
+    end
+  end
+
+  @doc """
+  Wraps `call`'s body in `Dbos.Runtime.run_step/3`. The step name defaults to `"name/arity"`
+  (module excluded, per `DECISIONS.md`); override with `name:`. Any other option
+  (`:max_retries`, `:base_interval_ms`, `:backoff_factor`, `:max_interval_ms`) is forwarded to
+  `Dbos.RetryPolicy`.
+  """
+  defmacro defstep(call, do_block), do: build_step(call, do_block)
+  defmacro defstep(call, opts, do_block), do: build_step(call, Keyword.merge(opts, do_block))
+
+  @doc """
+  Wraps `call`'s body in `Dbos.transaction/3`. The step name defaults to `"name/arity"`; override
+  with `name:`. `opts[:isolation]` is forwarded to `Dbos.transaction/3`.
+  """
+  defmacro deftransaction(call, do_block), do: build_transaction(call, do_block)
+
+  defmacro deftransaction(call, opts, do_block),
+    do: build_transaction(call, Keyword.merge(opts, do_block))
+
+  @doc """
+  Defines a durable workflow. `name:` is required (recovery dispatches on it). Generates two
+  functions: the workflow body (run by the engine, under a generated internal name) and a public
+  dispatcher under `call`'s own name/arity — the "bare workflow call" from `DECISIONS.md`: inside
+  a workflow it starts and awaits a child workflow; outside one it starts and awaits a root
+  workflow; with the engine not started, `Dbos.start/3` raises `Dbos.NotStartedError`.
+
+  Runs `Dbos.Determinism.check!/2` over the body at compile time. Does not support a `when` guard
+  on the head (a workflow's name must map to exactly one deterministic body — see
+  `docs/determinism.md`); does support default arguments.
+  """
+  defmacro defworkflow(call, do_block), do: capture_workflow(call, do_block, __CALLER__)
+
+  defmacro defworkflow(call, opts, do_block) do
+    capture_workflow(call, Keyword.merge(opts, do_block), __CALLER__)
+  end
+
+  @doc """
+  Runtime support for a bare workflow call, per `DECISIONS.md`: starts `name` with `args`
+  (a child workflow if called from inside a workflow context, a root workflow otherwise) and
+  blocks for its result, returning the unwrapped value or re-raising the recorded exception.
+  """
+  def dispatch_workflow(name, args) do
+    {:ok, handle} = Dbos.start(name, args)
+
+    case Dbos.await(handle) do
+      {:ok, value} -> value
+      {:error, exception} -> raise exception
+    end
+  end
+
+  defp build_step(call, opts) do
+    {block, extra_opts} = Keyword.pop!(opts, :do)
+    {fun_name, arity} = head_name_arity(call)
+    step_name = Keyword.get(extra_opts, :name, "#{fun_name}/#{arity}")
+    run_opts = Keyword.delete(extra_opts, :name)
+
+    quote do
+      @dbos_steps {unquote(step_name), {unquote(fun_name), unquote(arity)}}
+      def unquote(call), do: unquote(wrap_run_step(step_name, run_opts, block))
+    end
+  end
+
+  defp build_transaction(call, opts) do
+    {block, extra_opts} = Keyword.pop!(opts, :do)
+    {fun_name, arity} = head_name_arity(call)
+    step_name = Keyword.get(extra_opts, :name, "#{fun_name}/#{arity}")
+    run_opts = Keyword.delete(extra_opts, :name)
+
+    quote do
+      @dbos_steps {unquote(step_name), {unquote(fun_name), unquote(arity)}}
+      def unquote(call), do: unquote(wrap_transaction(step_name, run_opts, block))
+    end
+  end
+
+  defp wrap_run_step(step_name, run_opts, block) do
+    quote do
+      Dbos.Runtime.run_step(unquote(step_name), unquote(run_opts), fn -> unquote(block) end)
+    end
+  end
+
+  defp wrap_transaction(step_name, run_opts, block) do
+    quote do
+      Dbos.transaction(unquote(step_name), unquote(run_opts), fn _conn -> unquote(block) end)
+    end
+  end
+
+  defp capture_workflow(call, opts, env) do
+    quote do
+      @dbos_workflow_defs {unquote(Macro.escape(call)), unquote(Macro.escape(opts)),
+                           unquote(env.line)}
+    end
+  end
+
+  defp build_workflow({call, opts, line}, env, repo, warn_cross_module_calls) do
+    {block, extra_opts} = Keyword.pop!(opts, :do)
+
+    reject_guard!(call, env, line)
+    {fun_name, args, arity} = workflow_head_info(call)
+    name = fetch_required_name!(extra_opts, fun_name, arity, env, line)
+
+    Dbos.Determinism.check!(block, %{
+      env: env,
+      workflow_name: name,
+      repo: repo,
+      warn_cross_module_calls: warn_cross_module_calls
+    })
+
+    body_fun = body_function_name(fun_name)
+    dispatcher_head = build_dispatcher_head(fun_name, args)
+    forward_args = dispatcher_forward_args(dispatcher_head)
+    body_head = {body_fun, [], strip_defaults(args)}
+
+    ast =
+      quote do
+        @doc false
+        def unquote(body_head), do: unquote(block)
+
+        def unquote(dispatcher_head) do
+          Dbos.Macros.dispatch_workflow(unquote(name), unquote(forward_args))
+        end
+      end
+
+    {ast, {name, {env.module, body_fun, arity}, block}}
+  end
+
+  defp reject_duplicate_workflows!(workflow_defs, env) do
+    workflow_defs
+    |> Enum.map(fn {call, _opts, line} ->
+      {fun_name, _args, arity} = workflow_head_info(call)
+      {{fun_name, arity}, line}
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.each(fn
+      {{_fun_name, _arity}, [_one]} ->
+        :ok
+
+      {{fun_name, arity}, lines} ->
+        raise CompileError,
+          file: env.file,
+          line: Enum.max(lines),
+          description:
+            "defworkflow #{fun_name}/#{arity} is declared more than once in " <>
+              "#{inspect(env.module)} (lines #{Enum.join(Enum.sort(lines), ", ")}). Multiple " <>
+              "defworkflow clauses for the same name/arity are not supported — each workflow " <>
+              "name must map to exactly one body. Give each a distinct name/arity, or fold the " <>
+              "branching into a single #{fun_name}/#{arity} body."
+    end)
+  end
+
+  defp head_name_arity({:when, _, [inner, _guard]}), do: head_name_arity(inner)
+  defp head_name_arity({name, _, args}) when is_atom(name), do: {name, length(args || [])}
+
+  defp workflow_head_info({name, _, args}) when is_atom(name) do
+    args = args || []
+    {name, args, length(args)}
+  end
+
+  defp reject_guard!(call, env, line) do
+    case call do
+      {:when, _, [{name, _, args}, _guard]} ->
+        raise CompileError,
+          file: env.file,
+          line: line,
+          description:
+            "defworkflow #{name}/#{length(args || [])} cannot have a `when` guard: a workflow " <>
+              "name must dispatch to exactly one deterministic body. Move the branching inside " <>
+              "the workflow body instead."
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp fetch_required_name!(extra_opts, fun_name, arity, env, line) do
+    case Keyword.fetch(extra_opts, :name) do
+      {:ok, name} ->
+        name
+
+      :error ->
+        raise CompileError,
+          file: env.file,
+          line: line,
+          description:
+            "defworkflow #{fun_name}/#{arity} requires a name: option — recovery dispatches on " <>
+              "the workflow's name, not its module/function, so it cannot default. Add " <>
+              "`name: \"#{fun_name}\"` (or another stable string) to the defworkflow declaration."
+    end
+  end
+
+  defp body_function_name(fun_name), do: :"#{fun_name}__dbos_workflow_body__"
+
+  defp build_dispatcher_head(fun_name, args) do
+    dispatcher_args =
+      args
+      |> Enum.with_index()
+      |> Enum.map(fn
+        {{:\\, meta, [_pattern, default]}, index} ->
+          {:\\, meta, [Macro.var(:"arg#{index}", nil), default]}
+
+        {_pattern, index} ->
+          Macro.var(:"arg#{index}", nil)
+      end)
+
+    {fun_name, [], dispatcher_args}
+  end
+
+  defp dispatcher_forward_args({_fun_name, _meta, dispatcher_args}) do
+    Enum.map(dispatcher_args, fn
+      {:\\, _, [var, _default]} -> var
+      var -> var
+    end)
+  end
+
+  defp strip_defaults(args) do
+    Enum.map(args, fn
+      {:\\, _, [pattern, _default]} -> pattern
+      pattern -> pattern
+    end)
+  end
+end

@@ -44,7 +44,7 @@ defmodule Dbos.Supervisor do
   def init(opts) do
     name = Keyword.get(opts, :name, Dbos)
     {db_module, conn} = Keyword.fetch!(opts, :db)
-    workflows = Keyword.get(opts, :workflows, [])
+    workflows = opts |> Keyword.get(:workflows, []) |> Enum.flat_map(&normalize_workflow_entry/1)
 
     cluster_opts = Keyword.get(opts, :cluster, [])
     orphan_sweep_opts = Keyword.get(cluster_opts, :orphan_sweep, [])
@@ -125,4 +125,10 @@ defmodule Dbos.Supervisor do
   end
 
   defp process_name(name), do: Module.concat(name, Supervisor)
+
+  defp normalize_workflow_entry({_name, {_module, _fun, _arity}} = entry), do: [entry]
+
+  defp normalize_workflow_entry(module) when is_atom(module) do
+    Enum.map(module.__dbos_workflows__(), fn {name, mfa, _ast} -> {name, mfa} end)
+  end
 end
