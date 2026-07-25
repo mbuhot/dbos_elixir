@@ -112,7 +112,7 @@ defmodule Dbos.AdminServer.Router do
       |> maybe_put(:application_version, params["application_version"])
       |> maybe_put(:limit, params["limit"])
       |> maybe_put(:offset, params["offset"])
-      |> maybe_put(:status, single_status(params["status"]))
+      |> maybe_put(:status, parse_status(params["status"]))
       |> Keyword.put(:sort, if(params["sort_desc"] == false, do: :asc, else: :desc))
       |> Keyword.put(:queues_only, queues_only)
 
@@ -120,9 +120,9 @@ defmodule Dbos.AdminServer.Router do
     json(200, Enum.map(workflows, &Render.workflow/1))
   end
 
-  defp single_status(nil), do: nil
-  defp single_status(list) when is_list(list), do: list |> List.first() |> Status.from_string()
-  defp single_status(one), do: Status.from_string(one)
+  defp parse_status(nil), do: nil
+  defp parse_status(list) when is_list(list), do: Enum.map(list, &Status.from_string/1)
+  defp parse_status(one), do: Status.from_string(one)
 
   defp internal_queue, do: %Dbos.Queue{name: Dbos.Queue.internal_queue_name()}
 

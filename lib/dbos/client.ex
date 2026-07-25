@@ -22,7 +22,7 @@ defmodule Dbos.Client do
   @doc "Fetches one workflow's status by id."
   def status(config, workflow_id), do: SystemDb.get_workflow_status(config, workflow_id)
 
-  @doc "Lists workflows matching the given filters."
+  @doc "Lists workflows matching the given filters; see `Dbos.SystemDb.list_workflows/2`."
   def list(config, opts \\ []), do: SystemDb.list_workflows(config, opts)
 
   @doc "Returns a workflow's checkpointed steps, ordered by `function_id`."

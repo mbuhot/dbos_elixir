@@ -102,6 +102,36 @@ defmodule Dbos.SystemDbTest do
     assert Enum.map(results, & &1.workflow_uuid) == [wf_a, wf_b]
   end
 
+  test "list_workflows filters by a list of statuses, returning exactly the union", %{
+    config: config
+  } do
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-pending",
+      status: :pending,
+      name: "W"
+    })
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-enqueued",
+      status: :enqueued,
+      name: "W",
+      queue_name: "q"
+    })
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-success",
+      status: :success,
+      name: "W"
+    })
+
+    {:ok, results} = SystemDb.list_workflows(config, status: [:pending, :enqueued], sort: :asc)
+
+    assert Enum.map(results, & &1.workflow_uuid) |> Enum.sort() == [
+             "wf-enqueued",
+             "wf-pending"
+           ]
+  end
+
   test "list_workflows respects limit and offset", %{config: config} do
     {:ok, wf_a} =
       SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1]})

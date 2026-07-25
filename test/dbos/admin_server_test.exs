@@ -103,6 +103,35 @@ defmodule Dbos.AdminServerTest do
     assert Enum.any?(listed, &(&1["workflow_uuid"] == handle.workflow_id))
   end
 
+  test "POST /workflows filters by status given as a JSON string or an array of strings" do
+    engine = start_engine([{"add/2", {SampleWorkflows, :add, 2}}])
+    config = Dbos.config(engine)
+    port = AdminServer.port(engine)
+
+    {:ok, handle} = Dbos.start("add/2", [1, 2], engine: engine)
+    assert {:ok, 3} = Dbos.await(handle)
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-pending-admin",
+      status: :pending,
+      name: "add/2"
+    })
+
+    assert {200, string_body} =
+             post(port, "/workflows", JSON.encode!(%{"status" => "SUCCESS"}))
+
+    string_results = JSON.decode!(string_body)
+    assert Enum.map(string_results, & &1["workflow_uuid"]) == [handle.workflow_id]
+
+    assert {200, array_body} =
+             post(port, "/workflows", JSON.encode!(%{"status" => ["SUCCESS", "PENDING"]}))
+
+    array_results = JSON.decode!(array_body)
+
+    assert Enum.map(array_results, & &1["workflow_uuid"]) |> Enum.sort() ==
+             Enum.sort(["wf-pending-admin", handle.workflow_id])
+  end
+
   test "GET /workflows/{id} for an unknown id returns 404" do
     engine = start_engine([{"add/2", {SampleWorkflows, :add, 2}}])
     port = AdminServer.port(engine)

@@ -129,7 +129,7 @@ defmodule Dbos.SystemDb do
     end
   end
 
-  @doc "Lists workflows matching the given filters."
+  @doc "Lists workflows matching the given filters; `:status`, `:name`, `:queue_name`, `:executor_id`, and `:application_version` each accept a single value or a list."
   def list_workflows(%Config{} = config, opts \\ []) do
     {where_sql, where_params} = list_workflows_where(opts)
     {limit_offset_sql, all_params} = list_workflows_limit_offset(opts, where_params)
@@ -2025,8 +2025,8 @@ defmodule Dbos.SystemDb do
         case Keyword.fetch(opts, key) do
           {:ok, value} ->
             param_index = length(params) + 1
-            column_clause = build_clause(condition, param_index)
-            {clauses ++ [column_clause], params ++ [cast.(value)]}
+            {casted_value, column_clause} = build_clause(condition, param_index, cast, value)
+            {clauses ++ [column_clause], params ++ [casted_value]}
 
           :error ->
             {clauses, params}
@@ -2042,12 +2042,21 @@ defmodule Dbos.SystemDb do
     {where_sql, params}
   end
 
-  defp build_clause(condition, param_index) do
-    if String.contains?(condition, " ") do
-      "#{condition} $#{param_index}"
-    else
-      "#{condition} = $#{param_index}"
-    end
+  defp build_clause(condition, param_index, cast, value) when is_list(value) do
+    {Enum.map(value, cast), "#{condition} = ANY($#{param_index})"}
+  end
+
+  defp build_clause(condition, param_index, cast, value) do
+    casted_value = cast.(value)
+
+    column_clause =
+      if String.contains?(condition, " ") do
+        "#{condition} $#{param_index}"
+      else
+        "#{condition} = $#{param_index}"
+      end
+
+    {casted_value, column_clause}
   end
 
   defp list_workflows_limit_offset(opts, params) do
