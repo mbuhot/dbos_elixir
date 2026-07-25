@@ -18,8 +18,6 @@ Application.put_env(:outbox, Outbox.Repo,
 migrations_path = Path.join([__DIR__, "..", "priv", "repo", "migrations"])
 Ecto.Migrator.run(Outbox.Repo, migrations_path, :up, all: true)
 
-Dbos.Migrator.create!(%Dbos.Config{db: Dbos.DB.Ecto, conn: Outbox.Repo})
-
 Ecto.Adapters.SQL.Sandbox.mode(Outbox.Repo, :manual)
 
 ExUnit.start()

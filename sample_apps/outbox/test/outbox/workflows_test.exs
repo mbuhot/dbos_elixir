@@ -17,7 +17,7 @@ defmodule Outbox.WorkflowsTest do
        db: {Dbos.DB.Ecto, Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Outbox.Workflows],
-       migrations: :skip,
+       migrations: :verify,
        testing: :inline}
     )
 

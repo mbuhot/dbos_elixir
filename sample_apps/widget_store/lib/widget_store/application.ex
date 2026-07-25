@@ -11,7 +11,7 @@ defmodule WidgetStore.Application do
        name: Dbos,
        db: {Dbos.DB.Ecto, WidgetStore.Repo},
        workflows: [WidgetStore.Checkout],
-       migrations: :create_if_absent}
+       migrations: :verify}
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: WidgetStore.Supervisor)

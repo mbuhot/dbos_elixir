@@ -11,7 +11,7 @@ defmodule Outbox.Application do
        name: Dbos,
        db: {Dbos.DB.Ecto, Outbox.Repo},
        workflows: [Outbox.Workflows],
-       migrations: :create_if_absent,
+       migrations: :verify,
        scheduler_poll_interval_ms: 1_000}
     ]
 

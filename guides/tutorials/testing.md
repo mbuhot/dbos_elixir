@@ -177,9 +177,22 @@ exist once real background processes are racing each other:
 - Two executors competing for the same `PENDING` row, or a lease actually expiring.
 - Background timing: a queue runner's polling interval, the scheduler's cron reconciliation, a
   lease's renewal cadence.
+- `workflow_timeout_ms` cancelling a workflow on the wall clock. `resolve_workflow_deadline`
+  still resolves and persists `workflow_deadline_epoch_ms` on the row, so a test can assert on
+  it — but no background task is armed to call `Dbos.cancel/2` once it passes. An
+  `:inline`/`:manual` workflow runs to completion inside one call, so a wall-clock deadline
+  racing that call has nothing meaningful to enforce; test cancellation directly with
+  `Dbos.cancel/2` instead.
 
 Those need a real, running engine against a real database with no testing mode set — which is
 exactly what `Dbos`'s own suite (`test/test_helper.exs`, `test/support/case.ex`) uses throughout.
+
+Reading an open stream with nothing left to read behaves like `recv_message/2` and `get_event/4`:
+it raises `Dbos.TestingModeWaitError` immediately rather than blocking on `Dbos.Notifications`.
+Write the stream (and close it, if the test needs a terminated read) before reading it back, the
+same send-before-run pattern used for messages and events. A stream whose producing workflow has
+already reached a terminal status reads back whatever was written and stops, closed sentinel or
+not — that fallback applies in every mode, not just testing.
 
 ## Asserting on checkpoints
 

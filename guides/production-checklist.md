@@ -6,12 +6,13 @@ onward to the document that already covers the details.
 ## Schema migration and verify-at-launch
 
 `Dbos.Migrator.verify!/1` checks `<schema>.dbos_migrations.version` is exactly the version this
-port targets (`42`) and **raises**, refusing to start, on anything else — a wrong-version schema
+engine targets (`42`) and **raises**, refusing to start, on anything else — a wrong-version schema
 would checkpoint into tables whose shape the engine doesn't actually match.
 
-- Use `migrations: :verify` (the default) in production. Apply and review schema changes through
-  your own deploy pipeline, the same way you'd handle any other migration. Reserve
-  `:create_if_absent` for local dev and quick starts.
+- Install the schema through `mix dbos.gen.migration` — an explicit migration in your own
+  sequence, reviewed and applied the same way as any other. Use `migrations: :verify` (the
+  default) in production so the engine only ever checks. Reserve `:create_if_absent` for local
+  dev and quick starts.
 - Full detail, including what each `:migrations` value does: `guides/integrating-dbos.md`,
   "Migration verification at launch".
 

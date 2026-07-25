@@ -34,14 +34,74 @@ defmodule Dbos.Migrator do
 
   The base schema and the extension tables are applied independently, each guarded by its own
   version marker, so a database holding only the base schema gains the extension tables alone.
+
+  A real deployment installs the schema through its own migration sequence instead — see
+  `Dbos.Migration` and `mix dbos.gen.migration`.
   """
   def create!(%Config{} = config) do
-    {base_sql, extension_sql} = schema_parts()
+    {base_sql, extension_sql} = schema_parts(config.schema)
 
     apply_unless_present(config, "dbos_migrations", base_sql)
     apply_unless_present(config, "extension_migrations", extension_sql)
 
     :ok
+  end
+
+  @doc """
+  Reads `priv/schema/dbos_schema.sql`, rewritten for `schema`, split into its base part and its
+  extension part (marked by `#{@extension_marker}`). Shared by `create!/1` and `Dbos.Migration`
+  so both apply the exact same statements, guarded the exact same way.
+  """
+  def schema_parts(schema \\ "dbos") do
+    sql =
+      schema_path()
+      |> File.read!()
+      |> rewrite_schema(schema)
+
+    case String.split(sql, @extension_marker, parts: 2) do
+      [base, extension] -> {base, @extension_marker <> extension}
+      [base] -> {base, ""}
+    end
+  end
+
+  @doc "Splits one `schema_parts/1` part into its individual SQL statements."
+  def statements(sql), do: split_statements(sql)
+
+  @doc """
+  The marker table's current version, or `{:error, :not_found}` if the table doesn't exist yet.
+  Safe to call inside an open transaction: existence is checked with `to_regclass`, which never
+  raises, before the table is queried.
+  """
+  def current_version(config, table) do
+    if table_exists?(config, table) do
+      sql = ~s(SELECT version FROM "#{config.schema}".#{table})
+
+      case config.db.query(config.conn, sql, []) do
+        {:ok, %{rows: [[version]]}} -> {:ok, version}
+        {:ok, %{rows: []}} -> {:error, :not_found}
+        {:error, _reason} -> {:error, :not_found}
+      end
+    else
+      {:error, :not_found}
+    end
+  end
+
+  defp table_exists?(config, table) do
+    sql = "SELECT to_regclass($1) IS NOT NULL"
+    qualified_name = ~s("#{config.schema}"."#{table}")
+
+    case config.db.query(config.conn, sql, [qualified_name]) do
+      {:ok, %{rows: [[exists]]}} -> exists
+      _other -> false
+    end
+  end
+
+  defp rewrite_schema(sql, "dbos"), do: sql
+
+  defp rewrite_schema(sql, schema) do
+    sql
+    |> String.replace(~s("dbos"), ~s("#{schema}"))
+    |> String.replace("'dbos'", "'#{schema}'")
   end
 
   defp apply_unless_present(config, marker_table, sql) do
@@ -51,19 +111,10 @@ defmodule Dbos.Migrator do
 
       {:error, :not_found} ->
         sql
-        |> split_statements()
+        |> statements()
         |> Enum.each(fn statement ->
           {:ok, _result} = config.db.query(config.conn, statement, [])
         end)
-    end
-  end
-
-  defp schema_parts do
-    sql = File.read!(schema_path())
-
-    case String.split(sql, @extension_marker, parts: 2) do
-      [base, extension] -> {base, @extension_marker <> extension}
-      [base] -> {base, ""}
     end
   end
 
@@ -74,22 +125,13 @@ defmodule Dbos.Migrator do
 
       {:ok, other} ->
         raise "dbos schema #{inspect(config.schema)}'s #{table}.version is #{other}, " <>
-                "expected #{expected_version}; apply the reference migrations up to that version"
+                "expected #{expected_version}; apply this engine's schema migrations up to " <>
+                "that version"
 
       {:error, :not_found} ->
         raise "dbos schema #{inspect(config.schema)} has no #{table} table (expected " <>
-                "version #{expected_version}); run Dbos.Migrator.create!/1 or apply the " <>
-                "reference migrations before starting the engine"
-    end
-  end
-
-  defp current_version(config, table) do
-    sql = ~s(SELECT version FROM "#{config.schema}".#{table})
-
-    case config.db.query(config.conn, sql, []) do
-      {:ok, %{rows: [[version]]}} -> {:ok, version}
-      {:ok, %{rows: []}} -> {:error, :not_found}
-      {:error, _reason} -> {:error, :not_found}
+                "version #{expected_version}); run `mix dbos.gen.migration` and apply the " <>
+                "resulting migration, or call Dbos.Migrator.create!/1 for dev and tests"
     end
   end
 

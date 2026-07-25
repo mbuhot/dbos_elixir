@@ -304,8 +304,16 @@ defmodule Dbos.Runtime do
   `workflow_deadline_epoch_ms` yet, computes and persists `now + timeout`; otherwise reuses
   whatever deadline is already recorded (so recovery/resume/fork do not restart the clock). If a
   deadline results, stores it on the active context (so a child workflow started from here
-  inherits it) and starts an unsupervised timer task that calls `Dbos.cancel/2` once the deadline
-  passes — a no-op if the workflow has already reached a terminal status by then.
+  inherits it).
+
+  Outside `:inline`/`:manual` testing modes, also starts an unsupervised timer task that calls
+  `Dbos.cancel/2` once the deadline passes — a no-op if the workflow has already reached a
+  terminal status by then. Under those testing modes this task is never started: it would escape
+  the calling process and could fire later against a connection the test's sandbox has already
+  checked back in, or an engine that has already stopped. An `:inline`/`:manual` workflow runs to
+  completion inside this one call, so a wall-clock deadline enforced by a background task has no
+  meaningful effect there; `workflow_timeout_ms`/`workflow_deadline_epoch_ms` are still resolved
+  and persisted the same way, so a test can assert on them.
   """
   def arm_deadline(config, workflow_id) do
     case SystemDb.resolve_workflow_deadline(config, workflow_id) do
@@ -315,23 +323,30 @@ defmodule Dbos.Runtime do
       deadline_ms ->
         context = fetch_context!()
         Process.put(@context_key, %{context | deadline_epoch_ms: deadline_ms})
-        remaining_ms = max(deadline_ms - System.os_time(:millisecond), 0)
-        engine = config.name
 
-        Task.start(fn ->
-          Process.sleep(remaining_ms)
-
-          try do
-            Dbos.cancel(workflow_id, engine: engine)
-          rescue
-            _ -> :ok
-          catch
-            _, _ -> :ok
-          end
-        end)
+        unless config.testing in [:inline, :manual] do
+          start_deadline_task(config, workflow_id, deadline_ms)
+        end
 
         :ok
     end
+  end
+
+  defp start_deadline_task(config, workflow_id, deadline_ms) do
+    remaining_ms = max(deadline_ms - System.os_time(:millisecond), 0)
+    engine = config.name
+
+    Task.start(fn ->
+      Process.sleep(remaining_ms)
+
+      try do
+        Dbos.cancel(workflow_id, engine: engine)
+      rescue
+        _ -> :ok
+      catch
+        _, _ -> :ok
+      end
+    end)
   end
 
   defp run_with_retries(workflow_id, name, opts, fun) do

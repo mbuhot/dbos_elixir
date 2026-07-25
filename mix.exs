@@ -199,7 +199,7 @@ defmodule Dbos.MixProject do
   defp groups_for_modules do
     [
       "Writing Workflows": [Dbos, Dbos.RetryPolicy, Dbos.WorkflowHandle],
-      Setup: [Dbos.Supervisor, Dbos.Config, Dbos.Migrator, Dbos.Registry],
+      Setup: [Dbos.Supervisor, Dbos.Config, Dbos.Migration, Dbos.Migrator, Dbos.Registry],
       Queues: [Dbos.Queue, Dbos.Debouncer],
       Scheduling: [Dbos.Cron, Dbos.Scheduler],
       Operations: [Dbos.Recovery, Dbos.Cluster, Dbos.AdminServer, Dbos.Waits],

@@ -295,7 +295,9 @@ defmodule Dbos.Messaging do
   An Elixir `Stream` over `workflow_id`'s stream `key`, from the beginning, terminating once the
   close sentinel is read (never yielded itself). Falls back to a final read-then-stop once the
   producing workflow reaches a terminal status, closing the race where the last write(s) landed
-  after the last poll but before the workflow finished.
+  after the last poll but before the workflow finished. Under an `:inline`/`:manual` testing-mode
+  engine, an open stream with nothing more to read raises `Dbos.TestingModeWaitError` rather than
+  waiting on `Dbos.Notifications`, which never starts in those modes.
   """
   def read_stream(config, workflow_id, key) do
     Stream.resource(
@@ -309,33 +311,40 @@ defmodule Dbos.Messaging do
   end
 
   defp read_stream_next(config, workflow_id, key, state) do
+    {values, next_offset, closed} =
+      SystemDb.read_stream_page(config, workflow_id, key, state.offset)
+
+    cond do
+      values != [] or closed ->
+        {values, %{state | offset: next_offset, closed: closed}}
+
+      workflow_terminal?(config, workflow_id) ->
+        {final_values, final_offset, _closed} =
+          SystemDb.read_stream_page(config, workflow_id, key, state.offset)
+
+        {final_values, %{state | offset: final_offset, closed: true}}
+
+      config.testing in [:inline, :manual] ->
+        raise Dbos.TestingModeWaitError,
+          workflow_id: workflow_id,
+          operation: "read_stream",
+          topic_or_key: key
+
+      true ->
+        wait_for_stream_write(config, workflow_id, key, state.offset)
+        read_stream_next(config, workflow_id, key, state)
+    end
+  end
+
+  defp wait_for_stream_write(config, workflow_id, key, offset) do
     engine = config.name
     :ok = Notifications.subscribe_stream(engine, workflow_id, key)
 
     try do
-      {values, next_offset, closed} =
-        SystemDb.read_stream_page(config, workflow_id, key, state.offset)
-
-      cond do
-        values != [] or closed ->
-          {values, %{state | offset: next_offset, closed: closed}}
-
-        workflow_terminal?(config, workflow_id) ->
-          {final_values, final_offset, _closed} =
-            SystemDb.read_stream_page(config, workflow_id, key, state.offset)
-
-          {final_values, %{state | offset: final_offset, closed: true}}
-
-        true ->
-          Notifications.wait_until(engine, nil, fn ->
-            {values, _offset, _closed} =
-              SystemDb.read_stream_page(config, workflow_id, key, state.offset)
-
-            values != []
-          end)
-
-          read_stream_next(config, workflow_id, key, state)
-      end
+      Notifications.wait_until(engine, nil, fn ->
+        {values, _offset, _closed} = SystemDb.read_stream_page(config, workflow_id, key, offset)
+        values != []
+      end)
     after
       Notifications.unsubscribe_stream(engine, workflow_id, key)
     end

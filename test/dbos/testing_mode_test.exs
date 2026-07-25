@@ -8,6 +8,8 @@ defmodule Dbos.TestingModeTest do
 
   use Dbos.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Dbos.Notifications
   alias Dbos.Queue
   alias Dbos.SampleWorkflows
@@ -20,7 +22,9 @@ defmodule Dbos.TestingModeTest do
     {"three_steps/1", {SampleWorkflows, :three_steps, 1}},
     {"sleeper/1", {SampleWorkflows, :sleeper, 1}},
     {"receiver/2", {SampleWorkflows, :receiver, 2}},
-    {"counted_steps_then_sleep/3", {SampleWorkflows, :counted_steps_then_sleep, 3}}
+    {"counted_steps_then_sleep/3", {SampleWorkflows, :counted_steps_then_sleep, 3}},
+    {"stream_writer/2", {SampleWorkflows, :stream_writer, 2}},
+    {"stream_self_reader/2", {SampleWorkflows, :stream_self_reader, 2}}
   ]
 
   defp start_engine(extra_opts) do
@@ -146,6 +150,58 @@ defmodule Dbos.TestingModeTest do
       assert {:error, %Dbos.TestingModeWaitError{} = error} = Dbos.await(handle, engine: engine)
       assert error.operation == "recv_message"
       assert Exception.message(error) =~ "manual"
+    end
+
+    test "writing and closing a stream completes, and the items read back in order" do
+      engine = start_engine(testing: :inline)
+      key = "log"
+
+      {:ok, handle} =
+        Dbos.start("stream_writer/2", [key, [:a, :b, :c]], engine: engine)
+
+      assert {:ok, :ok} = Dbos.await(handle, engine: engine)
+
+      assert Dbos.read_stream(handle.workflow_id, key, engine: engine) |> Enum.to_list() == [
+               :a,
+               :b,
+               :c
+             ]
+    end
+
+    test "reading a stream that is still open with nothing more pending raises instead of blocking" do
+      engine = start_engine(testing: :inline)
+      key = "log"
+
+      {:ok, handle} =
+        Dbos.start("stream_self_reader/2", [key, :only_value], engine: engine)
+
+      assert {:error, %Dbos.TestingModeWaitError{} = error} = Dbos.await(handle, engine: engine)
+      assert error.operation == "read_stream"
+      assert error.topic_or_key == key
+      assert Exception.message(error) =~ "manual"
+    end
+
+    test "a workflow_timeout_ms deadline is recorded, and stopping the engine leaves no stray process behind" do
+      engine = start_engine(testing: :inline)
+      config = Dbos.config(engine)
+
+      {:ok, handle} = Dbos.start("add/2", [1, 2], timeout_ms: 100, engine: engine)
+
+      assert {:ok, 3} = Dbos.await(handle, engine: engine)
+
+      assert {:ok, %Dbos.WorkflowStatus{workflow_deadline_epoch_ms: deadline}} =
+               SystemDb.get_workflow_status(config, handle.workflow_id)
+
+      assert is_integer(deadline)
+
+      log =
+        capture_log(fn ->
+          stop_supervised!(engine)
+          Process.sleep(200)
+        end)
+
+      refute log =~ "CRASH REPORT"
+      refute log =~ "ArgumentError"
     end
   end
 

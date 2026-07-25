@@ -17,7 +17,7 @@ defmodule DocumentPipeline.PipelineTest do
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Pipeline],
        queues: [Dbos.Queue.new(Pipeline.queue_name(), worker_concurrency: 4)],
-       migrations: :create_if_absent}
+       migrations: :verify}
     )
 
     Recovery.await_boot_recovery(Dbos)

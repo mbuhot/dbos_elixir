@@ -100,10 +100,10 @@ first check `:create_if_absent` makes) refuses to start against a schema at the 
 running against tables whose shape doesn't match what the engine expects would silently
 checkpoint into the wrong columns.
 
-**Fix:** apply the schema up to the expected version through your migration pipeline (or, for
-local dev only, switch to `migrations: :create_if_absent`, which applies
-`priv/schema/dbos_schema.sql` verbatim if verification fails). Never point production at a schema
-you haven't migrated deliberately.
+**Fix:** run `mix dbos.gen.migration` and apply the resulting migration through
+`mix ecto.migrate` (or, for local dev only, switch to `migrations: :create_if_absent`, which
+applies `priv/schema/dbos_schema.sql` verbatim if verification fails). Never point production at
+a schema you haven't migrated deliberately.
 
 ## A workflow will not cancel
 

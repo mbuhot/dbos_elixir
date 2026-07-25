@@ -359,6 +359,22 @@ defmodule Dbos.SampleWorkflows do
     end)
   end
 
+  @doc "Writes `items` to stream `key` in order, then closes it."
+  def stream_writer(key, items) do
+    Enum.each(items, &Dbos.write_stream(key, &1))
+    Dbos.close_stream(key)
+    :ok
+  end
+
+  @doc "Writes `value` to stream `key`, then reads its own stream back without closing it first."
+  def stream_self_reader(key, value) do
+    Dbos.write_stream(key, value)
+    workflow_id = Dbos.Runtime.current_workflow_id()
+    engine = Dbos.Runtime.current_config().name
+
+    Dbos.read_stream(workflow_id, key, engine: engine) |> Enum.to_list()
+  end
+
   def step_id_layout_workflow(target_workflow_id) do
     msg = Dbos.recv_message("topic", 5_000)
     event_value = Dbos.get_event(target_workflow_id, "key", 5_000)

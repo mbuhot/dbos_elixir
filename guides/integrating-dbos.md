@@ -98,19 +98,50 @@ If you're on the `Dbos.DB.Postgrex` adapter and want real `LISTEN` notifications
 Pass `notifications: :poll` instead if you'd rather skip the dedicated connection entirely —
 useful in an environment with a hard connection-count ceiling.
 
+## Installing the schema: a real migration
+
+Install the schema the same way Oban and Ash do: as an explicit step in your own migration
+sequence, generated once and committed to your repo.
+
+```
+mix dbos.gen.migration
+mix dbos.gen.migration -r MyApp.Repo
+```
+
+This writes `priv/repo/migrations/<timestamp>_add_dbos.exs`:
+
+```elixir
+defmodule MyApp.Repo.Migrations.AddDbos do
+  use Ecto.Migration
+
+  def up, do: Dbos.Migration.up()
+
+  def down, do: Dbos.Migration.down()
+end
+```
+
+Run it with `mix ecto.migrate` like any other migration. It shows up in `mix ecto.migrations`,
+and `mix ecto.rollback` reverts it. `Dbos.Migration.up/1` is safe to run twice — it brings the
+schema up to the version this engine targets, and does nothing if it's already there. See
+`Dbos.Migration` for what `up/1`/`down/1` actually do and the `:prefix`/`:version` options.
+
+`opts[:prefix]` (default `"dbos"`) must match the `:schema` passed to `Dbos.Supervisor` — set
+both if you use a schema other than the default.
+
 ## Migration verification at launch
 
 `Dbos.Migrator.verify!/1` checks `<schema>.dbos_migrations.version` is exactly `42` — the
 version the engine targets — and **raises**, refusing to start, if it's anything else or the
 table doesn't exist at all. This is deliberate: an engine running against the wrong schema
-version would checkpoint into tables whose shape it doesn't actually match.
+version would checkpoint into tables whose shape it doesn't actually match. Once the migration
+above is applied, this is the check that confirms it actually ran.
 
 `:migrations` on `Dbos.Supervisor` controls what happens:
 
 | Value | Behavior |
 |---|---|
-| `:verify` (default) | Only checks. Raises if the schema isn't already at version 42. **Use this in production** — schema changes belong in your own deploy pipeline, run and reviewed like any other migration. |
-| `:create_if_absent` | Tries `verify!/1` first; on failure, applies `priv/schema/dbos_schema.sql` verbatim and verifies again. Convenient for local dev and quick starts. In production, migrations should be reviewed and applied deliberately through your own deploy pipeline. |
+| `:verify` (default) | Only checks. Raises if the schema isn't already at version 42. **Use this in production** — install the schema through `mix dbos.gen.migration` above, reviewed and applied like any other migration. |
+| `:create_if_absent` | Tries `verify!/1` first; on failure, applies `priv/schema/dbos_schema.sql` verbatim and verifies again. A dev and test convenience — quick to reach for, nothing to generate or commit. A real deployment installs the schema through its own migration sequence instead. |
 | `:skip` | Does neither. The test suites use this because the schema is already applied once, up front, by `test/test_helper.exs`, and every test just reuses it. |
 
 ## Executor identity and application version for a release

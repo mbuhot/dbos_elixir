@@ -259,13 +259,13 @@ Dbos adds durable *workflows*: a function whose intermediate steps are individua
 
 Both provide durable execution. Temporal runs an external orchestration cluster, and your workflows move into Temporal workers. Dbos is a library over the Postgres you already have.
 
-**When to use Temporal:** you want a dedicated orchestration platform, or you need languages this port does not cover.
+**When to use Temporal:** you want a dedicated orchestration platform, or you need languages this engine does not cover.
 
 **When to use Dbos:** you want durable execution inside an existing Elixir application, on your current infrastructure.
 
 ## Scope
 
-This port serves Elixir applications. Persisted values are Erlang terms, which preserves atoms, tuples, structs and dates exactly, and means a service in another language reads them as opaque bytes. The [migration guide](https://mbuhot.github.io/dbos_elixir/interop-migration.html) covers the path to a portable format if that changes.
+This engine serves Elixir applications. Persisted values are Erlang terms, which preserves atoms, tuples, structs and dates exactly, and means a service in another language reads them as opaque bytes. The [migration guide](https://mbuhot.github.io/dbos_elixir/interop-migration.html) covers the path to a portable format if that changes.
 
 ## License
 

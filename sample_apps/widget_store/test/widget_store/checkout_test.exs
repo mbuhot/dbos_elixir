@@ -10,7 +10,7 @@ defmodule WidgetStore.CheckoutTest do
        db: {Dbos.DB.Ecto, Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [WidgetStore.Checkout],
-       migrations: :create_if_absent}
+       migrations: :verify}
     )
 
     Dbos.Recovery.await_boot_recovery(Dbos)
