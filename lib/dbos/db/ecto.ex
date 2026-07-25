@@ -8,11 +8,7 @@ if Code.ensure_loaded?(Ecto) do
 
     @behaviour Dbos.DB
 
-    @isolation_sql %{
-      read_committed: "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
-      repeatable_read: "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
-      serializable: "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
-    }
+    alias Dbos.DB.Isolation
 
     @impl Dbos.DB
     def query(repo, sql, params) do
@@ -45,7 +41,7 @@ if Code.ensure_loaded?(Ecto) do
     defp set_isolation_level(_repo, nil), do: :ok
 
     defp set_isolation_level(repo, isolation) do
-      query!(repo, Map.fetch!(@isolation_sql, isolation), [])
+      query!(repo, Isolation.sql(isolation), [])
     end
   end
 end

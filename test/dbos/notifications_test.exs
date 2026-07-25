@@ -99,6 +99,38 @@ defmodule Dbos.NotificationsTest do
     assert Task.await(task, 2000) == :found
   end
 
+  test "a waiter parked with no deadline is woken to re-probe after the listener connection drops and reconnects" do
+    engine =
+      start_engine(notifications: :listen, notifications_conn_opts: [database: "dbos_test"])
+
+    wait_until(fn -> Notifications.mode(engine) == :listen end)
+
+    test_pid = self()
+    counter = :counters.new(1, [])
+
+    task =
+      Task.async(fn ->
+        assert :ok = Notifications.subscribe_event(engine, "wf-reconnect", "key")
+        send(test_pid, :subscribed)
+
+        Notifications.wait_until(engine, nil, fn ->
+          :counters.add(counter, 1, 1)
+          :counters.get(counter, 1) >= 2
+        end)
+      end)
+
+    assert_receive :subscribed, 500
+    wait_until(fn -> :counters.get(counter, 1) == 1 end)
+
+    listener_pid = :sys.get_state(Notifications.process_name(engine)).listener
+    Process.exit(listener_pid, :kill)
+
+    wait_until(fn -> Notifications.mode(engine) == :listen end, 300)
+
+    assert Task.await(task, 5000) == :found
+    assert :counters.get(counter, 1) >= 2
+  end
+
   defp wait_until(fun, attempts \\ 100)
   defp wait_until(_fun, 0), do: flunk("condition never became true")
 

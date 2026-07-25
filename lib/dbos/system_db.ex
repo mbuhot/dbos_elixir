@@ -1088,7 +1088,8 @@ defmodule Dbos.SystemDb do
   def transition_delayed_workflows(%Config{} = config) do
     sql = """
     UPDATE #{table(config, "workflow_status")}
-        SET status = $1, updated_at = $2
+        SET status = $1, updated_at = $2,
+            deduplication_id = CASE WHEN is_debounced THEN NULL ELSE deduplication_id END
         WHERE status = $3 AND delay_until_epoch_ms <= $2
     """
 
@@ -1477,12 +1478,13 @@ defmodule Dbos.SystemDb do
 
   defp handle_update_outcome_conflict(config, workflow_id) do
     sql = "SELECT status FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1"
+    cancelled = Status.to_string(:cancelled)
 
     case config.db.query(config.conn, sql, [workflow_id]) do
       {:ok, %{rows: []}} ->
         :ok
 
-      {:ok, %{rows: [["CANCELLED"]]}} ->
+      {:ok, %{rows: [[^cancelled]]}} ->
         raise Dbos.WorkflowCancelledError, workflow_id: workflow_id
 
       {:ok, %{rows: [[_status]]}} ->

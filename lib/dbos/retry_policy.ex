@@ -18,12 +18,7 @@ defmodule Dbos.RetryPolicy do
 
   @doc "Builds a policy from `opts`, applying defaults for any field not given."
   def new(opts \\ []) do
-    %__MODULE__{
-      max_retries: Keyword.get(opts, :max_retries, 0),
-      base_interval_ms: Keyword.get(opts, :base_interval_ms, 100),
-      backoff_factor: Keyword.get(opts, :backoff_factor, 2.0),
-      max_interval_ms: Keyword.get(opts, :max_interval_ms, 5000)
-    }
+    struct!(__MODULE__, opts)
   end
 
   @doc "The backoff delay in milliseconds for 1-indexed attempt `attempt`."

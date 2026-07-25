@@ -32,9 +32,7 @@ defmodule Dbos.CronTest do
   test "when both day-of-month and day-of-week are restricted, either matching is enough (POSIX OR)" do
     cron = Cron.parse!("0 0 0 1 * 1")
     from = epoch_ms(2026, 2, 1, 0, 0, 1)
-    next = Cron.next_after(cron, from)
-    next_dt = DateTime.from_unix!(next, :millisecond)
-    assert next_dt.day == 1 or Date.day_of_week(next_dt, :sunday) - 1 == 1
+    assert Cron.next_after(cron, from) == epoch_ms(2026, 2, 2, 0, 0, 0)
   end
 
   test "due_between returns every fire time in the window, ascending" do

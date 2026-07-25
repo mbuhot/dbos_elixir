@@ -3,11 +3,7 @@ defmodule Dbos.DB.Postgrex do
 
   @behaviour Dbos.DB
 
-  @isolation_sql %{
-    read_committed: "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
-    repeatable_read: "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
-    serializable: "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
-  }
+  alias Dbos.DB.Isolation
 
   @impl Dbos.DB
   def query(conn, sql, params) do
@@ -40,6 +36,6 @@ defmodule Dbos.DB.Postgrex do
   defp set_isolation_level(_conn, nil), do: :ok
 
   defp set_isolation_level(conn, isolation) do
-    query!(conn, Map.fetch!(@isolation_sql, isolation), [])
+    query!(conn, Isolation.sql(isolation), [])
   end
 end

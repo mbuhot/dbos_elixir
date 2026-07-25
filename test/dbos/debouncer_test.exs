@@ -95,13 +95,11 @@ defmodule Dbos.DebouncerTest do
       Debouncer.debounce(config, "job/1", ["a"],
         queue_name: "jobs",
         debounce_key: "cust-4",
-        period_ms: 100
+        period_ms: 1
       )
 
+    Process.sleep(5)
     SystemDb.transition_delayed_workflows(config)
-
-    sql = "UPDATE dbos.workflow_status SET deduplication_id = NULL WHERE workflow_uuid = $1"
-    {:ok, _} = Dbos.DB.Postgrex.query(config.conn, sql, [first_id])
 
     {:ok, second_id} =
       Debouncer.debounce(config, "job/1", ["b"],

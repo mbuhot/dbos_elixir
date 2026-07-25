@@ -8,6 +8,10 @@ defmodule Dbos.Notifications do
   If a dedicated connection cannot be established (no derivable connection options, or the
   connection attempt fails), falls back to `:poll` mode and logs a warning — `wait_until/3`'s
   bounded timeout in that mode is what stands in for the missing `NOTIFY`.
+
+  A dropped listener connection is reconnected with backoff, without taking this GenServer down
+  with it, and every registered waiter is woken to re-probe once the connection is back — a
+  `NOTIFY` fired during the outage would otherwise be lost.
   """
 
   use GenServer
@@ -19,6 +23,8 @@ defmodule Dbos.Notifications do
   @workflow_events_channel "dbos_workflow_events_channel"
   @streams_channel "dbos_streams_channel"
   @poll_interval_ms 1_000
+  @reconnect_base_backoff_ms 200
+  @reconnect_max_backoff_ms 5_000
 
   @doc "The polling fallback's fixed cadence, per `notes/notifications.md` §2."
   def poll_interval_ms, do: @poll_interval_ms
@@ -152,12 +158,13 @@ defmodule Dbos.Notifications do
 
   @impl true
   def init(engine) do
+    Process.flag(:trap_exit, true)
     config = Dbos.config(engine)
 
     case config.notifications do
       :poll ->
         :persistent_term.put(mode_key(engine), :poll)
-        {:ok, %{engine: engine}}
+        {:ok, %{engine: engine, conn_opts: nil, listener: nil, retry_attempt: 0}}
 
       :listen ->
         {:ok, start_listener(engine, config)}
@@ -165,6 +172,8 @@ defmodule Dbos.Notifications do
   end
 
   defp start_listener(engine, config) do
+    base_state = %{engine: engine, conn_opts: nil, listener: nil, retry_attempt: 0}
+
     case notifications_conn_opts(config) do
       nil ->
         Logger.warning(
@@ -172,26 +181,55 @@ defmodule Dbos.Notifications do
         )
 
         :persistent_term.put(mode_key(engine), :poll)
-        %{engine: engine}
+        %{base_state | conn_opts: nil}
 
       conn_opts ->
-        case Postgrex.Notifications.start_link(conn_opts) do
-          {:ok, pid} ->
-            Postgrex.Notifications.listen(pid, @notifications_channel)
-            Postgrex.Notifications.listen(pid, @workflow_events_channel)
-            Postgrex.Notifications.listen(pid, @streams_channel)
-            :persistent_term.put(mode_key(engine), :listen)
-            %{engine: engine, listener: pid}
-
-          {:error, reason} ->
-            Logger.warning(
-              "Dbos.Notifications(#{inspect(engine)}): failed to start the LISTEN connection (#{inspect(reason)}); falling back to polling"
-            )
-
-            :persistent_term.put(mode_key(engine), :poll)
-            %{engine: engine}
-        end
+        connect(%{base_state | conn_opts: conn_opts})
     end
+  end
+
+  defp connect(%{engine: engine, conn_opts: conn_opts} = state) do
+    case Postgrex.Notifications.start_link(conn_opts) do
+      {:ok, pid} ->
+        Postgrex.Notifications.listen(pid, @notifications_channel)
+        Postgrex.Notifications.listen(pid, @workflow_events_channel)
+        Postgrex.Notifications.listen(pid, @streams_channel)
+        :persistent_term.put(mode_key(engine), :listen)
+        %{state | listener: pid, retry_attempt: 0}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Dbos.Notifications(#{inspect(engine)}): failed to start the LISTEN connection (#{inspect(reason)}); falling back to polling and retrying"
+        )
+
+        :persistent_term.put(mode_key(engine), :poll)
+        schedule_reconnect(state.retry_attempt)
+        %{state | listener: nil, retry_attempt: state.retry_attempt + 1}
+    end
+  end
+
+  defp schedule_reconnect(retry_attempt) do
+    delay =
+      (@reconnect_base_backoff_ms * :math.pow(2, retry_attempt))
+      |> min(@reconnect_max_backoff_ms)
+      |> round()
+
+    Process.send_after(self(), :reconnect_listener, delay)
+  end
+
+  defp wake_all_waiters(engine) do
+    wake_all(recv_registry_name(engine))
+    wake_all(wait_registry_name(engine))
+  end
+
+  defp wake_all(registry) do
+    if Process.whereis(registry) do
+      registry
+      |> Registry.select([{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2"}}]}])
+      |> Enum.each(fn {_key, pid} -> send(pid, {:dbos_notify, :reconnect, nil}) end)
+    end
+
+    :ok
   end
 
   defp notifications_conn_opts(%Config{notifications_conn_opts: opts}) when is_list(opts),
@@ -207,6 +245,32 @@ defmodule Dbos.Notifications do
   def handle_info({:notification, _pid, _ref, channel, payload}, state) do
     dispatch_notification(state.engine, channel, payload)
     {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:EXIT, pid, reason}, %{listener: pid} = state) do
+    Logger.warning(
+      "Dbos.Notifications(#{inspect(state.engine)}): LISTEN connection lost (#{inspect(reason)}); reconnecting"
+    )
+
+    :persistent_term.put(mode_key(state.engine), :poll)
+    schedule_reconnect(state.retry_attempt)
+    {:noreply, %{state | listener: nil, retry_attempt: state.retry_attempt + 1}}
+  end
+
+  @impl true
+  def handle_info(:reconnect_listener, %{conn_opts: nil} = state), do: {:noreply, state}
+
+  @impl true
+  def handle_info(:reconnect_listener, state) do
+    case connect(state) do
+      %{listener: pid} = new_state when is_pid(pid) ->
+        wake_all_waiters(state.engine)
+        {:noreply, new_state}
+
+      new_state ->
+        {:noreply, new_state}
+    end
   end
 
   defp dispatch_notification(engine, @notifications_channel, payload) do

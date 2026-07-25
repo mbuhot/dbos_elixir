@@ -87,7 +87,7 @@ defmodule Dbos.Queue.Runner do
         )
       end)
 
-    Enum.each(claimed, &dispatch(engine, &1, queue.name, partition_key))
+    dispatch_all(engine, claimed, queue.name, partition_key)
     :ok
   rescue
     error ->
@@ -101,6 +101,22 @@ defmodule Dbos.Queue.Runner do
 
         :ok
       end
+  end
+
+  @doc false
+  def dispatch_all(engine, claimed, queue_name, partition_key) do
+    Enum.each(claimed, &dispatch_one(engine, &1, queue_name, partition_key))
+  end
+
+  defp dispatch_one(engine, workflow, queue_name, partition_key) do
+    dispatch(engine, workflow, queue_name, partition_key)
+  rescue
+    error ->
+      Logger.error(
+        "dbos: queue #{inspect(queue_name)}: dispatch failed for workflow " <>
+          "#{inspect(Map.get(workflow, :workflow_id))}: " <>
+          Exception.format_banner(:error, error, __STACKTRACE__)
+      )
   end
 
   defp dispatch(engine, %{workflow_id: id, name: name, inputs: inputs}, queue_name, partition_key) do
