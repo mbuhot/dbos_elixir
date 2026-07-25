@@ -50,8 +50,8 @@ end
 ```
 
 `defworkflow` requires an explicit `name:` — recovery re-dispatches a crashed workflow by
-looking up this name, not the module or function, so it has to be a stable string you
-control. Read `reserve_stock` and `charge_card` as two checkpoints: once either one succeeds,
+looking up this name. It has to be a stable string you control, independent of the module or
+function. Read `reserve_stock` and `charge_card` as two checkpoints: once either one succeeds,
 its result is durably recorded, and a replay of `process_order` after a crash will not run it
 again.
 
@@ -102,8 +102,7 @@ checkpointed for it yet.
 
 ## 6. Kill it mid-flight
 
-From another terminal, find the BEAM's OS pid and send it `SIGKILL` — not a graceful
-shutdown, an actual crash:
+From another terminal, find the BEAM's OS pid and send it `SIGKILL` for an actual crash:
 
 ```sh
 $ pgrep -f "iex -S mix"
@@ -144,8 +143,8 @@ iex> Dbos.result("order-1")
         charge: %{order_id: "order-1", amount: 4999, charge_id: "ch_order-1"}}}
 ```
 
-That's the whole point of the engine: a crash mid-step costs you time, not correctness, and
-costs you nothing already checkpointed.
+That's the whole point of the engine: a crash mid-step costs time. Correctness holds, and
+anything already checkpointed costs nothing to redo.
 
 ## Where to next
 

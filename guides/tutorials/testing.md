@@ -13,7 +13,7 @@ and mocking a step's external call.
 
 `Ecto.Adapters.SQL.Sandbox` wraps each test in a transaction and rolls it back at the end — the
 usual reason a test suite runs fast and stays isolated without truncating tables by hand. It
-does not work for `Dbos`, for a structural reason, not a configuration one:
+does not work for `Dbos` — the incompatibility is structural:
 
 `Dbos.Notifications` opens a **dedicated `LISTEN` connection**, separate from your Ecto pool
 (`guides/integrating-dbos.md`, "The dedicated LISTEN connection"). Postgres only delivers a
@@ -26,8 +26,8 @@ that process isn't the one enrolled in the sandboxed connection) can see a diffe
 of the same rows.
 
 `Dbos`'s own suite (`test/support/case.ex`, `Dbos.Case`) sidesteps this entirely: it runs against
-a real Postgrex connection with autocommit, and truncates the `dbos` tables between tests instead
-of rolling back a transaction. Do the same in your application's tests — point the test engine at
+a real Postgrex connection with autocommit, and truncates the `dbos` tables between tests; no
+transaction rollback is involved. Do the same in your application's tests — point the test engine at
 a real, committing connection (an `Ecto.Repo` in its ordinary, non-sandboxed mode is fine; so is
 a bare `Postgrex` pool), and truncate between tests.
 
@@ -80,8 +80,8 @@ test "process_order reserves stock and charges the card", %{engine: engine} do
 end
 ```
 
-A workflow that raises completes `:error`, not an exception propagated to the caller — `await`
-hands back `{:error, exception}`:
+A workflow that raises completes with status `:error`, and `await` hands back
+`{:error, exception}` — the exception itself never propagates to the caller:
 
 ```elixir
 test "a declined card surfaces as an error result", %{engine: engine} do
@@ -153,9 +153,9 @@ defp wait_until(fun, attempts) do
 end
 ```
 
-The step count staying at exactly `[0, 1]` (rather than `[0, 0, 1]` or similar) after recovery is
-the assertion that matters — it's proof the replayed step 0 returned its recorded output instead
-of re-executing.
+The step count staying at exactly `[0, 1]`, never growing to `[0, 0, 1]` or similar, after
+recovery is the assertion that matters — it's proof the replayed step 0 returned its recorded
+output without re-executing.
 
 ## Testing determinism violations are caught at compile time
 
@@ -186,33 +186,30 @@ end
 ```
 
 This is worth one or two smoke tests in your own suite mainly to confirm `use Dbos` is wired up
-the way you expect (the right `:repo`, the right `warn_cross_module_calls` setting) — not to
-re-verify the checker itself, which is already covered by `Dbos`'s own tests.
+the way you expect (the right `:repo`, the right `warn_cross_module_calls` setting). `Dbos`'s own
+tests already cover the checker itself.
 
 ## Mocking a step's external call
 
-A step is checkpointed by its **name and position**, never by which module or function backed
-it — there's no built-in way to swap what a given `defstep` calls at test time other than
-ordinary Elixir dependency injection. Push the external call behind a module (an HTTP client, a
+A step is checkpointed by its **name and position** alone — there's no built-in way to swap what
+a given `defstep` calls at test time other than ordinary Elixir dependency injection. Push the external call behind a module (an HTTP client, a
 payment gateway wrapper) and pass that module in as an argument, or read it from
 `Application.get_env/2` at the call site inside the step body:
 
 ```elixir
 defworkflow process_order(order_id, amount), name: "process_order" do
-  charge_card(order_id, amount, payment_client())
+  charge_card(order_id, amount)
 end
 
-defstep charge_card(order_id, amount, client) do
-  client.charge(order_id, amount)
+defstep charge_card(order_id, amount) do
+  payment_client().charge(order_id, amount)
 end
 
 defp payment_client, do: Application.get_env(:my_app, :payment_client, MyApp.StripeClient)
 ```
 
-Note that `payment_client/0` itself must not be called from inside the workflow body directly if
-it can change across replay — call it from inside the step (as above), or make it a step's
-argument computed from a prior step's output, never a live read of mutable configuration
-resolved inside `defworkflow` itself (`docs/determinism.md`). Configure
-`:my_app, :payment_client, MyApp.MockPaymentClient` in `config/test.exs`, or override it per test
-with `Application.put_env/3` if your test suite runs `async: false` (as it must here, for the
-reasons above).
+`payment_client/0` is read from inside the step body. A live read of mutable configuration
+belongs there — inside `defworkflow` itself, a value that could change between the original run
+and a replay is exactly what breaks replay (`docs/determinism.md`). Configure `:my_app, :payment_client, MyApp.MockPaymentClient` in
+`config/test.exs`, or override it per test with `Application.put_env/3` if your test suite runs
+`async: false` (as it must here, for the reasons above).

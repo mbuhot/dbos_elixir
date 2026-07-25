@@ -58,16 +58,15 @@ Where those connection options come from:
 - Otherwise (a bare `Dbos.DB.Postgrex` pool, with no `notifications_conn_opts` given), there is
   nothing to derive connection options from.
 
-If no connection options can be found, or the connection attempt itself fails, `Dbos`
-**does not crash** — it logs a warning and falls back to polling (`Dbos.Notifications`'s
-`:poll` mode, fixed at a 1-second cadence) for every blocking wait on that engine. Waits still
-work; they just wake up on a timer instead of instantly. A connection that drops later
-(network blip, Postgres restart) reconnects with backoff automatically, and every registered
-waiter is woken to re-check once it's back, so a `NOTIFY` fired during the outage isn't lost.
+If no connection options can be found, or the connection attempt itself fails, `Dbos` logs a
+warning and falls back to polling (`Dbos.Notifications`'s `:poll` mode, fixed at a 1-second
+cadence) for every blocking wait on that engine. Startup continues. Waits still work; they
+wake up on a timer. A connection that drops later (network blip, Postgres restart) reconnects
+with backoff automatically, and every registered waiter is woken to re-check once it's back, so
+a `NOTIFY` fired during the outage isn't lost.
 
-If you're on the `Dbos.DB.Postgrex` adapter and want real `LISTEN` notifications rather than
-the polling fallback, pass `notifications_conn_opts:` yourself — there's no repo to derive them
-from:
+If you're on the `Dbos.DB.Postgrex` adapter and want real `LISTEN` notifications, pass
+`notifications_conn_opts:` yourself to enable them — there's no repo to derive them from:
 
 ```elixir
 {Dbos.Supervisor,
@@ -91,7 +90,7 @@ version would checkpoint into tables whose shape it doesn't actually match.
 | Value | Behavior |
 |---|---|
 | `:verify` (default) | Only checks. Raises if the schema isn't already at version 42. **Use this in production** — schema changes belong in your own deploy pipeline, run and reviewed like any other migration. |
-| `:create_if_absent` | Tries `verify!/1` first; on failure, applies `priv/schema/dbos_schema.sql` verbatim and verifies again. Convenient for local dev and quick starts — don't use it in production, where you want migrations reviewed and applied deliberately, not silently created by whichever process happens to boot first. |
+| `:create_if_absent` | Tries `verify!/1` first; on failure, applies `priv/schema/dbos_schema.sql` verbatim and verifies again. Convenient for local dev and quick starts. In production, migrations should be reviewed and applied deliberately through your own deploy pipeline. |
 | `:skip` | Does neither. The test suites use this because the schema is already applied once, up front, by `test/test_helper.exs`, and every test just reuses it. |
 
 ## Executor identity and application version for a release
@@ -153,4 +152,4 @@ Dbos.Recovery.await_boot_recovery(name)
 `handle_continue`, so `start_link` itself doesn't block) has actually finished — without it, a
 test that starts a workflow right after `start_supervised!` can race that pass. Truncate the
 `dbos` tables between tests (`workflow_status`, `operation_outputs`, and the rest — see
-`test/support/case.ex`) rather than tearing down and recreating the schema each time.
+`test/support/case.ex`); the schema itself stays in place across the run.

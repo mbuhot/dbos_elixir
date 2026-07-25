@@ -1,8 +1,8 @@
 # Steps
 
 A step is the unit of work a workflow checkpoints. Once a step's output is recorded, every future
-replay of that workflow returns the recorded output at that position instead of running the
-step's body again. `defstep` is how you declare one.
+replay of that workflow returns the recorded output at that position. The step's body never runs
+again. `defstep` is how you declare one.
 
 ```elixir
 defmodule MyApp.Checkout do
@@ -51,10 +51,10 @@ defstep charge_card(order_id, amount) do
 end
 ```
 
-is checkpointed under the name `"charge_card/2"`, not `"MyApp.Checkout.charge_card/2"`. This
-means moving `charge_card/2` to a different module, or renaming `MyApp.Checkout` itself, leaves an
-in-flight workflow's recorded checkpoints resolvable by name — only the function's own name and
-arity have to stay stable, not where it lives. Override the default with `name:`:
+is checkpointed under the name `"charge_card/2"` alone. This means moving `charge_card/2` to a
+different module, or renaming `MyApp.Checkout` itself, leaves an in-flight workflow's recorded
+checkpoints resolvable by name — only the function's own name and arity have to stay stable;
+where it lives can change freely. Override the default with `name:`:
 
 ```elixir
 defstep reserve_stock(order_id), name: "custom_reserve_name" do
@@ -106,8 +106,8 @@ at `max_interval_ms`. With the example above:
 | 4 | 800ms |
 
 `max_retries: 3` means three retries *after* the first attempt — four attempts total. Once the
-budget is exhausted, the last failure is wrapped in `Dbos.MaxStepRetriesExceededError` and raised
-(and checkpointed as the step's recorded failure), rather than the original exception.
+budget is exhausted, the last failure is wrapped in `Dbos.MaxStepRetriesExceededError` and raised,
+in place of the original exception, and checkpointed as the step's recorded failure.
 
 Defaults, if any option is omitted: `max_retries: 0`, `base_interval_ms: 100`,
 `backoff_factor: 2.0`, `max_interval_ms: 5000`.
@@ -136,7 +136,7 @@ matches on `(workflow_id, function_id)`, finds a recorded output already sitting
 and returns it. No error, no log line: the workflow "succeeds" with the **old** charge amount
 silently substituted for the new one.
 
-The fix is structural, not a runtime check: every argument passed to a step must itself come from
-the workflow's own input or a prior step's recorded output — never from a live read of mutable
+The fix is structural: every argument passed to a step must itself come from the workflow's own
+input or a prior step's recorded output, sourced there and never from a live read of mutable
 state performed directly in the workflow body. See `docs/determinism.md` for the full worked
 example and the complete list of constructs `defworkflow` rejects at compile time.

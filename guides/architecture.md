@@ -5,8 +5,8 @@
 A workflow is a function. `Dbos` runs it on an ordinary Elixir process, and after every step
 records what happened in two Postgres tables. A crash loses the process; it does not lose
 those two tables. Recovery starts a fresh process, re-runs the function from the top, and
-every step that already has a row in those tables returns its recorded result instead of
-running again.
+every step that already has a row in those tables returns its recorded result. It never
+runs again.
 
 ```mermaid
 sequenceDiagram
@@ -68,8 +68,8 @@ There is no other way an operation finds its row. Replay works by re-running the
 body from the top and letting this same counter tick through `0, 1, 2, ...` in the same
 order — the *n*th durable operation on this replay checks for a row at `operation_outputs`
 position *n*, and if the *n*th operation last time was `reserve_stock` but this time it's
-`charge_card`, `Dbos.UnexpectedStepError` is raised rather than silently replaying the wrong
-step's output. Replay reproducing the exact call sequence is the entire mechanism — it is
+`charge_card`, `Dbos.UnexpectedStepError` is raised, stopping the wrong step's output from
+replaying silently. Replay reproducing the exact call sequence is the entire mechanism — it is
 why the workflow body has a determinism contract at all (`docs/determinism.md`): a workflow
 that calls a different sequence of steps on replay, or computes a step's arguments from
 something that changes between runs, breaks the assumption this counter depends on.
@@ -96,8 +96,8 @@ order shown — the registries and `Dbos.Notifications` come up before `Dbos.Wor
 since a workflow process registers itself and may wait on notifications as soon as it
 starts; `Dbos.Recovery` comes after `Dbos.WorkflowSup`, since recovery dispatches into it.
 Each running workflow is its own `Task` (`Dbos.WorkflowProcess`, `restart: :temporary`)
-under `Dbos.WorkflowSup` — one OS-level process failure only takes down that one workflow,
-never its siblings.
+under `Dbos.WorkflowSup` — one OS-level process failure takes down only that one workflow;
+its siblings keep running.
 
 Multiple engines can run in the same BEAM: every process above is namespaced by the
 `:name` given to `Dbos.Supervisor`, and `Dbos.Config` is stored per name in
@@ -118,7 +118,7 @@ The redispatched process is an ordinary `Dbos.WorkflowProcess`: it establishes a
 `Dbos.Runtime` context (`Dbos.Runtime.with_context/2`) and calls the workflow function again
 from the top. Nothing about the function changes between the original run and the replay —
 the only difference is that `check_operation_execution` finds a row waiting at every step
-position the first run got past, so those steps return instantly instead of re-executing.
+position the first run got past, so those steps return instantly. Re-execution is skipped.
 The first step position with no row is where real work resumes.
 
 `Dbos.Recovery.reclaim/3` is the same mechanism used for a *different* executor's rows: when

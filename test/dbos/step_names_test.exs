@@ -9,6 +9,8 @@ defmodule Dbos.StepNamesTest do
     assert StepNames.recv() == "DBOS.recv"
     assert StepNames.set_event() == "DBOS.setEvent"
     assert StepNames.get_event() == "DBOS.getEvent"
+    assert StepNames.cancel_workflow() == "DBOS.cancelWorkflow"
+    assert StepNames.resume_workflow() == "DBOS.resumeWorkflow"
   end
 
   test "patch/1 prefixes the caller-supplied patch name" do

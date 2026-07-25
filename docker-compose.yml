@@ -44,7 +44,7 @@ services:
       migrate:
         condition: service_completed_successfully
     command: >
-      sh -c "elixir --name node1@node1 --cookie $$RELEASE_COOKIE -S mix run --no-halt test/integration/node_runtime.exs"
+      sh -c "elixir --sname node1@node1 --cookie $$RELEASE_COOKIE -S mix run --no-halt test/integration/node_runtime.exs"
 
   node2:
     build: .
@@ -59,7 +59,7 @@ services:
       migrate:
         condition: service_completed_successfully
     command: >
-      sh -c "elixir --name node2@node2 --cookie $$RELEASE_COOKIE -S mix run --no-halt test/integration/node_runtime.exs"
+      sh -c "elixir --sname node2@node2 --cookie $$RELEASE_COOKIE -S mix run --no-halt test/integration/node_runtime.exs"
 
   test-runner:
     build: .
@@ -77,4 +77,4 @@ services:
       node2:
         condition: service_started
     command: >
-      sh -c "elixir --name test-runner@test-runner --cookie $$RELEASE_COOKIE -S mix test test/integration --include integration --seed 0"
+      sh -c "elixir --sname runner@test-runner --cookie $$RELEASE_COOKIE -S mix test test/integration --include integration --seed 0"

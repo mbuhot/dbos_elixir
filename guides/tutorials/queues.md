@@ -157,7 +157,10 @@ defmodule MyApp.TenantJobs do
     {:ok, handle} =
       Dbos.enqueue(&do_job/2, [tenant_id, job_id], queue_name: "global_jobs")
 
-    Dbos.await(handle)
+    case Dbos.await(handle) do
+      {:ok, result} -> result
+      {:error, exception} -> raise exception
+    end
   end
 
   defworkflow do_job(tenant_id, job_id), name: "do_job" do
@@ -244,5 +247,5 @@ onto the same `workflow_id`; the returned id is stable across the whole burst. R
 
 `Dbos.Debouncer.debounce/4` is a lower-level entry point than `Dbos.enqueue/3`: it takes a
 `Dbos.Config` directly (`Dbos.config/0` outside a workflow) and the workflow's registered name as
-a plain string, rather than a `defworkflow` capture — there is currently no `Dbos.debounce/4`
+a plain string, rather than a `defworkflow` capture — there is currently no `Dbos.debounce` convenience wrapper
 convenience wrapper alongside `Dbos.enqueue/3`.

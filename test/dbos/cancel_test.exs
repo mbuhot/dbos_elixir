@@ -105,6 +105,109 @@ defmodule Dbos.CancelTest do
     assert status.status == :cancelled
   end
 
+  test "cancelling without cancel_children leaves the children running" do
+    engine =
+      start_engine([
+        {"spawns_blocking_grandchild_tree/1",
+         {SampleWorkflows, :spawns_blocking_grandchild_tree, 1}},
+        {"spawns_blocking_child/1", {SampleWorkflows, :spawns_blocking_child, 1}},
+        {"blocks_forever/1", {SampleWorkflows, :blocks_forever, 1}}
+      ])
+
+    config = Dbos.config(engine)
+
+    {:ok, root_handle} =
+      Dbos.start("spawns_blocking_grandchild_tree/1", [nil], engine: engine)
+
+    wait_until(fn ->
+      case SystemDb.get_workflow_status(config, root_handle.workflow_id) do
+        {:ok, %{status: :pending}} ->
+          length(SystemDb.child_workflow_ids(config, root_handle.workflow_id)) == 1
+
+        _ ->
+          false
+      end
+    end)
+
+    [child_id] = SystemDb.child_workflow_ids(config, root_handle.workflow_id)
+
+    wait_until(fn -> length(SystemDb.child_workflow_ids(config, child_id)) == 1 end)
+    [grandchild_id] = SystemDb.child_workflow_ids(config, child_id)
+
+    :ok = Dbos.cancel(root_handle.workflow_id, engine: engine)
+
+    {:ok, root_status} = SystemDb.get_workflow_status(config, root_handle.workflow_id)
+    assert root_status.status == :cancelled
+
+    {:ok, child_status} = SystemDb.get_workflow_status(config, child_id)
+    assert child_status.status == :pending
+
+    {:ok, grandchild_status} = SystemDb.get_workflow_status(config, grandchild_id)
+    assert grandchild_status.status == :pending
+  end
+
+  test "cancelling with cancel_children: true cancels a two-level descendant tree" do
+    engine =
+      start_engine([
+        {"spawns_blocking_grandchild_tree/1",
+         {SampleWorkflows, :spawns_blocking_grandchild_tree, 1}},
+        {"spawns_blocking_child/1", {SampleWorkflows, :spawns_blocking_child, 1}},
+        {"blocks_forever/1", {SampleWorkflows, :blocks_forever, 1}}
+      ])
+
+    config = Dbos.config(engine)
+
+    {:ok, root_handle} =
+      Dbos.start("spawns_blocking_grandchild_tree/1", [nil], engine: engine)
+
+    wait_until(fn ->
+      length(SystemDb.child_workflow_ids(config, root_handle.workflow_id)) == 1
+    end)
+
+    [child_id] = SystemDb.child_workflow_ids(config, root_handle.workflow_id)
+
+    wait_until(fn -> length(SystemDb.child_workflow_ids(config, child_id)) == 1 end)
+    [grandchild_id] = SystemDb.child_workflow_ids(config, child_id)
+
+    :ok = Dbos.cancel(root_handle.workflow_id, engine: engine, cancel_children: true)
+
+    {:ok, root_status} = SystemDb.get_workflow_status(config, root_handle.workflow_id)
+    assert root_status.status == :cancelled
+
+    {:ok, child_status} = SystemDb.get_workflow_status(config, child_id)
+    assert child_status.status == :cancelled
+
+    {:ok, grandchild_status} = SystemDb.get_workflow_status(config, grandchild_id)
+    assert grandchild_status.status == :cancelled
+  end
+
+  test "a cycle in the child graph does not hang the descendant walk" do
+    engine = start_engine([{"add/2", {SampleWorkflows, :add, 2}}])
+    config = Dbos.config(engine)
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-cycle-a",
+      status: :pending,
+      name: "add/2",
+      inputs: [1, 2],
+      parent_workflow_id: "wf-cycle-b"
+    })
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-cycle-b",
+      status: :pending,
+      name: "add/2",
+      inputs: [1, 2],
+      parent_workflow_id: "wf-cycle-a"
+    })
+
+    {time_us, ids} =
+      :timer.tc(fn -> SystemDb.descendant_workflow_ids(config, "wf-cycle-a") end)
+
+    assert Enum.sort(ids) == ["wf-cycle-b"]
+    assert time_us < 1_000_000
+  end
+
   test "cancelling an already-terminal workflow is a no-op" do
     engine = start_engine([{"add/2", {SampleWorkflows, :add, 2}}])
     config = Dbos.config(engine)

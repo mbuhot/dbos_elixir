@@ -1,6 +1,7 @@
 defmodule Dbos.InWorkflowCheckpointTest do
   use Dbos.Case, async: false
 
+  alias Dbos.CheckoutWorkflow
   alias Dbos.Recovery
   alias Dbos.SampleWorkflows
   alias Dbos.SystemDb
@@ -225,6 +226,155 @@ defmodule Dbos.InWorkflowCheckpointTest do
              {2, "DBOS.getStatus"},
              {3, "plain_step/0"}
            ]
+  end
+
+  test "a workflow that cancels another workflow and crashes before completing recovers to exactly one DBOS.cancelWorkflow checkpoint" do
+    engine =
+      start_engine([
+        {"cancel_and_die/2", {SampleWorkflows, :cancel_and_die, 2}},
+        {"sleep_forever/1", {SampleWorkflows, :sleep_forever, 1}}
+      ])
+
+    config = Dbos.config(engine)
+    table = new_table()
+
+    {:ok, target_handle} = Dbos.start("sleep_forever/1", [nil], engine: engine)
+    wait_until(fn -> match?({:ok, _}, WorkflowSup.whereis(engine, target_handle.workflow_id)) end)
+
+    parent_id = "wf-cancel-dies-#{System.unique_integer([:positive])}"
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: parent_id,
+      status: :pending,
+      name: "cancel_and_die/2",
+      inputs: [table, target_handle.workflow_id]
+    })
+
+    {:ok, _pid} =
+      WorkflowSup.start_workflow(
+        engine,
+        parent_id,
+        {SampleWorkflows, :cancel_and_die, 2},
+        [table, target_handle.workflow_id]
+      )
+
+    wait_until(fn -> WorkflowSup.whereis(engine, parent_id) == :error end)
+
+    Recovery.recover_pending(engine)
+
+    wait_until(fn ->
+      {:ok, status} = SystemDb.get_workflow_status(config, parent_id)
+      status.status == :success
+    end)
+
+    {:ok, steps} = SystemDb.get_workflow_steps(config, parent_id)
+    assert Enum.map(steps, & &1.function_name) == ["DBOS.cancelWorkflow"]
+
+    {:ok, target_status} = SystemDb.get_workflow_status(config, target_handle.workflow_id)
+    assert target_status.status == :cancelled
+  end
+
+  test "a workflow that resumes another workflow and crashes before completing recovers to exactly one DBOS.resumeWorkflow checkpoint" do
+    engine =
+      start_engine([
+        {"resume_and_die/2", {SampleWorkflows, :resume_and_die, 2}},
+        {"three_steps/1", {SampleWorkflows, :three_steps, 1}}
+      ])
+
+    config = Dbos.config(engine)
+    table = new_table()
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-resume-target",
+      status: :cancelled,
+      name: "three_steps/1",
+      inputs: ["ord_1"]
+    })
+
+    parent_id = "wf-resume-dies-#{System.unique_integer([:positive])}"
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: parent_id,
+      status: :pending,
+      name: "resume_and_die/2",
+      inputs: [table, "wf-resume-target"]
+    })
+
+    {:ok, _pid} =
+      WorkflowSup.start_workflow(
+        engine,
+        parent_id,
+        {SampleWorkflows, :resume_and_die, 2},
+        [table, "wf-resume-target"]
+      )
+
+    wait_until(fn -> WorkflowSup.whereis(engine, parent_id) == :error end)
+
+    Recovery.recover_pending(engine)
+
+    wait_until(fn ->
+      {:ok, status} = SystemDb.get_workflow_status(config, parent_id)
+      status.status == :success
+    end)
+
+    {:ok, steps} = SystemDb.get_workflow_steps(config, parent_id)
+    assert Enum.map(steps, & &1.function_name) == ["DBOS.resumeWorkflow"]
+
+    wait_until(fn ->
+      {:ok, status} = SystemDb.get_workflow_status(config, "wf-resume-target")
+      status.status == :success
+    end)
+  end
+
+  test "the exact (function_id, function_name) sequence for a workflow using cancel and resume" do
+    engine =
+      start_engine([
+        CheckoutWorkflow,
+        {"sleep_forever/1", {SampleWorkflows, :sleep_forever, 1}}
+      ])
+
+    config = Dbos.config(engine)
+
+    {:ok, target_handle} = Dbos.start("sleep_forever/1", [nil], engine: engine)
+    wait_until(fn -> match?({:ok, _}, WorkflowSup.whereis(engine, target_handle.workflow_id)) end)
+
+    {:ok, handle} =
+      Dbos.start("cancels_and_resumes_other_workflow", [target_handle.workflow_id],
+        engine: engine
+      )
+
+    assert {:ok, :ok} = Dbos.await(handle)
+
+    {:ok, steps} = SystemDb.get_workflow_steps(config, handle.workflow_id)
+
+    assert Enum.map(steps, &{&1.function_id, &1.function_name}) == [
+             {0, "DBOS.cancelWorkflow"},
+             {1, "DBOS.resumeWorkflow"}
+           ]
+  end
+
+  test "outside a workflow, cancel and resume still consume no ids and write no checkpoint" do
+    engine =
+      start_engine([
+        {"sleep_forever/1", {SampleWorkflows, :sleep_forever, 1}}
+      ])
+
+    config = Dbos.config(engine)
+
+    {:ok, target_handle} = Dbos.start("sleep_forever/1", [nil], engine: engine)
+    wait_until(fn -> match?({:ok, _}, WorkflowSup.whereis(engine, target_handle.workflow_id)) end)
+
+    :ok = Dbos.cancel(target_handle.workflow_id, engine: engine)
+    :ok = Dbos.resume(target_handle.workflow_id, engine: engine)
+
+    {:ok, %{rows: [[reserved_checkpoint_count]]}} =
+      Dbos.DB.Postgrex.query(
+        config.conn,
+        "SELECT count(*) FROM dbos.operation_outputs WHERE function_name IN ($1, $2)",
+        ["DBOS.cancelWorkflow", "DBOS.resumeWorkflow"]
+      )
+
+    assert reserved_checkpoint_count == 0
   end
 
   test "outside a workflow, enqueue, fork, and status still consume no ids and write no checkpoint" do

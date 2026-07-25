@@ -1,8 +1,8 @@
 # Workflows
 
 A workflow is a durable function. Its steps checkpoint to Postgres as they complete, so a crash,
-a deploy, or a killed node resumes the workflow from its last checkpoint instead of starting
-over. `defworkflow` is how you declare one.
+a deploy, or a killed node resumes the workflow from its last checkpoint. It never starts over.
+`defworkflow` is how you declare one.
 
 ## Guarantees
 
@@ -10,9 +10,9 @@ over. `defworkflow` is how you declare one.
   and node restarts, as long as some engine with that workflow registered eventually comes back
   up.
 - **Each step runs at most once for its recorded output** — a step that already checkpointed
-  returns that output on every future replay instead of executing its body again.
+  returns that output on every future replay. Its body never executes again.
 - **An exception a step raises is itself checkpointed and re-raised on replay** — a workflow that
-  failed for a real reason fails the same way again, rather than silently retrying past it.
+  failed for a real reason fails the same way again. It never silently retries past the failure.
 
 These guarantees hold only if the workflow body is deterministic. See
 [the determinism contract, in summary](#the-determinism-contract-in-summary) below.
@@ -30,10 +30,9 @@ defmodule MyApp.Checkout do
 end
 ```
 
-`name:` is required. Recovery dispatches a `PENDING` workflow row by its `name` column, not by
-module/function — moving `process_order/2` to a different module, or renaming the function,
-leaves an in-flight workflow row resolvable as long as `name:` doesn't change. Compiling without
-`name:` is a `CompileError`.
+`name:` is required. Recovery dispatches a `PENDING` workflow row by its `name` column. Moving
+`process_order/2` to a different module, or renaming the function, leaves an in-flight workflow
+row resolvable as long as `name:` doesn't change. Compiling without `name:` is a `CompileError`.
 
 A workflow head cannot carry a `when` guard — recovery must map one name to exactly one
 deterministic body, so branching goes inside the body:
@@ -69,7 +68,7 @@ on where you call it from:
 {:ok, result} = Dbos.await(handle)
 ```
 
-`Dbos.start/3` does the same thing by workflow name (or a `&Mod.fun/n` capture) instead of a
+`Dbos.start/3` does the same thing by workflow name (or a `&Mod.fun/n` capture), skipping the
 generated dispatcher function, and accepts `:workflow_id`, `:engine`, `:deduplication_id`,
 `:priority`, `:application_version`:
 
@@ -78,9 +77,9 @@ generated dispatcher function, and accepts `:workflow_id`, `:engine`, `:deduplic
   Dbos.start("process_order", ["order-1", 4999], workflow_id: "checkout-order-1")
 ```
 
-`Dbos.enqueue/3` starts a workflow by placing it on a named queue instead of dispatching it
-immediately — a `Dbos.Queue.Runner` claims it later, subject to the queue's concurrency, rate
-limit, and priority rules. Requires `:queue_name`; also accepts `:workflow_id`, `:priority`,
+`Dbos.enqueue/3` starts a workflow by placing it on a named queue for later dispatch — a
+`Dbos.Queue.Runner` claims it, subject to the queue's concurrency, rate limit, and priority
+rules. Requires `:queue_name`; also accepts `:workflow_id`, `:priority`,
 `:deduplication_id`, `:partition_key`, `:delay_ms`, `:application_version`:
 
 ```elixir
@@ -96,7 +95,7 @@ Called from inside a workflow, `Dbos.enqueue/3` is itself a checkpointed step (`
 Every workflow has an id — a string, random (`Dbos.Uuid.v4/0`-generated) by default. Supply your
 own with `:workflow_id` on `Dbos.start/3` or `Dbos.enqueue/3` to make starting the *same* logical
 operation twice a no-op: starting a workflow id that already has a row simply returns a handle to
-the existing run rather than starting a second one.
+the existing run. A second one never starts.
 
 ```elixir
 Dbos.start("process_order", [order_id, amount], workflow_id: "checkout-#{order_id}")
@@ -118,7 +117,7 @@ end
 
 Called from inside a workflow, `Dbos.await/2` is a checkpointed step (`"DBOS.getResult"`) — the
 wait itself is never checkpointed, only the outcome, once it's known, so replaying a still-waiting
-await waits again rather than replaying a value that doesn't exist yet.
+await waits again; there's no recorded value yet to replay.
 
 ## Child workflows
 
@@ -141,7 +140,7 @@ id already recorded (`check_child_workflow`) and does not start it a second time
 A workflow body must take the same path and call the same steps with the same arguments every
 time it replays. Step **arguments are never stored** — only each step's *output* is — so a step
 called with different arguments on replay silently returns the stale recorded output for its
-position rather than erroring. `defworkflow` rejects the mechanically-detectable violations
+position. No error surfaces. `defworkflow` rejects the mechanically-detectable violations
 (`:rand.*`, `DateTime.utc_now/0`, bare `receive`, `Task.async`, ...) at compile time. Full
 contract, the worked example of a silently stale replay, and the complete banned-construct table:
 `docs/determinism.md`.
@@ -185,13 +184,13 @@ workflow "process_order" (MyApp.Checkout):
 
 A call this analysis cannot resolve to a local step, a same-module child workflow, or a `Dbos.*`
 primitive — a comprehension, a captured function, a call into another module — is reported as
-`CANNOT BE STATICALLY DETERMINED` rather than guessed at. An uneven branch is called out
+`CANNOT BE STATICALLY DETERMINED`, without a guess. An uneven branch is called out
 explicitly:
 
 ```
 case at id 2: UNEVEN ID ALLOCATION ACROSS BRANCHES — replaying a different branch than the one
-originally taken will misalign every step id after this point. Use a patch instead of a bare
-conditional here.
+originally taken will misalign every step id after this point. Use a patch here — a bare
+conditional breaks replay.
 ```
 
 Run it on any workflow before shipping a change to its body — it is the fastest way to see

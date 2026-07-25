@@ -1,0 +1,234 @@
+# The System Database
+
+Every durable fact `Dbos` knows about a workflow lives in eleven Postgres tables under one
+schema (`dbos` by default). This page is for querying them directly — with `psql`, a BI tool, an
+on-call runbook — rather than through `Dbos.SystemDb`.
+
+Full column-by-column provenance (which migration added each column, in what order) lives in
+`notes/schema.md`; this page is the operator-facing summary.
+
+## Entity diagram
+
+```mermaid
+erDiagram
+    workflow_status ||--o{ operation_outputs : "checkpoints"
+    workflow_status ||--o{ notifications : "receives"
+    workflow_status ||--o{ workflow_events : "publishes"
+    workflow_status ||--o{ workflow_events_history : "audit trail"
+    workflow_status ||--o{ streams : "appends"
+    workflow_status }o--o| workflow_status : "parent_workflow_id / forked_from"
+    workflow_schedules ||--o{ workflow_status : "fires"
+    queues ||--o{ workflow_status : "queue_name"
+
+    workflow_status {
+        text workflow_uuid PK
+        text status
+        text name
+        text executor_id
+        text application_version
+        text queue_name
+        bigint created_at
+        bigint recovery_attempts
+    }
+    operation_outputs {
+        text workflow_uuid FK
+        int function_id
+        text function_name
+        text output
+        text error
+    }
+    notifications {
+        text message_uuid PK
+        text destination_uuid FK
+        text topic
+        text message
+        bool consumed
+    }
+    workflow_events {
+        text workflow_uuid FK
+        text key
+        text value
+    }
+    streams {
+        text workflow_uuid FK
+        text key
+        int offset
+        text value
+    }
+```
+
+## Tables
+
+| Table | Purpose |
+|---|---|
+| `workflow_status` | One row per workflow: identity, status, timing, queue placement, everything `Dbos.WorkflowStatus` mirrors. |
+| `operation_outputs` | One row per completed step (or the built-in operations — send, recv, sleep, enqueue, fork, ...). What makes replay possible. |
+| `notifications` | The cross-workflow send/recv mailbox. One row per `Dbos.send_message/4` call. |
+| `workflow_events` | Latest value per `(workflow_uuid, key)` written by `Dbos.set_event/3` — what `Dbos.get_event/4` reads. |
+| `workflow_events_history` | Every event write, not just the latest — lets `Dbos.fork/3` replay exactly which step wrote which event before the fork point. |
+| `streams` | Append-only, offset-ordered values per `(workflow_uuid, key)` — what `Dbos.write_stream/3`/`Dbos.read_stream/3` use. |
+| `event_dispatch_kv` | Generic key/value store keyed on `(service_name, workflow_fn_name, key)` — scoped to a service and function, not to one specific workflow instance. |
+| `application_versions` | Every distinct `application_version` string this deployment has ever registered, with a timestamp — the "latest version" dequeue/reclaim consult. |
+| `workflow_schedules` | One row per cron-scheduled workflow declaration (`schedule:` on `defworkflow`), plus its `last_fired_at` catch-up floor. |
+| `queues` | One row per declared `Dbos.Queue`'s persisted configuration — concurrency, rate limit, partitioning. |
+| `dbos_migrations` | Single-row bookkeeping table: the schema's current migration version. |
+
+## `workflow_status` in detail
+
+The primary workflow record, keyed on `workflow_uuid`. Selected columns, grouped by what they're
+for:
+
+| Column | Meaning |
+|---|---|
+| `workflow_uuid` | The workflow's id (PK). |
+| `status` | One of the seven values below. |
+| `name` | The registered workflow name recovery dispatches on — not a module/function. |
+| `inputs` / `output` / `error` | Encoded (Erlang term, base64) — see "Opaque to SQL" below. |
+| `executor_id` | Which running instance currently owns this row, for recovery/reclaim scoping. |
+| `application_version` | Stamped at start; gates which executor may recover or dequeue this row. |
+| `queue_name` / `queue_partition_key` / `priority` | Present only for a queued workflow. |
+| `deduplication_id` | The unique-slot key for a queue's dedup/debounce mechanism, `NULL` otherwise. |
+| `parent_workflow_id` | Set for a child workflow (`Dbos.start/3` called from inside a workflow). |
+| `forked_from` / `was_forked_from` | `forked_from` on a fork's own row points at its origin; `was_forked_from` is set on the origin once forked. |
+| `owner_xid` | A fresh UUID stamped on first insert, unchanged after — the split-brain detector `docs/clustering.md` describes. |
+| `created_at` / `updated_at` / `started_at_epoch_ms` / `completed_at` | Millisecond epoch timestamps. |
+| `recovery_attempts` | Bumped each time recovery/reclaim redispatches this row; compared against `max_recovery_attempts`. |
+| `workflow_timeout_ms` / `workflow_deadline_epoch_ms` | An optional durable deadline, resolved once and persisted (`resolve_workflow_deadline/2`). |
+| `schedule_name` / `debounce_deadline_epoch_ms` / `is_debounced` | Present only for a scheduled or debounced workflow. |
+| `attributes` | Free-form `jsonb` — the one column in this table that is **not** an opaque encoded blob, since it's stored as real `jsonb` rather than through the serialization path. |
+
+## `operation_outputs` in detail
+
+One row per checkpointed durable operation. Primary key `(workflow_uuid, function_id)` — this
+pair is the entire replay lookup.
+
+| Column | Meaning |
+|---|---|
+| `workflow_uuid`, `function_id` | The checkpoint's key — `function_id` is a plain 0-based counter, incremented once per durable operation in call order. |
+| `function_name` | What replay compares against the currently-expected step at this position. A mismatch raises `Dbos.UnexpectedStepError`. Built-in operations use reserved names: `DBOS.getResult`, `DBOS.send`, `DBOS.recv`, `DBOS.sleep`, `DBOS.setEvent`, `DBOS.getEvent`, `DBOS.writeStream`, `DBOS.closeStream`, `DBOS.enqueue`, `DBOS.forkWorkflow`, `DBOS.getStatus` (`Dbos.StepNames`). A user step defaults to `"name/arity"`. |
+| `output` / `error` | Encoded, exactly one of the two set. |
+| `child_workflow_id` | Set when this checkpoint is a child-workflow start (or `Dbos.await/2`'s `getResult`) rather than a plain step. |
+| `started_at_epoch_ms` / `completed_at_epoch_ms` | Wall-clock timing for this one step's execution. |
+
+## Status values and transitions
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: Dbos.start/3
+    [*] --> ENQUEUED: Dbos.enqueue/3 (or DELAYED, if delay_ms > 0)
+    DELAYED --> ENQUEUED: transition_delayed_workflows (delay elapsed)
+    ENQUEUED --> PENDING: dequeued by an executor
+    PENDING --> SUCCESS: workflow body returns
+    PENDING --> ERROR: workflow body raises
+    PENDING --> PENDING: recovery/reclaim redispatch (recovery_attempts += 1)
+    PENDING --> MAX_RECOVERY_ATTEMPTS_EXCEEDED: recovery_attempts exceeds the configured max
+    ENQUEUED --> PENDING: reclaimed queued row cleared back to ENQUEUED, not directly redispatched
+    PENDING --> CANCELLED: Dbos.cancel/2
+    ENQUEUED --> CANCELLED: Dbos.cancel/2
+    DELAYED --> CANCELLED: Dbos.cancel/2
+    SUCCESS --> [*]
+    ERROR --> [*]
+    CANCELLED --> [*]
+    MAX_RECOVERY_ATTEMPTS_EXCEEDED --> ENQUEUED: Dbos.resume/2
+```
+
+`Dbos.Status.terminal?/1` names `SUCCESS`, `ERROR`, `CANCELLED`, and
+`MAX_RECOVERY_ATTEMPTS_EXCEEDED` as terminal — no further transition happens to any of them
+except through an explicit `Dbos.resume/2` out of the last one.
+
+## Notification channels
+
+Three Postgres `LISTEN`/`NOTIFY` channels, each fired by an `AFTER INSERT` trigger on its table,
+payload always `<id> || '::' || <sub-key>`:
+
+| Channel | Fired by inserting into | Payload |
+|---|---|---|
+| `dbos_notifications_channel` | `notifications` | `destination_uuid::topic` |
+| `dbos_workflow_events_channel` | `workflow_events` | `workflow_uuid::key` |
+| `dbos_streams_channel` | `streams` | `workflow_uuid::key` |
+
+A listener splits the payload on `::` to know *which* row changed and re-queries for the value —
+the payload never carries the value itself. `Dbos.Notifications` is the one process per engine
+holding the dedicated connection subscribed to all three.
+
+## Useful queries
+
+Substitute `dbos` for your configured schema if you changed it.
+
+**What's currently running:**
+
+```sql
+SELECT workflow_uuid, name, executor_id, status, created_at
+FROM dbos.workflow_status
+WHERE status = 'PENDING'
+ORDER BY created_at;
+```
+
+**What's stuck in a queue, not yet claimed:**
+
+```sql
+SELECT queue_name, count(*) AS depth
+FROM dbos.workflow_status
+WHERE status = 'ENQUEUED'
+GROUP BY queue_name
+ORDER BY depth DESC;
+```
+
+**What's failed recently:**
+
+```sql
+SELECT workflow_uuid, name, status, updated_at
+FROM dbos.workflow_status
+WHERE status IN ('ERROR', 'CANCELLED', 'MAX_RECOVERY_ATTEMPTS_EXCEEDED')
+ORDER BY updated_at DESC
+LIMIT 50;
+```
+
+**What's stuck `PENDING` past a threshold (a candidate for `docs/clustering.md`'s orphan sweep,
+or a sign recovery isn't running):**
+
+```sql
+SELECT workflow_uuid, name, executor_id, updated_at
+FROM dbos.workflow_status
+WHERE status = 'PENDING'
+  AND updated_at < (EXTRACT(epoch FROM now())::bigint * 1000) - 300000
+ORDER BY updated_at;
+```
+
+**A workflow's checkpointed steps, in order:**
+
+```sql
+SELECT function_id, function_name, started_at_epoch_ms, completed_at_epoch_ms
+FROM dbos.operation_outputs
+WHERE workflow_uuid = 'wf-123'
+ORDER BY function_id;
+```
+
+**Which application versions have in-flight (non-terminal) workflows** — useful before
+decommissioning an old deployment (`guides/tutorials/upgrading-workflows.md`):
+
+```sql
+SELECT application_version, status, count(*)
+FROM dbos.workflow_status
+WHERE status IN ('PENDING', 'ENQUEUED', 'DELAYED')
+GROUP BY application_version, status;
+```
+
+## Serialized columns are opaque to SQL
+
+`inputs`, `output`, and `error` on `workflow_status`; `output`/`error` on `operation_outputs`;
+`message` on `notifications`; `value` on `workflow_events`/`workflow_events_history`/`streams` —
+every one of these is `:erlang.term_to_binary/1` output, base64-encoded into a `TEXT` column
+(`docs/interop-migration.md`). A SQL client can display the bytes but cannot filter, compare, or
+extract structure from them — `WHERE output->>'status' = 'x'`-style queries do not work, because
+there is no JSON in that column to index into.
+
+Each of these tables carries its own `serialization` column recording the exact format used to
+write that row (today, always `"erl_etf"`) — check it before assuming a fixed decode, since the
+column exists specifically so more than one format can coexist over time. Decoding the payload at
+all requires an Elixir (or Erlang) process calling `:erlang.binary_to_term/1` — see
+`docs/interop-migration.md` for what that implies for any tooling that isn't Elixir-aware.
+
+The one exception is `workflow_status.attributes`, stored as real Postgres `jsonb` rather than
+through this serialization path — that column *is* queryable directly (`attributes @> '{"...":
+"..."}'`, and there's a GIN index on it for exactly that).

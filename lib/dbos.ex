@@ -256,6 +256,18 @@ defmodule Dbos do
   end
 
   @doc """
+  Runs `fun` as a one-off durable step named `name`, without a `defstep`: the escape hatch for a
+  step that does not deserve its own named function. Same checkpoint/replay semantics as
+  `defstep` — see `Dbos.Runtime.run_step/3`. `opts` (default `[]`): `:max_retries`,
+  `:base_interval_ms`, `:backoff_factor`, `:max_interval_ms`, forwarded to `Dbos.RetryPolicy`.
+  """
+  def step(name, fun) when is_function(fun, 0), do: step(name, [], fun)
+
+  def step(name, opts, fun) when is_function(fun, 0) do
+    Runtime.run_step(name, opts, fun)
+  end
+
+  @doc """
   Runs `fun.(conn)` as a durable transactional step named `name`: the user's writes made through
   `conn` and the step's `operation_outputs` checkpoint commit together in one database
   transaction. Must be called from inside a workflow. Raises
@@ -273,19 +285,53 @@ defmodule Dbos do
   on this engine, wakes it immediately so a blocked `recv`/`get_event`/`sleep` is interrupted
   promptly rather than waiting out its timeout; a workflow actively running plain steps instead
   stops cooperatively at its next step boundary, where `check_operation_execution` observes the
-  cancellation. `opts[:engine]` defaults to `Dbos`.
+  cancellation. `opts[:engine]` defaults to `Dbos`; `opts[:cancel_children]` (default `false`)
+  additionally walks `workflow_id`'s descendant tree — breadth-first over `parent_workflow_id`,
+  cycle- and depth-guarded — and cancels every descendant alongside it, in the same database
+  transaction as the walk that discovered them, so the final `CANCELLED` update is one atomic
+  statement over the whole collected set. A descendant started after the walk already read its
+  parent's children is not included, the same scope the upstream reference itself accepts (its
+  own child lookup is also a plain query, not a recursive CTE); two concurrent cancellations of
+  overlapping trees are both safe, since the underlying `UPDATE ... WHERE status NOT IN (...)`
+  makes cancelling an already-cancelled row an idempotent no-op.
+
+  Called from inside a workflow, this consumes a step id and checkpoints a
+  `"DBOS.cancelWorkflow"` step, so replaying the caller does not attempt to cancel a second time.
+  Outside a workflow, no id is allocated and nothing is checkpointed.
   """
   def cancel(workflow_id, opts \\ []) do
-    engine = engine(opts)
-    config = config(engine)
-    SystemDb.cancel_workflows(config, [workflow_id])
+    {engine, config} = engine_and_config(opts)
+    cancel_children? = Keyword.get(opts, :cancel_children, false)
 
+    Runtime.run_step(StepNames.cancel_workflow(), [], fn ->
+      config
+      |> cancel_with_descendants(workflow_id, cancel_children?)
+      |> Enum.each(&wake_live_process(engine, &1))
+    end)
+
+    :ok
+  end
+
+  defp cancel_with_descendants(config, workflow_id, false) do
+    SystemDb.cancel_workflows(config, [workflow_id])
+  end
+
+  defp cancel_with_descendants(config, workflow_id, true) do
+    {:ok, cancelled} =
+      config.db.transaction(config.conn, [], fn conn ->
+        tx_config = %{config | conn: conn}
+        descendant_ids = SystemDb.descendant_workflow_ids(tx_config, workflow_id)
+        SystemDb.cancel_workflows(tx_config, [workflow_id | descendant_ids])
+      end)
+
+    cancelled
+  end
+
+  defp wake_live_process(engine, workflow_id) do
     case WorkflowSup.whereis(engine, workflow_id) do
       {:ok, pid} -> send(pid, {:dbos_notify, :cancelled, workflow_id})
       :error -> :ok
     end
-
-    :ok
   end
 
   @doc """
@@ -293,11 +339,19 @@ defmodule Dbos do
   re-enqueues it onto `opts[:queue_name]` (default `Dbos.Queue.internal_queue_name/0`). Resuming a
   workflow already `SUCCESS`/`ERROR` is a silent no-op (the row is left unchanged). `opts[:engine]`
   defaults to `Dbos`.
+
+  Called from inside a workflow, this consumes a step id and checkpoints a
+  `"DBOS.resumeWorkflow"` step, so replaying the caller does not attempt to resume a second time.
+  Outside a workflow, no id is allocated and nothing is checkpointed.
   """
   def resume(workflow_id, opts \\ []) do
-    config = opts |> engine() |> config()
+    {_engine, config} = engine_and_config(opts)
     queue_name = Keyword.get(opts, :queue_name, Queue.internal_queue_name())
-    SystemDb.resume_workflows(config, [workflow_id], queue_name: queue_name)
+
+    Runtime.run_step(StepNames.resume_workflow(), [], fn ->
+      SystemDb.resume_workflows(config, [workflow_id], queue_name: queue_name)
+    end)
+
     :ok
   end
 
@@ -394,8 +448,24 @@ defmodule Dbos do
     mfa = {info[:module], info[:name], info[:arity]}
 
     case Registry.name_for_mfa(engine, mfa) do
-      {:ok, name} -> {name, mfa}
-      :error -> raise "workflow #{inspect(mfa)} is not registered on engine #{inspect(engine)}"
+      {:ok, name} ->
+        {name, mfa}
+
+      :error ->
+        resolve_dispatcher_capture(engine, mfa)
+    end
+  end
+
+  defp resolve_dispatcher_capture(engine, {module, fun_name, arity}) do
+    body_mfa = {module, Dbos.Macros.body_function_name(fun_name), arity}
+
+    case Registry.name_for_mfa(engine, body_mfa) do
+      {:ok, name} ->
+        {name, body_mfa}
+
+      :error ->
+        raise "workflow #{inspect({module, fun_name, arity})} is not registered on engine " <>
+                "#{inspect(engine)}"
     end
   end
 

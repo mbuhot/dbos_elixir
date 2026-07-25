@@ -31,7 +31,7 @@ schema alongside your own tables, no second database to run.
 ## Your first workflow
 
 A **workflow** is a durable function: if the process running it crashes partway through,
-restarting the application resumes it from its last checkpoint instead of starting over. A
+restarting the application resumes it from its last checkpoint. It never starts over. A
 **step** is the unit that gets checkpointed — call it once, and its recorded result replaces the
 call on every future replay.
 
@@ -56,8 +56,8 @@ end
 ```
 
 `defworkflow` requires an explicit `name:`. Recovery re-dispatches a crashed workflow by looking
-up this name, not the module or function it was defined in — a name is a stable identity for the
-workflow across deploys, a module/function pair is not.
+up this name — a stable identity for the workflow across deploys, independent of the module or
+function it was defined in.
 
 Wire the engine into your supervision tree:
 
@@ -94,7 +94,7 @@ that.
 ## Adding retries to a step
 
 `reserve_stock` calls an inventory service over the network — worth retrying on a transient
-failure rather than failing the whole order:
+failure to avoid failing the whole order:
 
 ```elixir
 defstep reserve_stock(order_id), max_retries: 3, base_interval_ms: 200, backoff_factor: 2.0 do
@@ -141,7 +141,7 @@ un-checkpointed write there would re-run on every replay. See `guides/tutorials/
 
 ## A queue: running work with a concurrency limit
 
-Shipping calls a slow carrier API. Rather than run it inline and hold up the workflow, enqueue it
+Shipping calls a slow carrier API. Running it inline would hold up the workflow, so enqueue it
 onto a queue that limits how many ship calls run at once:
 
 ```elixir
@@ -220,7 +220,7 @@ still `PENDING` for this engine automatically, before your application accepts i
 
 `process_order` runs again from the top:
 
-- `reserve_stock` and `charge_card` return their recorded outputs instead of re-running — the
+- `reserve_stock` and `charge_card` return their recorded outputs. Neither re-runs, so the
   card is not charged twice.
 - `record_receipt` runs for real, since it never got as far as checkpointing.
 

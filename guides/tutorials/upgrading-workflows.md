@@ -22,9 +22,9 @@ one the *current* code is about to run. A mismatch raises `Dbos.UnexpectedStepEr
 | Renaming a step (its `name:`, or the default `"fun/arity"`) | Yes | `Dbos.UnexpectedStepError`: `function_name` recorded ≠ `function_name` expected. |
 | Adding or removing a step before an existing one | Yes | Shifts every later step's `function_id` by one. |
 | Changing how many step ids a branch allocates (an `if`/`case`/`cond` where the arms call a different number of durable operations) | Yes | The branch actually taken during the original run fixed the id layout; a differently-shaped branch on replay misaligns every id after it. `mix dbos.explain` flags this statically — see `guides/tutorials/workflows.md`. |
-| Changing the shape of a struct/map stored as workflow `inputs`, a step's `output`, an event value, or a stream item | Yes, on decode | Everything is encoded as an Erlang term (`docs/interop-migration.md`). A struct's fields are part of that term; adding/removing/renaming a field, or renaming the module, changes what `:erlang.binary_to_term/1` hands back — old rows decode into whatever shape they were written with, not the new one. |
+| Changing the shape of a struct/map stored as workflow `inputs`, a step's `output`, an event value, or a stream item | Yes, on decode | Everything is encoded as an Erlang term (`docs/interop-migration.md`). A struct's fields are part of that term; adding/removing/renaming a field, or renaming the module, changes what `:erlang.binary_to_term/1` hands back — old rows decode into whatever shape they were written with at the time. |
 | Adding a brand new step at the *end* of a workflow, after every step an in-flight instance could already have completed | No, for that instance | Nothing before it shifted. Still a landmine for an instance not yet that far along, unless the new step is unconditionally reached in every remaining path. |
-| Changing a step's *body* without touching its name, its position, or how many ids it consumes | No | Replay never re-runs a completed step — only the step's checkpointed name and position matter, not what it does today. A step not yet reached picks up the new behavior on its first (only) execution. |
+| Changing a step's *body* without touching its name, its position, or how many ids it consumes | No | Replay never re-runs a completed step — only the step's checkpointed name and position matter; today's body plays no part in the match. A step not yet reached picks up the new behavior on its first (only) execution. |
 
 The determinism checker (`Dbos.Determinism`, `docs/determinism.md`) catches nondeterministic
 *constructs* at compile time. It does not — cannot — know that this deploy renamed a step
@@ -112,12 +112,12 @@ Deploy sequence:
 
 Cost: you run two versions of the application at once for as long as the oldest in-flight
 workflow takes to finish. For a workflow that can run for days, that's a real operational
-commitment, not a rolling-deploy footnote.
+commitment worth planning for explicitly.
 
 ### 2. A new workflow name
 
-Give the changed workflow a new `name:` (and, if convenient, a new function) rather than
-changing the existing one in place. Old in-flight instances keep dispatching under the old name
+Give the changed workflow a new `name:` (and, if convenient, a new function), leaving the
+existing one in place. Old in-flight instances keep dispatching under the old name
 to the old body — as long as it's still registered — while every new invocation goes through
 the new name to the new body.
 
@@ -137,7 +137,7 @@ step sequence changes underneath any in-flight instance, because its code doesn'
 Retire the old function (and stop registering its name) only once nothing is left running
 against it.
 
-This works for any breaking change, not just ones bounded by a version boundary, and it doesn't
+This works for any breaking change, including ones outside a version boundary, and it doesn't
 require running two application versions in parallel — both bodies live in the same deployed
 code at once. The tradeoff is code you have to keep around (and keep registered) until the old
 name's last instance finishes, and a naming scheme (`_v2`, `_v3`, ...) to track.
@@ -148,8 +148,8 @@ The upstream DBOS SDKs support an in-place "patch": a marker recorded once at a 
 workflow so an *existing* instance's replay takes the old path while every fresh instance takes
 the new one, without a version bump or a new name. `lib/dbos/step_names.ex` reserves the
 step-name format this would use (`"DBOS.patch-" <> patch_name`), but there is no public
-`Dbos.patch/2` (or `deprecate_patch`) function in this port yet — the reservation is there for
-future support, not a usable API today. Until it exists, use strategy 1 or 2 above for anything
+`Dbos.patch` (or `deprecate_patch`) function in this port yet — the reservation is there for
+future support; no usable API exists today. Until it exists, use strategy 1 or 2 above for anything
 that would otherwise call for a patch.
 
 ## Summary: what happens to an in-flight workflow
@@ -169,7 +169,7 @@ sequenceDiagram
     participant New as v2 executors
 
     Old->>DB: workflow_status rows, application_version = v1
-    Note over New: deploy v2 alongside v1, not instead of it
+    Note over New: deploy v2 alongside v1, keeping v1 running
     New->>DB: new workflows enqueued/started at application_version = v2
     New->>DB: dequeue_candidate_ids only claims v2 (+ NULL, since v2 is now the latest registered version)
     Old->>DB: still recovers/dequeues its own v1 PENDING/ENQUEUED rows

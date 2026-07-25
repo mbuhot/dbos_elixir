@@ -59,6 +59,7 @@ defmodule Dbos.Macros do
       Module.get_attribute(env.module, :dbos_warn_cross_module_calls, true)
 
     reject_duplicate_workflows!(workflow_defs, env)
+    reject_ambiguous_opts_arity!(workflow_defs, env)
 
     built = Enum.map(workflow_defs, &build_workflow(&1, env, repo, warn_cross_module_calls))
     workflow_asts = Enum.map(built, &elem(&1, 0))
@@ -97,15 +98,25 @@ defmodule Dbos.Macros do
     do: build_transaction(call, Keyword.merge(opts, do_block))
 
   @doc """
-  Defines a durable workflow. `name:` is required (recovery dispatches on it). Generates two
-  functions: the workflow body (run by the engine, under a generated internal name) and a public
-  dispatcher under `call`'s own name/arity. The dispatcher's return type depends on where it's
-  called from — this asymmetry is deliberate: inside a workflow it starts a child workflow,
-  awaits it, and returns the unwrapped result (the same value the call would have produced as a
-  plain function); outside a workflow it starts a root workflow and returns
-  `{:ok, %Dbos.WorkflowHandle{}}` immediately, without blocking the caller for the workflow's
-  lifetime — await it explicitly with `Dbos.await/2` when the result is needed. With the engine
-  not started, `Dbos.start/3` raises `Dbos.NotStartedError` on either path.
+  Defines a durable workflow. `name:` is required (recovery dispatches on it). Generates three
+  functions: the workflow body (run by the engine, under a generated internal name), a public
+  dispatcher under `call`'s own name/arity, and a second public dispatcher at one arity higher,
+  taking every declared argument explicitly (no default-argument skipping) plus a trailing
+  options keyword list — `:workflow_id`, `:priority`, `:deduplication_id`,
+  `:application_version` outside a workflow; `:workflow_id`, `:application_version` for the child
+  call this becomes inside one. A pinned `:workflow_id` is the usual way to make a start
+  idempotent. Both dispatchers' return type depends on where they're called from — this
+  asymmetry is deliberate: inside a workflow they start a child workflow, await it, and return
+  the unwrapped result (the same value the call would have produced as a plain function); outside
+  a workflow they start a root workflow and return `{:ok, %Dbos.WorkflowHandle{}}` immediately,
+  without blocking the caller for the workflow's lifetime — await it explicitly with
+  `Dbos.await/2` when the result is needed. With the engine not started, `Dbos.start/3` raises
+  `Dbos.NotStartedError` on either path.
+
+  The options dispatcher's arity (declared argument count + 1) is always strictly greater than
+  every arity a default argument can produce, so it never collides with the bare dispatcher; a
+  second `defworkflow` in the same module whose own declared arity happens to equal that
+  arity is rejected at compile time instead of silently misdispatching.
 
   Runs `Dbos.Determinism.check!/2` over the body at compile time. Does not support a `when` guard
   on the head (a workflow's name must map to exactly one deterministic body — see
@@ -128,21 +139,22 @@ defmodule Dbos.Macros do
 
   @doc """
   Runtime support for a bare workflow call. Inside a workflow context: starts `name` with `args`
-  as a child workflow, blocks for its result, and returns the unwrapped value or re-raises the
-  recorded exception. Outside a workflow context: starts `name` with `args` as a root workflow
-  and returns `{:ok, %Dbos.WorkflowHandle{}}` immediately, without awaiting it. With the engine
-  not started, `Dbos.start/3` raises `Dbos.NotStartedError` on either path.
+  (and `opts`) as a child workflow, blocks for its result, and returns the unwrapped value or
+  re-raises the recorded exception. Outside a workflow context: starts `name` with `args` (and
+  `opts`) as a root workflow and returns `{:ok, %Dbos.WorkflowHandle{}}` immediately, without
+  awaiting it. With the engine not started, `Dbos.start/3` raises `Dbos.NotStartedError` on
+  either path.
   """
-  def dispatch_workflow(name, args) do
+  def dispatch_workflow(name, args, opts \\ []) do
     if Dbos.Runtime.in_workflow?() do
-      {:ok, handle} = Dbos.start(name, args)
+      {:ok, handle} = Dbos.start(name, args, opts)
 
       case Dbos.await(handle) do
         {:ok, value} -> value
         {:error, exception} -> raise exception
       end
     else
-      Dbos.start(name, args)
+      Dbos.start(name, args, opts)
     end
   end
 
@@ -225,6 +237,9 @@ defmodule Dbos.Macros do
     forward_args = dispatcher_forward_args(dispatcher_head)
     body_head = {body_fun, [], strip_defaults(args)}
 
+    {opts_dispatcher_head, opts_forward_args, opts_var} =
+      build_opts_dispatcher_head(fun_name, args)
+
     ast =
       quote do
         @doc false
@@ -232,6 +247,14 @@ defmodule Dbos.Macros do
 
         def unquote(dispatcher_head) do
           Dbos.Macros.dispatch_workflow(unquote(name), unquote(forward_args))
+        end
+
+        def unquote(opts_dispatcher_head) do
+          Dbos.Macros.dispatch_workflow(
+            unquote(name),
+            unquote(opts_forward_args),
+            unquote(opts_var)
+          )
         end
       end
 
@@ -330,7 +353,8 @@ defmodule Dbos.Macros do
     end
   end
 
-  defp body_function_name(fun_name), do: :"#{fun_name}__dbos_workflow_body__"
+  @doc "The generated internal name a `defworkflow`'s body runs under: `fun_name` with `__dbos_workflow_body__` appended."
+  def body_function_name(fun_name), do: :"#{fun_name}__dbos_workflow_body__"
 
   defp build_dispatcher_head(fun_name, args) do
     dispatcher_args =
@@ -345,6 +369,42 @@ defmodule Dbos.Macros do
       end)
 
     {fun_name, [], dispatcher_args}
+  end
+
+  defp build_opts_dispatcher_head(fun_name, args) do
+    arg_vars =
+      args
+      |> Enum.with_index()
+      |> Enum.map(fn {_pattern, index} -> Macro.var(:"arg#{index}", nil) end)
+
+    opts_var = Macro.var(:dbos_opts, nil)
+    {{fun_name, [], arg_vars ++ [opts_var]}, arg_vars, opts_var}
+  end
+
+  defp reject_ambiguous_opts_arity!(workflow_defs, env) do
+    declared =
+      Enum.map(workflow_defs, fn {call, _opts, _line} ->
+        {fun_name, _args, arity} = workflow_head_info(call)
+        {fun_name, arity}
+      end)
+
+    declared_set = MapSet.new(declared)
+
+    Enum.each(workflow_defs, fn {call, _opts, line} ->
+      {fun_name, _args, arity} = workflow_head_info(call)
+      opts_arity = arity + 1
+
+      if MapSet.member?(declared_set, {fun_name, opts_arity}) do
+        raise CompileError,
+          file: env.file,
+          line: line,
+          description:
+            "defworkflow #{fun_name}/#{arity}'s generated options dispatcher would be " <>
+              "#{fun_name}/#{opts_arity}, which collides with another declared defworkflow " <>
+              "#{fun_name}/#{opts_arity} in #{inspect(env.module)}. Give one of them a " <>
+              "different function name."
+      end
+    end)
   end
 
   defp dispatcher_forward_args({_fun_name, _meta, dispatcher_args}) do

@@ -2,7 +2,7 @@
 
 ## The problem, precisely
 
-A supervisor restarts a crashed process. It does not restart the crashed process's **work**.
+A supervisor restarts a crashed process. The crashed process's **work** stays lost.
 
 ```mermaid
 sequenceDiagram
@@ -26,7 +26,7 @@ somebody remembered to make sure of that by hand.
 **Durable execution stores that history.** Every step a workflow takes is written to Postgres
 before the next one starts. A crash of any kind — process, node, deploy — leaves a record of
 exactly how far the workflow got. Recovery does not guess; it replays from that record, and
-"replays" a completed step by returning what it recorded instead of running it again.
+"replays" a completed step by returning what it recorded. The step never runs again.
 
 ## What you get
 

@@ -105,6 +105,39 @@ end
 Kill the BEAM mid-charge and restart: `process_order/2` resumes from whichever step last
 checkpointed, without re-charging a card that already succeeded.
 
+A capture of the workflow function (`&MyApp.Checkout.process_order/2`) resolves the same way a
+name string does, everywhere a workflow name or capture is accepted (`Dbos.start/3`,
+`Dbos.enqueue/3`).
+
+### Start options
+
+`defworkflow` also generates a second, one-arity-higher dispatcher taking every argument
+explicitly plus a trailing options list — the way to pin a `workflow_id` (making a repeated
+start idempotent), set `priority`, or a `deduplication_id`:
+
+```elixir
+MyApp.Checkout.process_order("order-123", 4999, workflow_id: "order-123-checkout")
+```
+
+### An inline step
+
+`Dbos.step/2` checkpoints a one-off step without a named `defstep`:
+
+```elixir
+defworkflow process_order(order_id, amount), name: "process_order" do
+  Dbos.step("notify_ops", fn -> OpsChannel.notify(order_id) end)
+end
+```
+
+### Cancelling a workflow tree
+
+`Dbos.cancel/2` cancels one workflow; `cancel_children: true` walks its child tree and cancels
+every descendant too:
+
+```elixir
+Dbos.cancel(workflow_id, cancel_children: true)
+```
+
 ## Supervision tree
 
 ```mermaid

@@ -24,7 +24,7 @@ defmodule Dbos.Explain do
   def find_workflow(module, fun, arity) do
     with {:module, ^module} <- Code.ensure_loaded(module),
          true <- function_exported?(module, :__dbos_workflows__, 0) do
-      body_fun = :"#{fun}__dbos_workflow_body__"
+      body_fun = Dbos.Macros.body_function_name(fun)
 
       module.__dbos_workflows__()
       |> Enum.find(fn {_name, {mod, bfun, barity}, _ast} ->
@@ -208,6 +208,8 @@ defmodule Dbos.Explain do
   defp dbos_op(:enqueue, _arity), do: {:step, 1, "Dbos.enqueue"}
   defp dbos_op(:fork, _arity), do: {:step, 1, "Dbos.fork (DBOS.forkWorkflow)"}
   defp dbos_op(:status, _arity), do: {:step, 1, "Dbos.status (DBOS.getStatus)"}
+  defp dbos_op(:cancel, _arity), do: {:step, 1, "Dbos.cancel (DBOS.cancelWorkflow)"}
+  defp dbos_op(:resume, _arity), do: {:step, 1, "Dbos.resume (DBOS.resumeWorkflow)"}
   defp dbos_op(_fun, _arity), do: :unknown
 
   defp pure_literal?(expr) do

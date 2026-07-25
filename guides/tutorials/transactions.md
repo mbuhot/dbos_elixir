@@ -44,7 +44,7 @@ Naming and options work the same as `defstep` — the name defaults to `"functio
 ## The Ecto enlistment rule
 
 `deftransaction`'s body runs inside one call to `Dbos.transaction/3`, which opens the transaction
-with `Repo.transaction/2` — never by checking out a raw connection from the pool directly. Any
+with `Repo.transaction/2`, always through the pool it's given. Any
 call your body makes through the same `Repo` module — `MyApp.Repo.insert!/1`,
 `MyApp.Repo.update!/1`, a raw `MyApp.Repo.query!/2` — enlists on that same connection
 automatically, the same way any two `Repo` calls nested inside an ordinary
@@ -81,17 +81,16 @@ end
 
 If the body raises, the transaction rolls back — the write and the checkpoint both undo together,
 same as a commit closes both together. The exception is then checkpointed as the step's recorded
-failure and re-raised, exactly like a plain step's failure. A replay of a workflow that failed
-here for a real reason (not a crash) fails the same way again rather than silently retrying past
-it.
+failure and re-raised, exactly like a plain step's failure. This covers a body that genuinely
+raised, distinct from the process simply crashing mid-transaction. Replaying that workflow fails
+the same way again — it never silently retries past that failure.
 
 ## Which path this port implements
 
-`notes/datasource.md` describes the reference implementation's three-layer protocol for a
-transactional step: a system-database checkpoint table, a *separate* completion table living in
-the user's own database, and a two-transaction commit order between them — built to close a crash
-window that can only exist when the system database and the user's database are two different
-databases.
+The reference DBOS implementation uses a three-layer protocol for a transactional step: a
+system-database checkpoint table, a *separate* completion table living in the user's own
+database, and a two-transaction commit order between them — built to close a crash window that
+can only exist when the system database and the user's database are two different databases.
 
 This port keeps its system database on the exact same `Repo`/connection the application already
 uses (`db: {Dbos.DB.Ecto, MyApp.Repo}` in `Dbos.Supervisor`'s config) — there is only ever one

@@ -196,6 +196,59 @@ defmodule Dbos.SampleWorkflows do
     do: Dbos.get_event(target_workflow_id, key, timeout_ms)
 
   @doc """
+  Cancels `target_workflow_id`, then dies, but only the first time it runs: a replay after
+  recovery finds the cancel already checkpointed and does not cancel a second time, for
+  crash-and-recover idempotency tests.
+  """
+  def cancel_and_die(table, target_workflow_id) do
+    :ok = Dbos.cancel(target_workflow_id)
+
+    case :ets.insert_new(table, {:crashed_once, true}) do
+      true -> Process.exit(self(), :kill)
+      false -> :done
+    end
+  end
+
+  @doc """
+  Resumes `target_workflow_id`, then dies, but only the first time it runs: a replay after
+  recovery finds the resume already checkpointed and does not resume a second time, for
+  crash-and-recover idempotency tests.
+  """
+  def resume_and_die(table, target_workflow_id) do
+    :ok = Dbos.resume(target_workflow_id)
+
+    case :ets.insert_new(table, {:crashed_once, true}) do
+      true -> Process.exit(self(), :kill)
+      false -> :done
+    end
+  end
+
+  @doc "Blocks in a plain `receive`, so a cancellation only changes its durable status, not its live process."
+  def blocks_forever(_arg) do
+    receive do
+      :stop -> :stopped
+    end
+  end
+
+  @doc "Spawns a `blocks_forever/1` child, then itself blocks — one level of the descendant tree used by cancel_children tests."
+  def spawns_blocking_child(_arg) do
+    {:ok, _handle} = Dbos.start("blocks_forever/1", [nil])
+
+    receive do
+      :stop -> :stopped
+    end
+  end
+
+  @doc "Spawns a `spawns_blocking_child/1` child (which itself spawns a `blocks_forever/1` grandchild), then blocks — a two-level descendant tree."
+  def spawns_blocking_grandchild_tree(_arg) do
+    {:ok, _handle} = Dbos.start("spawns_blocking_child/1", [nil])
+
+    receive do
+      :stop -> :stopped
+    end
+  end
+
+  @doc """
   Enqueues a `counting_child/1` job onto the internal queue, then dies, but only the first time
   it runs: a replay after recovery finds the enqueue already checkpointed and does not enqueue a
   second one, for crash-and-recover idempotency tests.
@@ -269,6 +322,25 @@ defmodule Dbos.SampleWorkflows do
 
     Dbos.sleep(ms)
     :woke
+  end
+
+  @doc "Uses `Dbos.step/2` for a one-off checkpointed step, without a `defstep`."
+  def inline_step_workflow(order_id) do
+    Dbos.step("one-off step", fn -> %{one_off: order_id} end)
+  end
+
+  @doc "Bumps `table`'s `:count` entry only when `Dbos.step/2`'s body actually runs, for replay tests."
+  def counting_inline_step(table) do
+    Dbos.step("counting step", fn ->
+      :ets.update_counter(table, :count, {2, 1}, {:count, 0})
+    end)
+  end
+
+  @doc "An inline step via `Dbos.step/3` that always raises, to exercise `max_retries`."
+  def always_fails_inline_step(max_retries) do
+    Dbos.step("flaky step", [max_retries: max_retries, base_interval_ms: 1], fn ->
+      raise "boom"
+    end)
   end
 
   def step_id_layout_workflow(target_workflow_id) do

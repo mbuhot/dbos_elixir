@@ -31,7 +31,7 @@ defmodule Dbos.Scheduler do
 
   defstruct [:engine, :config, :poll_interval_ms, schedules: %{}, deactivated: false]
 
-  @doc "Starts the scheduler for the engine named `opts[:name]`, registering `opts[:schedules]` (from `Module.__dbos_schedules__/0`)."
+  @doc "Starts the scheduler for the engine named `opts[:name]`, registering `opts[:schedules]`."
   def start_link(opts) do
     engine = Keyword.fetch!(opts, :name)
     GenServer.start_link(__MODULE__, opts, name: process_name(engine))

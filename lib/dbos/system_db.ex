@@ -495,6 +495,45 @@ defmodule Dbos.SystemDb do
     if workflow_ids == [], do: [], else: cancel_workflows(config, workflow_ids)
   end
 
+  @max_descendant_depth 1000
+
+  @doc "The ids of workflows whose `parent_workflow_id` is `workflow_id` (one level)."
+  def child_workflow_ids(%Config{} = config, workflow_id) do
+    sql = """
+    SELECT workflow_uuid FROM #{table(config, "workflow_status")} WHERE parent_workflow_id = $1
+    """
+
+    {:ok, result} = config.db.query(config.conn, sql, [workflow_id])
+    Enum.map(result.rows, fn [id] -> id end)
+  end
+
+  @doc """
+  Every descendant workflow id under `workflow_id`, breadth-first over `parent_workflow_id`.
+  Already-visited ids are never re-queued, so a cycle in the parent link (which should not occur,
+  but is not trusted) cannot loop forever; the walk also gives up after
+  #{@max_descendant_depth} levels, returning whatever it has collected so far.
+  """
+  def descendant_workflow_ids(%Config{} = config, workflow_id) do
+    walk_descendants(config, [workflow_id], MapSet.new([workflow_id]), 0, [])
+  end
+
+  defp walk_descendants(_config, [], _visited, _depth, acc), do: Enum.reverse(acc)
+
+  defp walk_descendants(_config, _queue, _visited, depth, acc)
+       when depth >= @max_descendant_depth,
+       do: Enum.reverse(acc)
+
+  defp walk_descendants(config, queue, visited, depth, acc) do
+    children =
+      queue
+      |> Enum.flat_map(&child_workflow_ids(config, &1))
+      |> Enum.uniq()
+      |> Enum.reject(&MapSet.member?(visited, &1))
+
+    visited = Enum.reduce(children, visited, &MapSet.put(&2, &1))
+    walk_descendants(config, children, visited, depth + 1, Enum.reverse(children) ++ acc)
+  end
+
   @doc """
   Resumes every workflow in `workflow_ids`: re-enqueues onto `opts[:queue_name]` (default
   `Dbos.Queue.internal_queue_name/0`), resetting `recovery_attempts` to `0` and clearing

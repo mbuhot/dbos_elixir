@@ -53,9 +53,61 @@ defmodule Dbos.MixProject do
       groups_for_extras: groups_for_extras(),
       groups_for_modules: groups_for_modules(),
       extra_section: "GUIDES",
-      formatters: ["html"]
+      formatters: ["html"],
+      before_closing_body_tag: &before_closing_body_tag/1
     ]
   end
+
+  defp before_closing_body_tag(:html) do
+    """
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>
+      (() => {
+        const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+        const isDark = () => {
+          const stored = document.body.getAttribute("data-theme") || localStorage.getItem("ex_doc:settings:night_mode");
+          if (stored === "dark") return true;
+          if (stored === "light") return false;
+          return darkQuery.matches;
+        };
+
+        const sources = [];
+
+        const render = () => {
+          mermaid.initialize({ startOnLoad: false, theme: isDark() ? "dark" : "default" });
+          sources.forEach(({ container, definition }, index) => {
+            mermaid.render(`mermaid-graph-${index}-${Date.now()}`, definition).then(({ svg, bindFunctions }) => {
+              container.innerHTML = svg;
+              if (bindFunctions) bindFunctions(container);
+            });
+          });
+        };
+
+        document.addEventListener("DOMContentLoaded", () => {
+          document.querySelectorAll("pre > code.mermaid").forEach((code) => {
+            const pre = code.parentElement;
+            const container = document.createElement("div");
+            container.className = "mermaid-diagram";
+            sources.push({ container, definition: code.textContent });
+            pre.replaceWith(container);
+          });
+
+          if (sources.length === 0) return;
+
+          render();
+          darkQuery.addEventListener("change", render);
+          new MutationObserver(render).observe(document.body, {
+            attributes: true,
+            attributeFilter: ["data-theme", "class"]
+          });
+        });
+      })();
+    </script>
+    """
+  end
+
+  defp before_closing_body_tag(_), do: ""
 
   defp extras do
     [
@@ -80,8 +132,7 @@ defmodule Dbos.MixProject do
       "docs/telemetry.md",
       "docs/interop-migration.md",
       "guides/production-checklist.md",
-      "guides/faq.md",
-      "DECISIONS.md"
+      "guides/faq.md"
     ]
   end
 

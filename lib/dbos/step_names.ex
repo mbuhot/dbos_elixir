@@ -36,4 +36,10 @@ defmodule Dbos.StepNames do
 
   @doc "The `function_name` for `Dbos.status/2` called from within a workflow."
   def get_status, do: "DBOS.getStatus"
+
+  @doc "The `function_name` for `Dbos.cancel/2` called from within a workflow."
+  def cancel_workflow, do: "DBOS.cancelWorkflow"
+
+  @doc "The `function_name` for `Dbos.resume/2` called from within a workflow."
+  def resume_workflow, do: "DBOS.resumeWorkflow"
 end

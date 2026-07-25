@@ -110,4 +110,97 @@ defmodule Dbos.MacrosTest do
     {:ok, handle_2} = CheckoutWorkflow.greet("Mike")
     assert {:ok, "hello, Mike"} = Dbos.await(handle_2)
   end
+
+  test "a capture of a defworkflow's public function resolves and starts the workflow via Dbos.start" do
+    engine = start_engine([CheckoutWorkflow])
+
+    {:ok, handle} =
+      Dbos.start(&CheckoutWorkflow.process_order/2, ["ord_cap", 100], engine: engine)
+
+    assert {:ok, %{charge: %{charge_id: "ch_ord_cap"}}} = Dbos.await(handle)
+  end
+
+  test "a capture of a defworkflow's public function resolves via Dbos.enqueue" do
+    engine = start_engine([CheckoutWorkflow])
+
+    {:ok, handle} =
+      Dbos.enqueue(&CheckoutWorkflow.process_order/2, ["ord_cap2", 50],
+        queue_name: Dbos.Queue.internal_queue_name(),
+        engine: engine
+      )
+
+    assert {:ok, %{charge: %{charge_id: "ch_ord_cap2"}}} = Dbos.await(handle)
+  end
+
+  test "a capture of a function that is not a registered workflow raises clearly" do
+    engine = start_engine([CheckoutWorkflow])
+
+    assert_raise RuntimeError, ~r/not registered/, fn ->
+      Dbos.start(&CheckoutWorkflow.reserve_stock/1, ["ord_x"], engine: engine)
+    end
+  end
+
+  test "a pinned workflow_id passed through the generated options dispatcher makes a repeated start idempotent" do
+    _engine = start_engine([CheckoutWorkflow], name: Dbos)
+
+    {:ok, handle_1} =
+      CheckoutWorkflow.process_order("ord_pin", 100, workflow_id: "pinned-order")
+
+    {:ok, handle_2} =
+      CheckoutWorkflow.process_order("ord_pin", 100, workflow_id: "pinned-order")
+
+    assert handle_1.workflow_id == "pinned-order"
+    assert handle_2.workflow_id == "pinned-order"
+    assert {:ok, %{charge: %{charge_id: "ch_ord_pin"}}} = Dbos.await(handle_1)
+  end
+
+  test "the options dispatcher works alongside a default argument, requiring the argument explicitly" do
+    _engine = start_engine([CheckoutWorkflow], name: Dbos)
+
+    {:ok, handle} = CheckoutWorkflow.greet("Mike", workflow_id: "greet-pinned")
+
+    assert handle.workflow_id == "greet-pinned"
+    assert {:ok, "hello, Mike"} = Dbos.await(handle)
+  end
+
+  test "a pinned workflow_id for a child call inside a workflow is honored" do
+    engine = start_engine([CheckoutWorkflow])
+
+    {:ok, handle} =
+      Dbos.start("parent_flow_with_opts", ["ord_child_pin", "pinned-child"], engine: engine)
+
+    assert {:ok, "ord_child_pin"} = Dbos.await(handle)
+
+    {:ok, child_status} = Dbos.SystemDb.get_workflow_status(Dbos.config(engine), "pinned-child")
+    assert child_status.status == :success
+    assert child_status.output == "ord_child_pin"
+  end
+
+  test "an opts-dispatcher arity that would collide with another declared defworkflow is a compile error" do
+    module =
+      Module.concat(__MODULE__, :"AmbiguousArityFixture#{System.unique_integer([:positive])}")
+
+    source = """
+    defmodule #{inspect(module)} do
+      use Dbos
+
+      defworkflow ambiguous(a), name: "ambiguous_a" do
+        a
+      end
+
+      defworkflow ambiguous(a, b), name: "ambiguous_ab" do
+        {a, b}
+      end
+    end
+    """
+
+    error =
+      assert_raise CompileError, fn ->
+        Code.compile_string(source, "test/fixture.ex")
+      end
+
+    assert error.description =~ "ambiguous/1"
+    assert error.description =~ "ambiguous/2"
+    assert error.description =~ "collides"
+  end
 end

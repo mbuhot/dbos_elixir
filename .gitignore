@@ -25,3 +25,10 @@ dbos-*.tar
 # Vendored reference implementation (dbos-transact-golang), cloned for recon.
 /reference/
 
+# Generated documentation.
+/doc/
+
+# Each sample app is its own Mix project with its own build artifacts.
+/sample_apps/*/_build/
+/sample_apps/*/deps/
+

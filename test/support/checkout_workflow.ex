@@ -13,6 +13,10 @@ defmodule Dbos.CheckoutWorkflow do
     child_flow(order_id)
   end
 
+  defworkflow parent_flow_with_opts(order_id, child_workflow_id), name: "parent_flow_with_opts" do
+    child_flow(order_id, workflow_id: child_workflow_id)
+  end
+
   defworkflow child_flow(order_id), name: "child_flow" do
     order_id
   end
@@ -31,6 +35,12 @@ defmodule Dbos.CheckoutWorkflow do
     {:ok, _enqueue_handle} = Dbos.enqueue("process_order", [order_id, 100], queue_name: "orders")
     {:ok, _fork_handle} = Dbos.fork(target_workflow_id, 0)
     Dbos.status(target_workflow_id)
+  end
+
+  defworkflow cancels_and_resumes_other_workflow(target_workflow_id),
+    name: "cancels_and_resumes_other_workflow" do
+    :ok = Dbos.cancel(target_workflow_id)
+    :ok = Dbos.resume(target_workflow_id)
   end
 
   defworkflow even_branches(order_id, outcome), name: "even_branches" do
