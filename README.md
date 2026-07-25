@@ -1,14 +1,10 @@
-<div align="center">
-
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/mbuhot/dbos_elixir/blob/main/LICENSE)
 [![Elixir](https://img.shields.io/badge/elixir-~%3E%201.19-purple.svg)](https://elixir-lang.org)
 [![Postgres](https://img.shields.io/badge/postgres-13%2B-blue.svg)](https://www.postgresql.org)
 
 # Dbos for Elixir: Durable Workflow Orchestration on Postgres
 
-#### [Documentation](https://mbuhot.github.io/dbos_elixir/) &nbsp;&nbsp;•&nbsp;&nbsp; [Examples](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps) &nbsp;&nbsp;•&nbsp;&nbsp; [Determinism Contract](https://mbuhot.github.io/dbos_elixir/determinism.html)
-
-</div>
+#### [Documentation](https://mbuhot.github.io/dbos_elixir/) • [Examples](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps) • [Determinism Contract](https://mbuhot.github.io/dbos_elixir/determinism.html)
 
 ---
 
@@ -44,7 +40,7 @@ An OTP supervisor restarts a dead process. The half-finished work that process w
 
 ## Features
 
-<details open><summary><strong>💾 Durable Workflows</strong></summary>
+### 💾 Durable Workflows
 
 A workflow checkpoints each completed step. After a crash, restarting replays the body, and every step that already finished returns its recorded value.
 
@@ -94,9 +90,7 @@ Kill the node between `charge_card` and `ship`. On restart the card stays charge
 
 A `deftransaction` commits your write and its checkpoint in one Postgres transaction, so the two always agree.
 
-</details>
-
-<details><summary><strong>📒 Durable Queues</strong></summary>
+### 📒 Durable Queues
 
 Enqueue a workflow and any process pointed at the same database may claim it. Concurrency limits, rate limits, and priority are enforced in Postgres, shared across every node.
 
@@ -116,9 +110,7 @@ Enqueue a workflow and any process pointed at the same database may claim it. Co
 
 Queues support worker and global concurrency, rate limiting, priority, partition keys for per-tenant fairness, delayed start, deduplication, and debouncing. A node that dies mid-task releases its claim, and another node picks the work up.
 
-</details>
-
-<details><summary><strong>🎫 Exactly-Once Event Processing</strong></summary>
+### 🎫 Exactly-Once Event Processing
 
 Give a workflow an id derived from the event, and a duplicate delivery collapses onto the original run.
 
@@ -128,9 +120,7 @@ Give a workflow an id derived from the event, and a duplicate delivery collapses
 
 Acknowledge the webhook immediately. The workflow completes in the background exactly once, whether the sender retries or your node restarts.
 
-</details>
-
-<details><summary><strong>📅 Durable Scheduling</strong></summary>
+### 📅 Durable Scheduling
 
 Declare a cron schedule on the workflow itself. Several nodes may run the same schedule, and exactly one firing happens per tick.
 
@@ -155,9 +145,7 @@ end
 
 A wait longer than a minute releases its process entirely and is rebuilt on wake, so parking a hundred thousand workflows for a fortnight costs about 16MB and zero processes.
 
-</details>
-
-<details><summary><strong>📫 Durable Notifications</strong></summary>
+### 📫 Durable Notifications
 
 Pause a workflow until a message arrives, or publish events for external readers. Both persist in Postgres with exactly-once delivery, and both survive a restart.
 
@@ -179,8 +167,6 @@ Dbos.send_message(order_workflow_id, "decision", %{outcome: :approve, approver: 
 Note the atoms in that payload. Values round-trip as Erlang terms, so what you send is exactly what the workflow receives.
 
 A message that arrives before the workflow reaches its `recv_message` is still delivered.
-
-</details>
 
 ## Getting Started
 
@@ -217,9 +203,7 @@ Ten runnable applications live in [`sample_apps/`](https://github.com/mbuhot/dbo
 
 ## Dbos vs. other Elixir tools
 
-<details><summary><strong>Dbos vs. OTP supervision</strong></summary>
-
-####
+### Dbos vs. OTP supervision
 
 A supervisor restarts a process that died. A restarted `GenServer` begins from its initial state, and the work in flight is gone.
 
@@ -231,11 +215,7 @@ Dbos records progress in Postgres, so a recovered workflow resumes at its last c
 
 They compose. Dbos runs inside your supervision tree and depends on it.
 
-</details>
-
-<details><summary><strong>Dbos vs. Oban</strong></summary>
-
-####
+### Dbos vs. Oban
 
 Both are Postgres-backed, and both give you durable queues with concurrency limits, priority, and retries. Oban is a mature job system with a large ecosystem and an excellent UI.
 
@@ -245,19 +225,13 @@ Dbos adds durable *workflows*: a function whose intermediate steps are individua
 
 **When to use Dbos:** you need a multi-step operation to survive a crash partway through, with each step recorded.
 
-</details>
-
-<details><summary><strong>Dbos vs. Temporal</strong></summary>
-
-####
+### Dbos vs. Temporal
 
 Both provide durable execution. Temporal runs an external orchestration cluster, and your workflows move into Temporal workers. Dbos is a library over the Postgres you already have.
 
 **When to use Temporal:** you want a dedicated orchestration platform, or you need languages this port does not cover.
 
 **When to use Dbos:** you want durable execution inside an existing Elixir application, on your current infrastructure.
-
-</details>
 
 ## Scope
 
