@@ -133,6 +133,187 @@ defmodule Dbos.RecoveryTest do
     assert status.status == :max_recovery_attempts_exceeded
   end
 
+  test "reclaim/2 moves another executor's PENDING rows to this executor and redispatches them, leaving a third executor's rows untouched",
+       %{config: config, name: name} do
+    insert_owned_by(config, "exec-dead", %{
+      workflow_id: "wf-owned-by-dead",
+      status: :pending,
+      name: "add/2",
+      inputs: [2, 3]
+    })
+
+    insert_owned_by(config, "exec-other", %{
+      workflow_id: "wf-owned-by-other",
+      status: :pending,
+      name: "add/2",
+      inputs: [5, 5]
+    })
+
+    Recovery.reclaim(name, ["exec-dead"])
+
+    wait_until(fn ->
+      {:ok, status} = SystemDb.get_workflow_status(config, "wf-owned-by-dead")
+      status.status == :success
+    end)
+
+    {:ok, reclaimed} = SystemDb.get_workflow_status(config, "wf-owned-by-dead")
+    assert reclaimed.output == 5
+    assert reclaimed.executor_id == "exec-1"
+
+    {:ok, untouched} = SystemDb.get_workflow_status(config, "wf-owned-by-other")
+    assert untouched.status == :pending
+    assert untouched.executor_id == "exec-other"
+  end
+
+  test "two engines reclaiming the same dead executor concurrently redispatch every workflow exactly once",
+       %{config: config, name: name} do
+    other_name = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
+    other_config = %{config | name: other_name, executor_id: "exec-2"}
+    Dbos.put_config(other_config)
+
+    start_supervised!(
+      {Dbos.Registry, name: other_name, workflows: [{"add/2", {SampleWorkflows, :add, 2}}]},
+      id: :other_registry
+    )
+
+    start_supervised!(
+      {Registry, keys: :unique, name: WorkflowSup.process_registry_name(other_name)},
+      id: :other_process_registry
+    )
+
+    start_supervised!({WorkflowSup, name: other_name}, id: :other_workflow_sup)
+
+    workflow_ids = for i <- 1..6, do: "wf-concurrent-#{i}"
+
+    Enum.each(workflow_ids, fn workflow_id ->
+      insert_owned_by(config, "exec-dead", %{
+        workflow_id: workflow_id,
+        status: :pending,
+        name: "add/2",
+        inputs: [1, 1]
+      })
+    end)
+
+    task_1 = Task.async(fn -> Recovery.reclaim(name, ["exec-dead"]) end)
+    task_2 = Task.async(fn -> Recovery.reclaim(other_name, ["exec-dead"]) end)
+    Task.await(task_1)
+    Task.await(task_2)
+
+    Enum.each(workflow_ids, fn workflow_id ->
+      wait_until(fn ->
+        {:ok, status} = SystemDb.get_workflow_status(config, workflow_id)
+        status.status == :success
+      end)
+    end)
+
+    Enum.each(workflow_ids, fn workflow_id ->
+      {:ok, status} = SystemDb.get_workflow_status(config, workflow_id)
+      assert status.recovery_attempts == 2
+    end)
+  end
+
+  test "reclaim/2 respects the batch size, claiming only that many rows per call", %{
+    config: config,
+    name: name
+  } do
+    workflow_ids = for i <- 1..5, do: "wf-batch-#{i}"
+
+    Enum.each(workflow_ids, fn workflow_id ->
+      insert_owned_by(config, "exec-dead", %{
+        workflow_id: workflow_id,
+        status: :pending,
+        name: "add/2",
+        inputs: [1, 1]
+      })
+    end)
+
+    Recovery.reclaim(name, ["exec-dead"], batch_size: 2)
+
+    claimed_count =
+      workflow_ids
+      |> Enum.map(fn workflow_id ->
+        {:ok, status} = SystemDb.get_workflow_status(config, workflow_id)
+        status.executor_id
+      end)
+      |> Enum.count(&(&1 == "exec-1"))
+
+    assert claimed_count == 2
+  end
+
+  test "a queued PENDING workflow owned by a dead executor is cleared to ENQUEUED, not redispatched",
+       %{config: config, name: name} do
+    insert_owned_by(config, "exec-dead", %{
+      workflow_id: "wf-dead-queued",
+      status: :pending,
+      name: "add/2",
+      inputs: [1, 2],
+      queue_name: "orders"
+    })
+
+    Recovery.reclaim(name, ["exec-dead"])
+
+    {:ok, status} = SystemDb.get_workflow_status(config, "wf-dead-queued")
+    assert status.status == :enqueued
+    assert status.started_at_epoch_ms == nil
+  end
+
+  test "reclaim/2 of a workflow whose name is not registered logs a warning and skips it, and the pass continues",
+       %{config: config, name: name} do
+    insert_owned_by(config, "exec-dead", %{
+      workflow_id: "wf-dead-unregistered",
+      status: :pending,
+      name: "unknown_workflow/1",
+      inputs: [1]
+    })
+
+    insert_owned_by(config, "exec-dead", %{
+      workflow_id: "wf-dead-registered",
+      status: :pending,
+      name: "add/2",
+      inputs: [3, 4]
+    })
+
+    Recovery.reclaim(name, ["exec-dead"])
+
+    wait_until(fn ->
+      {:ok, status} = SystemDb.get_workflow_status(config, "wf-dead-registered")
+      status.status == :success
+    end)
+
+    {:ok, unregistered_status} = SystemDb.get_workflow_status(config, "wf-dead-unregistered")
+    assert unregistered_status.status == :pending
+    assert unregistered_status.executor_id == "exec-1"
+  end
+
+  test "reclaimed workflows keep climbing recovery_attempts and eventually hit MAX_RECOVERY_ATTEMPTS_EXCEEDED",
+       %{config: config, name: name} do
+    Dbos.Registry.register(name, "crash_self/1", {SampleWorkflows, :crash_self, 1})
+
+    insert_owned_by(config, "exec-dead", %{
+      workflow_id: "wf-dead-dlq",
+      status: :pending,
+      name: "crash_self/1",
+      inputs: [1]
+    })
+
+    Recovery.reclaim(name, ["exec-dead"])
+    Process.sleep(20)
+    assert still_pending?(config, "wf-dead-dlq")
+
+    Recovery.reclaim(name, ["exec-1"])
+    Process.sleep(20)
+    assert still_pending?(config, "wf-dead-dlq")
+
+    Recovery.reclaim(name, ["exec-1"])
+
+    {:ok, status} = SystemDb.get_workflow_status(config, "wf-dead-dlq")
+    assert status.status == :max_recovery_attempts_exceeded
+  end
+
+  defp insert_owned_by(config, executor_id, attrs) do
+    SystemDb.insert_workflow_status(%{config | executor_id: executor_id}, attrs)
+  end
+
   defp still_pending?(config, workflow_id) do
     {:ok, status} = SystemDb.get_workflow_status(config, workflow_id)
     status.status == :pending

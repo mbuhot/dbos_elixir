@@ -1,9 +1,10 @@
 defmodule Dbos.Recovery do
   @moduledoc """
-  Re-dispatches this executor's `PENDING` workflows on engine start, per `notes/recovery.md` §1.
-  A queued `PENDING` workflow is handed back to its queue rather than re-invoked directly, since
-  Phase 3 owns dequeueing. An unregistered workflow name is logged and skipped; the pass
-  continues with the rest of the batch.
+  Re-dispatches `PENDING` workflows on engine start, and reclaims a dead executor's `PENDING`
+  workflows on demand, per `notes/recovery.md` §1 and the Phase 3b dead-executor reclaim design
+  in `DECISIONS.md`. A queued `PENDING` workflow is handed back to its queue rather than
+  re-invoked directly, since Phase 3 owns dequeueing. An unregistered workflow name is logged and
+  skipped; the pass continues with the rest of the batch.
   """
 
   use GenServer
@@ -20,16 +21,38 @@ defmodule Dbos.Recovery do
     GenServer.start_link(__MODULE__, engine_name, name: process_name(engine_name))
   end
 
-  @doc "Synchronously recovers every `PENDING` workflow owned by this executor and application version. The entry point tests call directly."
+  @doc """
+  Synchronously recovers every `PENDING` workflow owned by this executor and application
+  version: the special case of `reclaim/3` reclaiming its own executor id, with an unbounded
+  batch, so its behaviour is unchanged from before `reclaim/3` existed.
+  """
   def recover_pending(engine_name) do
     config = Dbos.config(engine_name)
+    reclaim(engine_name, [config.executor_id])
+  end
 
-    filters =
-      [status: :pending, executor_id: config.executor_id] ++
-        application_version_filter(config)
+  @doc """
+  Reclaims every `PENDING` workflow owned by any of `dead_executor_ids` to this engine's own
+  executor and redispatches it. A queued `PENDING` workflow is cleared back to `ENQUEUED`
+  instead, so the queue redistributes it, and is not itself redispatched here.
 
-    {:ok, workflows} = SystemDb.list_workflows(config, filters)
-    Enum.each(workflows, &recover_one(engine_name, config, &1))
+  Every survivor may call this concurrently for the same dead ids: the reassigning `UPDATE`
+  inside `Dbos.SystemDb.reclaim_pending_workflows/3` is the serialization point, so a call that
+  loses the race simply redispatches nothing. `opts[:batch_size]` bounds how many non-queued rows
+  one call claims; the default is unbounded, matching `recover_pending/1`'s historical behaviour.
+  Callers driven by cluster membership (`Dbos.Cluster.NodeWatcher`, `Dbos.Cluster.OrphanSweep`)
+  pass an explicit `config.reclaim_batch_size` instead.
+  """
+  def reclaim(engine_name, dead_executor_ids, opts \\ []) do
+    config = Dbos.config(engine_name)
+
+    config
+    |> SystemDb.list_queued_pending_workflow_ids(dead_executor_ids)
+    |> Enum.each(&SystemDb.clear_queue_assignment(config, &1))
+
+    config
+    |> SystemDb.reclaim_pending_workflows(dead_executor_ids, opts)
+    |> Enum.each(&recover_one(engine_name, config, &1))
   end
 
   @doc """
@@ -49,16 +72,6 @@ defmodule Dbos.Recovery do
   def handle_continue(:recover, engine_name) do
     recover_pending(engine_name)
     {:noreply, engine_name}
-  end
-
-  defp application_version_filter(%{application_version: nil}), do: []
-
-  defp application_version_filter(%{application_version: version}),
-    do: [application_version: version]
-
-  defp recover_one(_engine_name, config, %{queue_name: queue_name, workflow_uuid: workflow_id})
-       when is_binary(queue_name) do
-    SystemDb.clear_queue_assignment(config, workflow_id)
   end
 
   defp recover_one(engine_name, config, workflow) do

@@ -347,6 +347,85 @@ defmodule Dbos.SystemDb do
     if num_rows > 0, do: :cleared, else: :not_cleared
   end
 
+  @doc """
+  Atomically reassigns up to `opts[:batch_size]` non-queued `PENDING` rows owned by any of
+  `dead_executor_ids` to `config.executor_id`, per the Phase 3b dead-executor reclaim design
+  (`DECISIONS.md`). `opts[:batch_size]` defaults to unbounded. Filters by
+  `config.application_version` when set, exactly as `ListWorkflows` does upstream, since this
+  executor can only usefully re-run code matching its own registered version. Queued rows are
+  excluded — the caller clears their queue assignment via
+  `list_queued_pending_workflow_ids/2`/`clear_queue_assignment/2` instead. `FOR UPDATE SKIP
+  LOCKED` lets concurrent callers claim disjoint batches without blocking on each other, the same
+  pattern `dequeue_candidate_ids/4` uses. Returns the reassigned rows as `Dbos.WorkflowStatus`
+  structs.
+  """
+  def reclaim_pending_workflows(%Config{} = config, dead_executor_ids, opts \\ []) do
+    batch_size = Keyword.get(opts, :batch_size)
+    {version_clause, version_params, next_index} = application_version_clause(config, 4)
+    {limit_clause, limit_params} = reclaim_limit_clause(batch_size, next_index)
+
+    sql = """
+    UPDATE #{table(config, "workflow_status")}
+        SET executor_id = $1
+        WHERE workflow_uuid IN (
+          SELECT workflow_uuid FROM #{table(config, "workflow_status")}
+          WHERE executor_id = ANY($2) AND status = $3 AND queue_name IS NULL
+            #{version_clause}
+          ORDER BY created_at ASC
+          #{limit_clause}
+          FOR UPDATE SKIP LOCKED
+        )
+    RETURNING #{select_list(WorkflowStatus)}
+    """
+
+    params =
+      [config.executor_id, dead_executor_ids, Status.to_string(:pending)] ++
+        version_params ++ limit_params
+
+    {:ok, result} = config.db.query(config.conn, sql, params)
+    Enum.map(result.rows, &WorkflowStatus.from_row/1)
+  end
+
+  defp reclaim_limit_clause(nil, _index), do: {"", []}
+  defp reclaim_limit_clause(batch_size, index), do: {"LIMIT $#{index}", [batch_size]}
+
+  defp application_version_clause(%{application_version: nil}, index), do: {"", [], index}
+
+  defp application_version_clause(%{application_version: version}, index),
+    do: {"AND application_version = $#{index}", [version], index + 1}
+
+  @doc """
+  The workflow ids of queued `PENDING` rows owned by any of `dead_executor_ids`, per the Phase 3b
+  reclaim design. The caller clears each via `clear_queue_assignment/2` so the queue redistributes
+  it, rather than re-invoking it directly.
+  """
+  def list_queued_pending_workflow_ids(%Config{} = config, dead_executor_ids) do
+    sql = """
+    SELECT workflow_uuid FROM #{table(config, "workflow_status")}
+    WHERE executor_id = ANY($1) AND status = $2 AND queue_name IS NOT NULL
+    """
+
+    {:ok, result} =
+      config.db.query(config.conn, sql, [dead_executor_ids, Status.to_string(:pending)])
+
+    Enum.map(result.rows, fn [id] -> id end)
+  end
+
+  @doc """
+  The distinct `executor_id`s among `PENDING` rows whose `updated_at` is at least
+  `threshold_ms` old, per the Phase 3b orphan sweep (`Dbos.Cluster.OrphanSweep`).
+  """
+  def list_stale_pending_executor_ids(%Config{} = config, threshold_ms) do
+    sql = """
+    SELECT DISTINCT executor_id FROM #{table(config, "workflow_status")}
+    WHERE status = $1 AND executor_id IS NOT NULL AND updated_at <= $2
+    """
+
+    cutoff_ms = System.os_time(:millisecond) - threshold_ms
+    {:ok, result} = config.db.query(config.conn, sql, [Status.to_string(:pending), cutoff_ms])
+    Enum.map(result.rows, fn [id] -> id end)
+  end
+
   @doc "Registers `version_name` as a known application version, if not already present. Idempotent."
   def create_application_version(%Config{} = config, version_name) do
     sql = """

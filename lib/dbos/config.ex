@@ -11,7 +11,13 @@ defmodule Dbos.Config do
             schema: "dbos",
             executor_id: nil,
             application_version: nil,
-            max_recovery_attempts: 3
+            max_recovery_attempts: 3,
+            cluster_enabled: false,
+            cluster_group: Dbos.Cluster.Group,
+            reclaim_batch_size: 50,
+            orphan_sweep_enabled: false,
+            orphan_sweep_interval_ms: 300_000,
+            orphan_sweep_threshold_ms: 300_000
 
   @type t :: %__MODULE__{
           name: atom,
@@ -20,6 +26,12 @@ defmodule Dbos.Config do
           schema: String.t(),
           executor_id: String.t() | nil,
           application_version: String.t() | nil,
-          max_recovery_attempts: non_neg_integer
+          max_recovery_attempts: non_neg_integer,
+          cluster_enabled: boolean,
+          cluster_group: atom,
+          reclaim_batch_size: pos_integer,
+          orphan_sweep_enabled: boolean,
+          orphan_sweep_interval_ms: pos_integer,
+          orphan_sweep_threshold_ms: pos_integer
         }
 end
