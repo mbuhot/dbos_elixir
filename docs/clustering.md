@@ -71,10 +71,10 @@ RETURNING ...
 
 No election, no advisory lock. Every survivor may run this concurrently for the same dead ids —
 the `UPDATE` is the serialization point, so a call that loses the race simply redispatches
-nothing. `FOR UPDATE SKIP LOCKED` lets concurrent callers claim disjoint batches instead of
+nothing. `FOR UPDATE SKIP LOCKED` lets concurrent callers claim disjoint batches without
 blocking on each other. A queued `PENDING` row is excluded and handled separately: it goes back to
-`ENQUEUED` with its queue assignment cleared, so the queue redistributes it instead of this call
-redispatching it directly.
+`ENQUEUED` with its queue assignment cleared, so the queue redistributes it; this call never
+redispatches it directly.
 
 ## What it costs
 
@@ -83,7 +83,7 @@ redispatching it directly.
 | One extra process per engine | `Dbos.Cluster`; two more (`NodeWatcher`, `OrphanSweep`) if fully enabled. |
 | One `:pg` group | Shared across every engine using the same `cluster.group`. |
 | A remote call per new member | Resolving a joining pid's `{node, executor_id}` is one `GenServer.call/3` to that pid. |
-| A poll, if the orphan sweep is on | One query per `orphan_sweep.interval_ms`, engine-wide, not per workflow. |
+| A poll, if the orphan sweep is on | One query per `orphan_sweep.interval_ms`, engine-wide, independent of how many workflows exist. |
 
 ## Partition risk
 

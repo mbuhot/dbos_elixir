@@ -23,10 +23,10 @@ forked continuation) — wraps the call into the registered workflow function, p
 | `replay` | always | Whether this run is a recovery replay. |
 | `kind`, `reason`, `stacktrace` | `:exception` only | Standard `:telemetry.span/3` exception fields. |
 
-Firing on every checkpoint-skipping replay, not only a workflow's first attempt, is deliberate:
-a span per *process run* mirrors what actually consumed CPU/latency, not what the workflow's
-lifetime looked like end to end (`workflow_status.created_at`..`completed_at` already answers
-that from the database).
+Firing on every checkpoint-skipping replay, in addition to a workflow's first attempt, is
+deliberate: a span per *process run* mirrors what actually consumed CPU/latency. The workflow's
+full lifetime end to end is already answered separately, from `workflow_status.created_at`..
+`completed_at` in the database.
 
 ## `[:dbos, :step, :start | :stop | :exception]`
 
@@ -43,7 +43,7 @@ calling the step body; only real invocations are spanned.
 ## `[:dbos, :queue, :dequeue, :start | :stop | :exception]`
 
 One span per `Dbos.Queue.Runner` poll of one queue/partition pair — wraps the
-`Dbos.SystemDb.dequeue_workflows/3` call, per `notes/queues.md` §2.
+`Dbos.SystemDb.dequeue_workflows/3` call.
 
 | Metadata | Present | Meaning |
 |---|---|---|
@@ -51,7 +51,7 @@ One span per `Dbos.Queue.Runner` poll of one queue/partition pair — wraps the
 | `queue_name` | always | The queue being polled. |
 | `partition_key` | always (`nil` for an unpartitioned queue) | Which partition this poll covers. |
 | `count` | `:stop` only | How many workflows this poll claimed (`0` on an empty poll). |
-| `kind`, `reason`, `stacktrace` | `:exception` only | Fires on **every** lock-contention race (`NOWAIT` losing a claim under `GlobalConcurrency`), not only genuine failures — contention is an expected, frequent outcome under concurrent dequeuers; filter on `reason` if a handler only cares about non-contention errors (`Dbos.SystemDb.contention_error?/1`). |
+| `kind`, `reason`, `stacktrace` | `:exception` only | Fires on **every** lock-contention race (`NOWAIT` losing a claim under `GlobalConcurrency`) alongside genuine failures — contention is an expected, frequent outcome under concurrent dequeuers; filter on `reason` if a handler only cares about non-contention errors (`Dbos.SystemDb.contention_error?/1`). |
 
 ## `[:dbos, :recovery, :start | :stop | :exception]`
 

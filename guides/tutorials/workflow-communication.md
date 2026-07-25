@@ -7,7 +7,8 @@ primitive, durable sleep, isn't communication on its own but shares the same wai
 it's covered here too.
 
 Every value passed through any of these travels as a real Erlang term, encoded for storage and
-decoded back on the way out — not JSON. Atoms, tuples, and structs make the round trip intact.
+decoded back on the way out, with no JSON layer in between. Atoms, tuples, and structs make the
+round trip intact.
 
 ```elixir
 Dbos.send_message(other_id, nil, {:approved, %MyApp.Approval{by: "alice", note: "looks good"}})
@@ -52,7 +53,7 @@ immediately (checked once up front before waiting).
 
 Each `recv_message` call consumes one durable step id for the receive itself, plus one for the
 underlying sleep — both checkpointed, so a workflow that crashes mid-wait resumes waiting only
-for whatever time is left, not the full timeout again.
+for whatever time is left.
 
 ## Events: `set_event` / `get_event`
 
@@ -83,8 +84,8 @@ stage = Dbos.get_event(upload_workflow_id, "stage", 5_000)
 
 **Ordering and delivery**: unlike `recv_message`, `get_event` registrations are non-exclusive —
 any number of callers may wait on the same `(target_workflow_id, key)` concurrently, and all of
-them wake when it's set. Reading only ever returns the latest value for the key, not a queue of
-every value it was ever set to (use a stream for that). Called from inside a workflow, the wait
+them wake when it's set. Reading always returns just the latest value for the key (use a stream
+to see every value it was ever set to). Called from inside a workflow, the wait
 and the read are both checkpointed under their own step ids; called from ordinary code, only the
 wait happens — there's no workflow run to checkpoint into.
 
@@ -135,8 +136,7 @@ end
 ```
 
 `Dbos.sleep/1` checkpoints the absolute wake time under one step, then waits only the *remaining*
-interval — a workflow recovered after a crash mid-sleep does not wait out the full duration again,
-only whatever was left.
+interval — a workflow recovered after a crash mid-sleep waits out only whatever was left.
 
 A wait longer than `park_exit_threshold_ms` (a `Dbos.Supervisor` option, default `60_000` — one
 minute) does something more than just block: the workflow's BEAM process exits entirely, leaving
@@ -150,6 +150,6 @@ into a run (more than `park_replay_ceiling` steps completed, default `500`) skip
 past the threshold, since a wait that far in would pay for parking with a proportionally expensive
 replay on wake.
 
-Cancelling a parked or actively-waiting workflow interrupts the wait immediately rather than
-waiting it out — `Dbos.cancel/2` wakes any live process, and a woken/redispatched workflow checks
+Cancelling a parked or actively-waiting workflow interrupts the wait immediately —
+`Dbos.cancel/2` wakes any live process, and a woken/redispatched workflow checks
 for cancellation as soon as it resumes.

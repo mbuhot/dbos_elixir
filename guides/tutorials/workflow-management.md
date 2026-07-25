@@ -31,7 +31,7 @@ list — plus `:created_after`/`:created_before` (epoch-ms bounds), `:limit`, `:
 
 - `Dbos.status/2` fetches one workflow's full `%Dbos.WorkflowStatus{}` row. Called from inside a
   workflow, it consumes a step id and checkpoints under `"DBOS.getStatus"`, so a replay returns the
-  status as recorded then, not whatever it has changed to since.
+  status as recorded then, frozen regardless of whatever it has changed to since.
 - `Dbos.Client.steps/2` returns every checkpointed step (`%Dbos.StepInfo{}`), ordered by
   `function_id` — each one's name, timing, and recorded output or error.
 - `Dbos.result/2` returns `{:ok, output}`, `{:error, exception}`, or `:pending`.
@@ -44,7 +44,7 @@ list — plus `:created_after`/`:created_before` (epoch-ms bounds), `:limit`, `:
 
 Durably marks the workflow `CANCELLED` — a no-op if it's already `SUCCESS`/`ERROR`/`CANCELLED`. If
 the workflow has a live process on this engine, it's woken immediately, so a blocked
-`recv_message`/`get_event`/`sleep` is interrupted right away rather than waiting out its timeout. A
+`recv_message`/`get_event`/`sleep` is interrupted right away, skipping the rest of its timeout. A
 workflow actively running plain steps instead stops cooperatively at its next step boundary.
 
 ## Resume
@@ -122,12 +122,11 @@ flowchart TD
   `handle_continue` so `start_link` itself returns promptly.
 - **Redispatch** re-inserts the row as `PENDING` with `recovery_attempts` incremented (bounded by
   `:max_recovery_attempts`, default `3` — a workflow that keeps failing to even start is marked
-  `MAX_RECOVERY_ATTEMPTS_EXCEEDED` and left alone rather than retried forever), then starts the
+  `MAX_RECOVERY_ATTEMPTS_EXCEEDED` and left alone, ending the retry loop), then starts the
   workflow process with `replay: true`, which runs the body from the top but every already-recorded
-  step returns its checkpointed result instead of re-executing.
+  step returns its checkpointed result. Re-execution is skipped.
 - **A queued `PENDING` workflow** — one still assigned to a queue — is handed back to its queue
-  (cleared to `ENQUEUED`) instead of being redispatched directly; the queue's own dequeue logic
-  picks it back up.
+  (cleared to `ENQUEUED`) for the queue's own dequeue logic to pick back up.
 - **An unregistered workflow name** (this executor doesn't have that workflow's module loaded) is
   logged and skipped; the rest of the recovery batch continues.
 
@@ -171,15 +170,15 @@ Opt in via `Dbos.Supervisor`'s `:admin_server` option (default port `3001`):
 | `POST` | `/workflows/{id}/fork` | Body may set `start_step` (default `0`), `new_workflow_id`, `application_version`. |
 
 The server is a bare `:gen_tcp` HTTP/1.0-style listener (one process per connection, no
-keep-alive) — deliberately simple rather than pulling in a full HTTP stack for a dozen JSON
-routes.
+keep-alive) — deliberately simple, since a dozen JSON routes don't warrant a full HTTP stack.
 
 ### Values render through `inspect/1`
 
 `workflow_status.inputs`/`.output`/`.error` and each step's `output`/`.error` are stored as
-Erlang-term-encoded binaries — not JSON. JSON can't represent an arbitrary Elixir term losslessly
+Erlang-term-encoded binaries. JSON can't represent an arbitrary Elixir term losslessly
 (an atom, a tuple, a struct), so the admin API renders them through `inspect/1` as a readable
-string instead of attempting a lossy JSON conversion. A workflow that took `%{currency: :usd,
+string, sidestepping a lossy JSON conversion. A workflow that took `%{currency: :usd,
 amount: 4200}` as input shows up over the API as `"input": "[%{currency: :usd, amount: 4200}]"` —
-a string you read, not structured JSON you'd query into. Every other field (status, timestamps,
-executor id, and so on) is already JSON-safe and renders as itself.
+a string meant for reading, standing apart from the structured JSON fields elsewhere in the
+response. Every other field (status, timestamps, executor id, and so on) is already JSON-safe
+and renders as itself.

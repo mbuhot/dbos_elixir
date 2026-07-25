@@ -11,7 +11,8 @@ change without breaking it.
 ## What counts as a breaking change
 
 Everything here follows from one fact: a checkpoint is keyed on `(workflow_uuid, function_id)`
-and records only a step's `function_name` and output — never its source code. Replay walks the
+and records only a step's `function_name` and output — its source code plays no part in that
+record. Replay walks the
 workflow body from the top, and at each step call it looks up `function_id` (a plain counter,
 incremented once per durable operation) and compares the recorded `function_name` against the
 one the *current* code is about to run. A mismatch raises `Dbos.UnexpectedStepError`.

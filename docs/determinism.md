@@ -44,7 +44,7 @@ replay:
 
 No error. No log line. The workflow completes "successfully" with a silently stale
 value. This is why every input to a step must itself come from a prior step's recorded
-output or the workflow's own input — never from a live read of mutable state.
+output or the workflow's own input; a live read of mutable state breaks that guarantee.
 
 ## Banned in a workflow body
 
@@ -78,7 +78,8 @@ another module that is not a registered `defstep`/`deftransaction`.
 `self()`-dependent logic, `node()`-dependent logic, and reads of mutable module/application state
 (ETS, `Application.get_env`, global counters, in-memory caches) are **not** mechanically detected
 — there is no fixed list of function names to match against (any expression can read `self()` or
-touch an ETS table), so these remain guidance enforced by code review, not the compiler. The
+touch an ETS table), so these remain guidance enforced by code review, since the compiler can't
+reach them. The
 banned-construct table above is the full contract either way; the checker automates the part of
 it that is a closed set of function names.
 
@@ -88,8 +89,8 @@ it that is a closed set of function names.
 sequence — which durable operation each step id maps to — and flags a `case`/`cond`/`if` whose
 branches consume a different number of ids, the "classic bug" from the Step IDs section below.
 Where the sequence depends on a call this tool cannot resolve to a step, a child workflow, or a
-control-flow construct it recurses into, it reports that position as indeterminate instead of
-guessing.
+control-flow construct it recurses into, it reports that position as indeterminate. No guess is
+made.
 
 ## Task is the quiet one
 
@@ -148,7 +149,7 @@ no error at all.
 | `setEvent` | 1 | |
 | `getEvent` (from inside a workflow) | 2 | Same shape as receive: event + internal timeout sleep, both reserved up front |
 | Stream write / close | 1 each | |
-| `getResult` (blocking wait on a handle, from inside a workflow) | 1 | Allocated **after** the wait completes, not before — the only operation with this shape |
+| `getResult` (blocking wait on a handle, from inside a workflow) | 1 | Allocated **after** the wait completes — the only operation with this shape |
 | Enqueue (from inside a workflow) | 1 | Enqueueing from outside a workflow consumes 0 |
 | Starting/enqueueing a child workflow | 1 (parent side) | Consumed very early, before any error path — the child's own workflow ID is derived from this number, so it must be stable |
 | Fork | 1 | |
@@ -172,9 +173,9 @@ recorded steps. Three ways to change behavior:
 | Write a new workflow name | The change is big enough that the old and new versions have fundamentally different step sequences | Old in-flight workflows keep running under the old name/code indefinitely; new work is routed to the new name |
 
 Rule of thumb: if you are tempted to add an `if` branch to a workflow body that changes
-which steps run, reach for a patch, not a bare conditional. A bare conditional whose
-truth value can differ between original execution and replay is the "branch allocates
-different IDs" bug from the previous section.
+which steps run, reach for a patch. A bare conditional whose truth value can differ
+between original execution and replay is the "branch allocates different IDs" bug from
+the previous section.
 
 ## Serialized values are a schema
 

@@ -71,8 +71,8 @@ coexist in the same table over time.
 
 4. **Retire the ETF writer.**
    Once no row's `serialization` column reads `"erl_etf"` and no in-flight workflow can
-   still produce one, delete the ETF encoder and the dual-read branch. Cheap — it's
-   deleting code, not touching data.
+   still produce one, delete the ETF encoder and the dual-read branch. Cheap — only code
+   changes; no data is touched.
 
 The expensive step is always 3. Steps 1, 2, and 4 are ordinary code changes; step 3 is a
 data migration across every historical workflow this system has ever run.
@@ -84,9 +84,9 @@ JSON has no native representation for several things Erlang terms carry every da
 - **Atoms** — `:ok`, `:error`, `Elixir.MyModule` — JSON has no atom type; every atom
   needs an explicit encoding convention (e.g. a tagged string) and a matching decode
   rule, applied consistently everywhere atoms can appear.
-- **Tuples** — JSON has arrays, not fixed-arity heterogeneous tuples; a tuple-to-array
-  encoding loses the "this is exactly 3 elements of these types" guarantee unless the
-  decoder re-validates it.
+- **Tuples** — JSON has arrays, which don't preserve fixed-arity heterogeneous tuples; a
+  tuple-to-array encoding loses the "this is exactly 3 elements of these types" guarantee
+  unless the decoder re-validates it.
 - **Structs** — an Elixir struct is a tagged map (`__struct__` plus fields); a portable
   encoding has to carry that tag explicitly and the reading side needs some way to
   reconstruct (or at least name) the original struct, which a generic JSON reader in
@@ -102,11 +102,10 @@ up constantly as step/workflow inputs and outputs in ordinary Elixir code, so a 
 encoder has to make a deliberate, documented choice for each one before it can be
 trusted.
 
-Separately: **in-flight workflows carry ETF-encoded step outputs today**, and a foreign
-(non-Elixir) reader cannot decode a single byte of them — not the workflow's `inputs`,
-not any step's `output`, not queued messages, not event values, not stream items. A
-non-Elixir service reading this database before step 3 above completes will see rows it
-can identify (via `serialization = "erl_etf"`) but cannot use.
+Separately: **in-flight workflows carry ETF-encoded step outputs today**. A non-Elixir
+service reading this database before step 3 above completes can identify these rows
+(via `serialization = "erl_etf"`) but is locked out of their content across the board: the
+workflow's `inputs`, any step's `output`, queued messages, event values, stream items.
 
 ## When to adopt portable JSON up front
 
