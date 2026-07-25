@@ -176,6 +176,50 @@ defmodule Dbos.MacrosTest do
     assert child_status.output == "ord_child_pin"
   end
 
+  test "a @doc above defworkflow, defstep, and deftransaction attaches to the generated public function" do
+    module = Module.concat(__MODULE__, :"DocFixture#{System.unique_integer([:positive])}")
+
+    source = """
+    defmodule #{inspect(module)} do
+      use Dbos
+
+      @doc "Processes the order end to end."
+      defworkflow doc_flow(id), name: "doc_flow" do
+        id
+      end
+
+      @doc "Charges the card for the order."
+      defstep doc_step(id) do
+        id
+      end
+
+      @doc "Records the transaction in the ledger."
+      deftransaction doc_transaction(id) do
+        id
+      end
+    end
+    """
+
+    Code.compiler_options(docs: true)
+    compiled = Code.compile_string(source, "test/fixture.ex")
+    {^module, binary} = List.keyfind(compiled, module, 0)
+    beam_path = Path.join(System.tmp_dir!(), "#{module}.beam")
+    File.write!(beam_path, binary)
+
+    {:docs_v1, _, :elixir, _, _, _, function_docs} = Code.fetch_docs(beam_path)
+
+    doc_for = fn name, arity ->
+      Enum.find_value(function_docs, fn
+        {{:function, ^name, ^arity}, _, _, doc, _} -> doc
+        _ -> nil
+      end)
+    end
+
+    assert %{"en" => "Processes the order end to end."} = doc_for.(:doc_flow, 1)
+    assert %{"en" => "Charges the card for the order."} = doc_for.(:doc_step, 1)
+    assert %{"en" => "Records the transaction in the ledger."} = doc_for.(:doc_transaction, 1)
+  end
+
   test "an opts-dispatcher arity that would collide with another declared defworkflow is a compile error" do
     module =
       Module.concat(__MODULE__, :"AmbiguousArityFixture#{System.unique_integer([:positive])}")

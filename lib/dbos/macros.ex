@@ -214,11 +214,13 @@ defmodule Dbos.Macros do
   defp capture_workflow(call, opts, env) do
     quote do
       @dbos_workflow_defs {unquote(Macro.escape(call)), unquote(Macro.escape(opts)),
-                           unquote(env.line)}
+                           unquote(env.line), Module.get_attribute(__MODULE__, :doc)}
+
+      Module.delete_attribute(__MODULE__, :doc)
     end
   end
 
-  defp build_workflow({call, opts, line}, env, repo, warn_cross_module_calls) do
+  defp build_workflow({call, opts, line, doc}, env, repo, warn_cross_module_calls) do
     {block, extra_opts} = Keyword.pop!(opts, :do)
 
     reject_guard!(call, env, line)
@@ -245,6 +247,8 @@ defmodule Dbos.Macros do
         @doc false
         def unquote(body_head), do: unquote(block)
 
+        unquote(doc_attribute_ast(doc))
+
         def unquote(dispatcher_head) do
           Dbos.Macros.dispatch_workflow(unquote(name), unquote(forward_args))
         end
@@ -262,6 +266,9 @@ defmodule Dbos.Macros do
 
     {ast, {name, {env.module, body_fun, arity}, block}, schedule_meta}
   end
+
+  defp doc_attribute_ast(nil), do: nil
+  defp doc_attribute_ast({_line, content}), do: quote(do: @doc(unquote(content)))
 
   defp build_schedule_meta(nil, _workflow_name), do: nil
 
@@ -291,7 +298,7 @@ defmodule Dbos.Macros do
 
   defp reject_duplicate_workflows!(workflow_defs, env) do
     workflow_defs
-    |> Enum.map(fn {call, _opts, line} ->
+    |> Enum.map(fn {call, _opts, line, _doc} ->
       {fun_name, _args, arity} = workflow_head_info(call)
       {{fun_name, arity}, line}
     end)
@@ -383,14 +390,14 @@ defmodule Dbos.Macros do
 
   defp reject_ambiguous_opts_arity!(workflow_defs, env) do
     declared =
-      Enum.map(workflow_defs, fn {call, _opts, _line} ->
+      Enum.map(workflow_defs, fn {call, _opts, _line, _doc} ->
         {fun_name, _args, arity} = workflow_head_info(call)
         {fun_name, arity}
       end)
 
     declared_set = MapSet.new(declared)
 
-    Enum.each(workflow_defs, fn {call, _opts, line} ->
+    Enum.each(workflow_defs, fn {call, _opts, line, _doc} ->
       {fun_name, _args, arity} = workflow_head_info(call)
       opts_arity = arity + 1
 
