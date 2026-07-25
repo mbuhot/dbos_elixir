@@ -1,0 +1,26 @@
+name: Integration
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Start integration stack
+        run: docker compose up -d postgres node1 node2
+
+      - name: Run integration suite
+        run: docker compose run --rm test-runner
+
+      - name: Tear down integration stack
+        if: always()
+        run: docker compose down -v
