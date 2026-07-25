@@ -94,6 +94,7 @@ defmodule Dbos.Supervisor do
         {Registry, keys: :unique, name: Dbos.Notifications.recv_registry_name(name)},
         {Registry, keys: :duplicate, name: Dbos.Notifications.wait_registry_name(name)},
         {Dbos.Notifications, name: name},
+        {Dbos.Waits.Table, name: name},
         {Dbos.Waits, name: name},
         {WorkflowSup, name: name},
         {Dbos.Recovery, name: name},
