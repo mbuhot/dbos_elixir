@@ -181,9 +181,6 @@ old instance's downstream `function_id`s aligned with what it already recorded. 
 `Dbos.PatchInStepError` — there is no meaningful decision to make without a workflow body's own
 step-id counter and checkpoint history to consult.
 
-Patching is opt-in. Start the engine with `patching_enabled: true`; without it both
-`Dbos.patch/1` and `Dbos.deprecate_patch/1` raise `Dbos.PatchingDisabledError`.
-
 #### Retiring the patch
 
 Once every pre-patch instance has drained, the `if Dbos.patch(...)` check comes out and the new

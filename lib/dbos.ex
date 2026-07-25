@@ -295,10 +295,9 @@ defmodule Dbos do
   end
 
   @doc """
-  Checks whether `patch_name`'s new code path should run. Requires the engine's
-  `:patching_enabled` option. Must be called from inside a workflow context, and never from
-  inside a step. Peeks (non-consuming) at the next step id and checks `operation_outputs` for a
-  checkpoint there:
+  Checks whether `patch_name`'s new code path should run. Must be called from inside a workflow
+  context, and never from inside a step. Peeks (non-consuming) at the next step id and checks
+  `operation_outputs` for a checkpoint there:
 
   - No row → a brand-new workflow, or an old workflow that has not yet reached this point.
     Writes `"DBOS.patch-<patch_name>"` at that id and returns `true`, consuming the id.
@@ -309,7 +308,7 @@ defmodule Dbos do
     sequence stays intact and the new code this patch guards is skipped on replay.
   """
   def patch(patch_name) do
-    config = check_patch_allowed!(patch_name)
+    config = patch_config!(patch_name)
     workflow_id = Runtime.current_workflow_id()
     peeked_id = Runtime.peek_next_function_id()
     function_name = StepNames.patch(patch_name)
@@ -326,10 +325,9 @@ defmodule Dbos do
 
   @doc """
   Retires `patch_name` at the call site `patch/1` occupied, once every execution that predates
-  the patch has drained and the code it guarded runs unconditionally. Requires the engine's
-  `:patching_enabled` option. Must be called from inside a workflow context, and never from
-  inside a step. Peeks (non-consuming) at the next step id and checks `operation_outputs` for a
-  checkpoint there:
+  the patch has drained and the code it guarded runs unconditionally. Must be called from inside
+  a workflow context, and never from inside a step. Peeks (non-consuming) at the next step id and
+  checks `operation_outputs` for a checkpoint there:
 
   - A row already recorded with `"DBOS.patch-<patch_name>"` → a replay of an execution that took
     the patched path while the marker was still being written. Consumes the id, so the steps
@@ -343,7 +341,7 @@ defmodule Dbos do
   Returns `:ok`.
   """
   def deprecate_patch(patch_name) do
-    config = check_patch_allowed!(patch_name)
+    config = patch_config!(patch_name)
     workflow_id = Runtime.current_workflow_id()
     peeked_id = Runtime.peek_next_function_id()
     function_name = StepNames.patch(patch_name)
@@ -355,12 +353,8 @@ defmodule Dbos do
     :ok
   end
 
-  defp check_patch_allowed!(patch_name) do
+  defp patch_config!(patch_name) do
     config = Runtime.current_config()
-
-    unless config.patching_enabled do
-      raise Dbos.PatchingDisabledError, patch_name: patch_name
-    end
 
     case Runtime.current_frame() do
       :workflow_body ->

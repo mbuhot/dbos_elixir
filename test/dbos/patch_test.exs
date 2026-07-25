@@ -8,8 +8,7 @@ defmodule Dbos.PatchTest do
     config = %Dbos.Config{
       db: Dbos.DB.Postgrex,
       conn: conn,
-      executor_id: "exec-1",
-      patching_enabled: true
+      executor_id: "exec-1"
     }
 
     {:ok, config: config}
@@ -244,19 +243,6 @@ defmodule Dbos.PatchTest do
     assert_raise Dbos.NotInWorkflowError, fn ->
       Dbos.deprecate_patch("fraud-check")
     end
-  end
-
-  test "an engine that has not opted into patching refuses to check a patch", %{config: config} do
-    config = %{config | patching_enabled: false}
-    workflow_id = start_workflow(config, "wf-patch-not-opted-in")
-
-    Runtime.with_context([config: config, workflow_id: workflow_id], fn ->
-      assert_raise Dbos.PatchingDisabledError, fn -> Dbos.patch("fraud-check") end
-      assert_raise Dbos.PatchingDisabledError, fn -> Dbos.deprecate_patch("fraud-check") end
-    end)
-
-    {:ok, steps} = SystemDb.get_workflow_steps(config, workflow_id)
-    assert steps == []
   end
 
   test "a patch checked from inside a step is rejected and records nothing beyond the step itself",
