@@ -70,7 +70,10 @@ defmodule Dbos.NotificationsTest do
 
   test "a real pg NOTIFY on the notifications channel wakes a subscribed recv waiter in :listen mode" do
     engine =
-      start_engine(notifications: :listen, notifications_conn_opts: [database: "dbos_test"])
+      start_engine(
+        notifications: :listen,
+        notifications_conn_opts: [database: Application.fetch_env!(:dbos, :test_database)]
+      )
 
     wait_until(fn -> Notifications.mode(engine) == :listen end)
 
@@ -102,7 +105,10 @@ defmodule Dbos.NotificationsTest do
 
   test "a waiter parked with no deadline is woken to re-probe after the listener connection drops and reconnects" do
     engine =
-      start_engine(notifications: :listen, notifications_conn_opts: [database: "dbos_test"])
+      start_engine(
+        notifications: :listen,
+        notifications_conn_opts: [database: Application.fetch_env!(:dbos, :test_database)]
+      )
 
     wait_until(fn -> Notifications.mode(engine) == :listen end)
 

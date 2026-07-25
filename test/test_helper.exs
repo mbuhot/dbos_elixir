@@ -1,13 +1,16 @@
 schema_path = Path.expand("../priv/schema/dbos_schema.sql", __DIR__)
+database = System.get_env("DBOS_TEST_DATABASE", "dbos_test")
 
-{_output, 0} = System.cmd("dropdb", ["--if-exists", "dbos_test"])
-{_output, 0} = System.cmd("createdb", ["dbos_test"])
-{_output, 0} = System.cmd("psql", ["-v", "ON_ERROR_STOP=1", "-d", "dbos_test", "-f", schema_path])
+{_output, 0} = System.cmd("dropdb", ["--if-exists", database])
+{_output, 0} = System.cmd("createdb", [database])
+{_output, 0} = System.cmd("psql", ["-v", "ON_ERROR_STOP=1", "-d", database, "-f", schema_path])
 
-{:ok, _pid} = Postgrex.start_link(name: Dbos.TestConn, database: "dbos_test")
+{:ok, _pid} = Postgrex.start_link(name: Dbos.TestConn, database: database)
+
+Application.put_env(:dbos, :test_database, database)
 
 Application.put_env(:dbos, Dbos.TestRepo,
-  database: "dbos_test",
+  database: database,
   pool_size: 5,
   log: false
 )

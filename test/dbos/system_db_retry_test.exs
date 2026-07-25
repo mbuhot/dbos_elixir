@@ -264,7 +264,7 @@ defmodule Dbos.SystemDbRetryTest do
 
     seed_pending(seeding, "wf-locked", [9, 10])
 
-    {:ok, holder} = Postgrex.start_link(database: "dbos_test")
+    {:ok, holder} = Postgrex.start_link(database: Application.fetch_env!(:dbos, :test_database))
     released = hold_row_lock(holder, "wf-locked", 150)
 
     Recovery.recover_pending(engine)

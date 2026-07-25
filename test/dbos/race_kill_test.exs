@@ -9,7 +9,7 @@ defmodule Dbos.RaceKillTest do
     {:ok, _} =
       Postgrex.start_link(
         name: :"race_conn_#{System.unique_integer([:positive])}",
-        database: "dbos_test",
+        database: Application.fetch_env!(:dbos, :test_database),
         pool_size: 1
       )
 

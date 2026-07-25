@@ -29,7 +29,7 @@ defmodule Dbos.MessagingAcceptanceTest do
 
   defp notifications_opts(extra_opts) do
     if Keyword.get(extra_opts, :notifications) == :listen do
-      [notifications_conn_opts: [database: "dbos_test"]]
+      [notifications_conn_opts: [database: Application.fetch_env!(:dbos, :test_database)]]
     else
       []
     end

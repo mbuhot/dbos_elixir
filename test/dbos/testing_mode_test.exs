@@ -212,7 +212,7 @@ defmodule Dbos.TestingModeTest do
   describe "sandbox acceptance" do
     setup do
       Application.put_env(:dbos, Dbos.SandboxRepo,
-        database: "dbos_test",
+        database: Application.fetch_env!(:dbos, :test_database),
         hostname: System.get_env("PGHOST", "localhost"),
         username: System.get_env("PGUSER", "postgres"),
         password: System.get_env("PGPASSWORD", "postgres"),

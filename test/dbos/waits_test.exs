@@ -85,7 +85,7 @@ defmodule Dbos.WaitsTest do
       start_engine([{"receiver/2", {SampleWorkflows, :receiver, 2}}],
         park_exit_threshold_ms: 100,
         notifications: :listen,
-        notifications_conn_opts: [database: "dbos_test"]
+        notifications_conn_opts: [database: Application.fetch_env!(:dbos, :test_database)]
       )
 
     {:ok, handle} = Dbos.start("receiver/2", ["topic", 10_000], engine: engine)
