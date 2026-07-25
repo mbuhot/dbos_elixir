@@ -33,7 +33,7 @@ Recorded in `notes/`. Corrections to the original handoff document:
 | Decision | Choice | Rationale |
 |---|---|---|
 | Context passing | Process dictionary, as Ecto threads its transaction. | No second language forces an explicit context argument. |
-| Bare workflow call | `Checkout.process_order(id)` is durable. Inside a workflow it becomes a child workflow; outside one it starts a workflow and awaits the result; with the engine not started it raises `Dbos.NotStartedError`. | Ergonomics. The failure mode is loud. |
+| Bare workflow call | `Checkout.process_order(id)` is durable. Inside a workflow it becomes a child workflow and returns the child's result; outside one it starts a root workflow and returns `{:ok, %Dbos.WorkflowHandle{}}` immediately, without awaiting it; with the engine not started it raises `Dbos.NotStartedError`. | Ergonomics inside a workflow; a caller outside one (a web controller) must not block for the workflow's whole lifetime. The failure mode is loud. |
 | Step naming | Function name and arity, module excluded (`"charge_card/2"`). `name:` overrides. | A module move leaves in-flight workflows replayable. |
 | Workflow naming | Explicit `name:` required. | Recovery dispatches on it. |
 | Determinism | Compile-time checker over the `defworkflow` body AST. | Step inputs are not stored, so the runtime `function_name` check cannot catch argument drift. |

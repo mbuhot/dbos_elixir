@@ -27,4 +27,13 @@ defmodule Dbos.StepNames do
 
   @doc "The `function_name` for a `Patch`/`DeprecatePatch` checkpoint at the given patch name."
   def patch(patch_name), do: "DBOS.patch-" <> patch_name
+
+  @doc "The `function_name` for a standalone `Dbos.enqueue/3` call made from within a workflow."
+  def enqueue, do: "DBOS.enqueue"
+
+  @doc "The `function_name` for `Dbos.fork/3` called from within a workflow."
+  def fork_workflow, do: "DBOS.forkWorkflow"
+
+  @doc "The `function_name` for `Dbos.status/2` called from within a workflow."
+  def get_status, do: "DBOS.getStatus"
 end

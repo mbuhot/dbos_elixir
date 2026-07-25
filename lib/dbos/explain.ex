@@ -206,6 +206,8 @@ defmodule Dbos.Explain do
   defp dbos_op(:start, _arity), do: {:step, 1, "Dbos.start (child workflow)"}
   defp dbos_op(:await, _arity), do: {:step, 1, "Dbos.await (DBOS.getResult)"}
   defp dbos_op(:enqueue, _arity), do: {:step, 1, "Dbos.enqueue"}
+  defp dbos_op(:fork, _arity), do: {:step, 1, "Dbos.fork (DBOS.forkWorkflow)"}
+  defp dbos_op(:status, _arity), do: {:step, 1, "Dbos.status (DBOS.getStatus)"}
   defp dbos_op(_fun, _arity), do: :unknown
 
   defp pure_literal?(expr) do

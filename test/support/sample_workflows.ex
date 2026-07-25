@@ -196,6 +196,64 @@ defmodule Dbos.SampleWorkflows do
     do: Dbos.get_event(target_workflow_id, key, timeout_ms)
 
   @doc """
+  Enqueues a `counting_child/1` job onto the internal queue, then dies, but only the first time
+  it runs: a replay after recovery finds the enqueue already checkpointed and does not enqueue a
+  second one, for crash-and-recover idempotency tests.
+  """
+  def enqueue_and_die(table) do
+    {:ok, _handle} =
+      Dbos.enqueue("counting_child/1", [table], queue_name: Dbos.Queue.internal_queue_name())
+
+    case :ets.insert_new(table, {:crashed_once, true}) do
+      true -> Process.exit(self(), :kill)
+      false -> :done
+    end
+  end
+
+  @doc """
+  Forks `target_workflow_id` from `start_step`, then dies, but only the first time it runs: a
+  replay after recovery finds the fork already checkpointed and does not fork a second time, for
+  crash-and-recover idempotency tests.
+  """
+  def fork_and_die(table, target_workflow_id, start_step) do
+    {:ok, _fork_handle} = Dbos.fork(target_workflow_id, start_step)
+
+    case :ets.insert_new(table, {:crashed_once, true}) do
+      true -> Process.exit(self(), :kill)
+      false -> :done
+    end
+  end
+
+  @doc """
+  Reads `target_workflow_id`'s status, records it into `table`, then dies, but only the first
+  time it runs: a replay after recovery replays the checkpointed status rather than reading the
+  (possibly since-changed) live row.
+  """
+  def status_reader_then_die(table, target_workflow_id) do
+    status = Dbos.status(target_workflow_id)
+    :ets.insert(table, {:status_result, status})
+
+    case :ets.insert_new(table, {:crashed_once, true}) do
+      true -> Process.exit(self(), :kill)
+      false -> status
+    end
+  end
+
+  @doc """
+  Runs a standalone `Dbos.enqueue/3`, a `Dbos.fork/3` of `target_workflow_id`, a `Dbos.status/2`
+  read of `target_workflow_id`, and a plain step, in that order, so a test can assert the exact
+  `(function_id, function_name)` sequence all four produce.
+  """
+  def enqueue_fork_status_layout_workflow(target_workflow_id) do
+    {:ok, _enqueue_handle} =
+      Dbos.enqueue("add/2", [1, 2], queue_name: Dbos.Queue.internal_queue_name())
+
+    {:ok, _fork_handle} = Dbos.fork(target_workflow_id, 0)
+    _status = Dbos.status(target_workflow_id)
+    Dbos.Runtime.run_step("plain_step/0", [], fn -> :ok end)
+  end
+
+  @doc """
   Runs `step_count` steps, each bumping `table`'s `:padding_runs` counter only when its body
   actually executes (never on replay), then durably sleeps for `ms`. Used both to prove a
   rehydrated workflow does not re-execute its completed steps, and that a workflow already deep

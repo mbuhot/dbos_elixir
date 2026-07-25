@@ -1,4 +1,4 @@
-FROM hexpm/elixir:1.19.0-erlang-28.0-debian-bookworm-slim
+FROM hexpm/elixir:1.19.5-erlang-28.1.1-debian-bookworm-20260713-slim
 
 ENV MIX_ENV=test
 ENV DEBIAN_FRONTEND=noninteractive

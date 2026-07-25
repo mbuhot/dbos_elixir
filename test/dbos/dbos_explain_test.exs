@@ -46,6 +46,17 @@ defmodule Mix.Tasks.Dbos.ExplainTest do
     assert output =~ ~s("child_flow")
   end
 
+  test "Dbos.enqueue, Dbos.fork, and Dbos.status are each reported as consuming one id" do
+    output =
+      capture_io(fn ->
+        Mix.Tasks.Dbos.Explain.run(["Dbos.CheckoutWorkflow.inspects_other_workflow/2"])
+      end)
+
+    assert output =~ "id 0: Dbos.enqueue"
+    assert output =~ "id 1: Dbos.fork (DBOS.forkWorkflow)"
+    assert output =~ "id 2: Dbos.status (DBOS.getStatus)"
+  end
+
   test "an unrecognized target raises with a usage message" do
     assert_raise Mix.Error, ~r/could not load|does not `use Dbos`|has no defworkflow/, fn ->
       capture_io(fn ->

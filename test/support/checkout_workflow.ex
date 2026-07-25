@@ -17,8 +17,20 @@ defmodule Dbos.CheckoutWorkflow do
     order_id
   end
 
+  defworkflow slow_flow(order_id), name: "slow_flow" do
+    Dbos.sleep(5_000)
+    order_id
+  end
+
   defworkflow greet(name \\ "world"), name: "greet" do
     "hello, #{name}"
+  end
+
+  defworkflow inspects_other_workflow(order_id, target_workflow_id),
+    name: "inspects_other_workflow" do
+    {:ok, _enqueue_handle} = Dbos.enqueue("process_order", [order_id, 100], queue_name: "orders")
+    {:ok, _fork_handle} = Dbos.fork(target_workflow_id, 0)
+    Dbos.status(target_workflow_id)
   end
 
   defworkflow even_branches(order_id, outcome), name: "even_branches" do

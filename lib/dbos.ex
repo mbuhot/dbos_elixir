@@ -63,31 +63,40 @@ defmodule Dbos do
   `:partition_key`, `:delay_ms`, `:application_version`. `:deduplication_id` and `:partition_key`
   are mutually exclusive. Raises `Dbos.QueueDeduplicatedError` if `:deduplication_id` is already
   held by another workflow on the same queue.
+
+  Called from inside a workflow, this consumes a step id and checkpoints a `"DBOS.enqueue"` step,
+  so replaying the parent does not enqueue a second copy. Outside a workflow, no id is allocated
+  and nothing is checkpointed.
   """
   def enqueue(name_or_capture, args, opts \\ []) do
     if Keyword.has_key?(opts, :deduplication_id) and Keyword.has_key?(opts, :partition_key) do
       raise ArgumentError, "deduplication_id and partition_key cannot be used together"
     end
 
-    engine = Keyword.get(opts, :engine, Dbos)
-    config = config(engine)
+    {engine, config} = engine_and_config(opts)
     {name, _mfa} = resolve_workflow(engine, name_or_capture)
     queue_name = Keyword.fetch!(opts, :queue_name)
 
-    params = %{
-      workflow_id: Keyword.get_lazy(opts, :workflow_id, &Uuid.v4/0),
-      name: name,
-      queue_name: queue_name,
-      inputs: args,
-      priority: Keyword.get(opts, :priority, 0),
-      deduplication_id: Keyword.get(opts, :deduplication_id),
-      queue_partition_key: Keyword.get(opts, :partition_key),
-      delay_ms: Keyword.get(opts, :delay_ms),
-      application_version: Keyword.get(opts, :application_version, config.application_version),
-      workflow_timeout_ms: Keyword.get(opts, :timeout_ms)
-    }
+    workflow_id =
+      Runtime.run_step(StepNames.enqueue(), [], fn ->
+        params = %{
+          workflow_id: Keyword.get_lazy(opts, :workflow_id, &Uuid.v4/0),
+          name: name,
+          queue_name: queue_name,
+          inputs: args,
+          priority: Keyword.get(opts, :priority, 0),
+          deduplication_id: Keyword.get(opts, :deduplication_id),
+          queue_partition_key: Keyword.get(opts, :partition_key),
+          delay_ms: Keyword.get(opts, :delay_ms),
+          application_version:
+            Keyword.get(opts, :application_version, config.application_version),
+          workflow_timeout_ms: Keyword.get(opts, :timeout_ms)
+        }
 
-    {:ok, workflow_id} = SystemDb.insert_enqueued_workflow(config, params)
+        {:ok, workflow_id} = SystemDb.insert_enqueued_workflow(config, params)
+        workflow_id
+      end)
+
     {:ok, %WorkflowHandle{engine: engine, workflow_id: workflow_id}}
   end
 
@@ -298,24 +307,41 @@ defmodule Dbos do
   `was_forked_from`, and enqueues the fork so it re-runs starting at `start_step`. `opts`:
   `:new_workflow_id`, `:queue_name` (default the internal queue),
   `:application_version`, `:engine` (default `Dbos`).
+
+  Called from inside a workflow, this consumes a step id and checkpoints a `"DBOS.forkWorkflow"`
+  step, so replaying the caller does not fork a second time. Outside a workflow, no id is
+  allocated and nothing is checkpointed.
   """
   def fork(workflow_id, start_step, opts \\ []) do
-    engine = engine(opts)
-    config = config(engine)
-    new_workflow_id = Keyword.get_lazy(opts, :new_workflow_id, &Uuid.v4/0)
+    {engine, config} = engine_and_config(opts)
 
-    SystemDb.fork_workflow(
-      config,
-      workflow_id,
-      start_step,
-      Keyword.put(opts, :new_workflow_id, new_workflow_id)
-    )
+    new_workflow_id =
+      Runtime.run_step(StepNames.fork_workflow(), [], fn ->
+        new_workflow_id = Keyword.get_lazy(opts, :new_workflow_id, &Uuid.v4/0)
+
+        SystemDb.fork_workflow(
+          config,
+          workflow_id,
+          start_step,
+          Keyword.put(opts, :new_workflow_id, new_workflow_id)
+        )
+      end)
 
     {:ok, %WorkflowHandle{engine: engine, workflow_id: new_workflow_id}}
   end
 
   defp workflow_or_engine_config(opts) do
     if Runtime.in_workflow?(), do: Runtime.current_config(), else: config(engine(opts))
+  end
+
+  defp engine_and_config(opts) do
+    if Runtime.in_workflow?() do
+      config = Runtime.current_config()
+      {config.name, config}
+    else
+      engine = engine(opts)
+      {engine, config(engine)}
+    end
   end
 
   @doc "The resolved config for the default engine (`Dbos`). Raises `Dbos.NotStartedError` if it has not started."
@@ -335,9 +361,17 @@ defmodule Dbos do
     :ok
   end
 
-  @doc "Fetches one workflow's status by id. `opts[:engine]` defaults to `Dbos`."
+  @doc """
+  Fetches one workflow's status by id. `opts[:engine]` defaults to `Dbos`.
+
+  Called from inside a workflow, this consumes a step id and checkpoints a `"DBOS.getStatus"`
+  step, so replaying the caller returns the recorded status rather than reading the (possibly
+  since-changed) live row. Outside a workflow, no id is allocated and nothing is checkpointed.
+  """
   def status(workflow_id, opts \\ []) do
-    opts |> engine() |> config() |> Client.status(workflow_id)
+    Runtime.run_step(StepNames.get_status(), [], fn ->
+      opts |> workflow_or_engine_config() |> Client.status(workflow_id)
+    end)
   end
 
   @doc "Returns a workflow's outcome: `{:ok, term}`, `{:error, term}`, or `:pending`. `opts[:engine]` defaults to `Dbos`."

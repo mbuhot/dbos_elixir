@@ -83,10 +83,23 @@ defmodule MyApp.Application do
 end
 ```
 
-Run your first durable workflow — a bare call to `process_order/2` is already durable:
+Run your first durable workflow — a bare call to `process_order/2` is already durable. Called
+from ordinary code (a controller, a test, `iex`), it starts the workflow and returns a handle
+immediately, without blocking for however long the workflow takes to run:
 
 ```elixir
-MyApp.Checkout.process_order("order-123", 4999)
+{:ok, handle} = MyApp.Checkout.process_order("order-123", 4999)
+{:ok, result} = Dbos.await(handle)
+```
+
+The same call made from inside another workflow's body is a child workflow instead: it blocks
+for the child's result and returns the unwrapped value directly, with no handle in sight —
+
+```elixir
+defworkflow parent_flow(order_id), name: "parent_flow" do
+  receipt = process_order(order_id, 4999)
+  receipt
+end
 ```
 
 Kill the BEAM mid-charge and restart: `process_order/2` resumes from whichever step last

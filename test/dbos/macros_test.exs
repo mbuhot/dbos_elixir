@@ -77,10 +77,20 @@ defmodule Dbos.MacrosTest do
     assert child_status.output == "ord_4"
   end
 
-  test "a bare workflow call outside a workflow starts and awaits a root workflow" do
+  test "a bare workflow call outside a workflow starts a root workflow and returns a handle without awaiting it" do
     _engine = start_engine([CheckoutWorkflow], name: Dbos)
 
-    assert CheckoutWorkflow.child_flow("ord_5") == "ord_5"
+    assert {:ok, %Dbos.WorkflowHandle{} = handle} = CheckoutWorkflow.child_flow("ord_5")
+    assert {:ok, "ord_5"} = Dbos.await(handle)
+  end
+
+  test "a bare workflow call in a controller-like context outside a workflow returns immediately without blocking for the workflow's runtime" do
+    _engine = start_engine([CheckoutWorkflow], name: Dbos)
+
+    {elapsed_us, {:ok, handle}} = :timer.tc(fn -> CheckoutWorkflow.slow_flow("ord_slow") end)
+
+    assert elapsed_us < 1_000_000
+    assert {:ok, "ord_slow"} = Dbos.await(handle, timeout_ms: 10_000)
   end
 
   test "a bare workflow call with no engine started raises Dbos.NotStartedError" do
@@ -94,7 +104,10 @@ defmodule Dbos.MacrosTest do
   test "defworkflow supports a default argument" do
     _engine = start_engine([CheckoutWorkflow], name: Dbos)
 
-    assert CheckoutWorkflow.greet() == "hello, world"
-    assert CheckoutWorkflow.greet("Mike") == "hello, Mike"
+    {:ok, handle_1} = CheckoutWorkflow.greet()
+    assert {:ok, "hello, world"} = Dbos.await(handle_1)
+
+    {:ok, handle_2} = CheckoutWorkflow.greet("Mike")
+    assert {:ok, "hello, Mike"} = Dbos.await(handle_2)
   end
 end

@@ -11,6 +11,13 @@ defmodule Dbos.Macros do
   every form has pushed onto a real `@attr`, once compile-time side effects across all of the
   module's top-level forms are guaranteed visible.
 
+  A bare call to a `defworkflow`-defined function is durable, but its return type depends on
+  where it's called from: inside another workflow it's a child workflow, and the call blocks for
+  and returns the child's result; called from ordinary code (a controller, a test, an `iex`
+  session) it starts a root workflow and returns `{:ok, %Dbos.WorkflowHandle{}}` immediately,
+  without blocking the caller for however long the workflow takes to finish — await it explicitly
+  with `Dbos.await/2` when the result is needed.
+
   `use Dbos` options: `:repo` — the module direct calls to which are banned inside a workflow
   body (see `docs/determinism.md`); `:warn_cross_module_calls` (default `true`) — set `false` to
   suppress the undeclared-cross-module-call warning for the whole module.
@@ -92,9 +99,13 @@ defmodule Dbos.Macros do
   @doc """
   Defines a durable workflow. `name:` is required (recovery dispatches on it). Generates two
   functions: the workflow body (run by the engine, under a generated internal name) and a public
-  dispatcher under `call`'s own name/arity: inside a workflow it starts and awaits a child
-  workflow; outside one it starts and awaits a root workflow; with the engine not started,
-  `Dbos.start/3` raises `Dbos.NotStartedError`.
+  dispatcher under `call`'s own name/arity. The dispatcher's return type depends on where it's
+  called from — this asymmetry is deliberate: inside a workflow it starts a child workflow,
+  awaits it, and returns the unwrapped result (the same value the call would have produced as a
+  plain function); outside a workflow it starts a root workflow and returns
+  `{:ok, %Dbos.WorkflowHandle{}}` immediately, without blocking the caller for the workflow's
+  lifetime — await it explicitly with `Dbos.await/2` when the result is needed. With the engine
+  not started, `Dbos.start/3` raises `Dbos.NotStartedError` on either path.
 
   Runs `Dbos.Determinism.check!/2` over the body at compile time. Does not support a `when` guard
   on the head (a workflow's name must map to exactly one deterministic body — see
@@ -116,16 +127,22 @@ defmodule Dbos.Macros do
   end
 
   @doc """
-  Runtime support for a bare workflow call: starts `name` with `args` (a child workflow if called
-  from inside a workflow context, a root workflow otherwise) and blocks for its result, returning
-  the unwrapped value or re-raising the recorded exception.
+  Runtime support for a bare workflow call. Inside a workflow context: starts `name` with `args`
+  as a child workflow, blocks for its result, and returns the unwrapped value or re-raises the
+  recorded exception. Outside a workflow context: starts `name` with `args` as a root workflow
+  and returns `{:ok, %Dbos.WorkflowHandle{}}` immediately, without awaiting it. With the engine
+  not started, `Dbos.start/3` raises `Dbos.NotStartedError` on either path.
   """
   def dispatch_workflow(name, args) do
-    {:ok, handle} = Dbos.start(name, args)
+    if Dbos.Runtime.in_workflow?() do
+      {:ok, handle} = Dbos.start(name, args)
 
-    case Dbos.await(handle) do
-      {:ok, value} -> value
-      {:error, exception} -> raise exception
+      case Dbos.await(handle) do
+        {:ok, value} -> value
+        {:error, exception} -> raise exception
+      end
+    else
+      Dbos.start(name, args)
     end
   end
 
