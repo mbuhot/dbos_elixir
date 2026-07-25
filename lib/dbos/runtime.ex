@@ -31,6 +31,9 @@ defmodule Dbos.Runtime do
   @doc "The workflow id of the active context. Raises `Dbos.NotInWorkflowError` outside one."
   def current_workflow_id, do: fetch_context!().workflow_id
 
+  @doc "The `Dbos.Config` of the active context. Raises `Dbos.NotInWorkflowError` outside one."
+  def current_config, do: fetch_context!().config
+
   @doc "The last step id allocated in the active context. Raises `Dbos.NotInWorkflowError` outside one."
   def current_step_id, do: fetch_context!().step_id
 

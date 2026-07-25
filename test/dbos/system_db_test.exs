@@ -474,6 +474,85 @@ defmodule Dbos.SystemDbTest do
     end
   end
 
+  describe "clear_queue_assignment/2" do
+    test "moves a PENDING queued workflow back to ENQUEUED and nulls started_at", %{
+      config: config
+    } do
+      workflow_id = "wf-clear-queue"
+
+      SystemDb.insert_workflow_status(config, %{
+        workflow_id: workflow_id,
+        status: :pending,
+        name: "W",
+        queue_name: "orders"
+      })
+
+      assert SystemDb.clear_queue_assignment(config, workflow_id) == :cleared
+
+      {:ok, status} = SystemDb.get_workflow_status(config, workflow_id)
+      assert status.status == :enqueued
+      assert status.started_at_epoch_ms == nil
+      assert status.queue_name == "orders"
+    end
+
+    test "returns :not_cleared when the workflow is not PENDING with a queue_name", %{
+      config: config
+    } do
+      {:ok, workflow_id} =
+        SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1]})
+
+      assert SystemDb.clear_queue_assignment(config, workflow_id) == :not_cleared
+    end
+  end
+
+  describe "check_child_workflow/3" do
+    test "returns :none when no child has been recorded for that step", %{config: config} do
+      {:ok, workflow_id} =
+        SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1]})
+
+      assert SystemDb.check_child_workflow(config, workflow_id, 0, "Refund.process") == :none
+    end
+
+    test "returns {:existing, child_id} when the recorded step matches the child's name", %{
+      config: config
+    } do
+      {:ok, workflow_id} =
+        SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1]})
+
+      SystemDb.record_operation_result(config, %{
+        workflow_id: workflow_id,
+        function_id: 0,
+        function_name: "Refund.process",
+        child_workflow_id: "#{workflow_id}-0",
+        started_at: 1000,
+        completed_at: 1000
+      })
+
+      assert SystemDb.check_child_workflow(config, workflow_id, 0, "Refund.process") ==
+               {:existing, "#{workflow_id}-0"}
+    end
+
+    test "raises UnexpectedStepError when the recorded step is a different workflow name", %{
+      config: config
+    } do
+      {:ok, workflow_id} =
+        SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1]})
+
+      SystemDb.record_operation_result(config, %{
+        workflow_id: workflow_id,
+        function_id: 0,
+        function_name: "Refund.process",
+        child_workflow_id: "#{workflow_id}-0",
+        started_at: 1000,
+        completed_at: 1000
+      })
+
+      assert_raise Dbos.UnexpectedStepError, fn ->
+        SystemDb.check_child_workflow(config, workflow_id, 0, "Other.workflow")
+      end
+    end
+  end
+
   describe "update_workflow_outcome/3" do
     test "SUCCESS records the output and clears deduplication_id", %{config: config} do
       {:ok, workflow_id} =

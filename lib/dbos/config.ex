@@ -5,17 +5,21 @@ defmodule Dbos.Config do
   """
 
   @enforce_keys [:db, :conn]
-  defstruct db: nil,
+  defstruct name: Dbos,
+            db: nil,
             conn: nil,
             schema: "dbos",
             executor_id: nil,
-            application_version: nil
+            application_version: nil,
+            max_recovery_attempts: 3
 
   @type t :: %__MODULE__{
+          name: atom,
           db: module,
           conn: term,
           schema: String.t(),
           executor_id: String.t() | nil,
-          application_version: String.t() | nil
+          application_version: String.t() | nil,
+          max_recovery_attempts: non_neg_integer
         }
 end

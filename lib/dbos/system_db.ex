@@ -249,6 +249,58 @@ defmodule Dbos.SystemDb do
     end
   end
 
+  @doc """
+  Checks whether a child workflow has already been recorded at `(parent_workflow_id,
+  parent_step_id)`, per `notes/step-ids.md` §6 (`CheckChildWorkflow`). Returns `:none` if no
+  child has been started at that step yet, `{:existing, child_workflow_id}` if one has and its
+  recorded `function_name` matches `child_name`, or raises `Dbos.UnexpectedStepError` if a
+  different child workflow was recorded at that step.
+  """
+  def check_child_workflow(%Config{} = config, parent_workflow_id, parent_step_id, child_name) do
+    sql = """
+    SELECT function_name, child_workflow_id
+    FROM #{table(config, "operation_outputs")}
+    WHERE workflow_uuid = $1 AND function_id = $2
+    """
+
+    case config.db.query(config.conn, sql, [parent_workflow_id, parent_step_id]) do
+      {:ok, %{rows: []}} ->
+        :none
+
+      {:ok, %{rows: [[^child_name, child_workflow_id]]}} ->
+        {:existing, child_workflow_id}
+
+      {:ok, %{rows: [[recorded_name, _child_workflow_id]]}} ->
+        raise Dbos.UnexpectedStepError,
+          workflow_id: parent_workflow_id,
+          function_id: parent_step_id,
+          expected: child_name,
+          recorded: recorded_name
+    end
+  end
+
+  @doc """
+  Puts a queued `PENDING` workflow back to `ENQUEUED`, clearing `started_at_epoch_ms`, per
+  `notes/recovery.md` §1 (`ClearQueueAssignment`). Returns `:cleared`, or `:not_cleared` if the
+  row was not `PENDING` with a `queue_name` (e.g. another executor already claimed it).
+  """
+  def clear_queue_assignment(%Config{} = config, workflow_id) do
+    sql = """
+    UPDATE #{table(config, "workflow_status")}
+        SET status = $1, started_at_epoch_ms = NULL
+        WHERE workflow_uuid = $2 AND queue_name IS NOT NULL AND status = $3
+    """
+
+    {:ok, %{num_rows: num_rows}} =
+      config.db.query(config.conn, sql, [
+        Status.to_string(:enqueued),
+        workflow_id,
+        Status.to_string(:pending)
+      ])
+
+    if num_rows > 0, do: :cleared, else: :not_cleared
+  end
+
   defp handle_update_outcome_conflict(config, workflow_id) do
     sql = "SELECT status FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1"
 
