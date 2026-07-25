@@ -31,6 +31,9 @@ defmodule Dbos.StepNames do
   @doc "The `function_name` for a standalone `Dbos.enqueue/3` call made from within a workflow."
   def enqueue, do: "DBOS.enqueue"
 
+  @doc "The `function_name` for a standalone `Dbos.debounce/3` call made from within a workflow."
+  def debounce, do: "DBOS.debounce"
+
   @doc "The `function_name` for `Dbos.fork/3` called from within a workflow."
   def fork_workflow, do: "DBOS.forkWorkflow"
 

@@ -8,6 +8,7 @@ defmodule Dbos do
 
   alias Dbos.Client
   alias Dbos.Config
+  alias Dbos.Debouncer
   alias Dbos.Messaging
   alias Dbos.Notifications
   alias Dbos.Queue
@@ -103,6 +104,37 @@ defmodule Dbos do
       end)
 
     if config.testing == :inline, do: Dbos.Testing.drain_queue(queue_name, engine: engine)
+
+    {:ok, %WorkflowHandle{engine: engine, workflow_id: workflow_id}}
+  end
+
+  @doc """
+  Collapses rapid, repeated enqueues of the same logical unit of work into one delayed workflow.
+  Each call either starts a fresh `DELAYED` workflow keyed by `opts[:debounce_key]`, or bounces
+  one still waiting out its delay: replacing its inputs with `args` and pushing its wake time
+  forward by `opts[:period_ms]`.
+
+  `name_or_capture` and `args` mean what they do in `enqueue/3`. `opts`: `:queue_name`
+  (required), `:debounce_key` (required), `:period_ms` (required), `:deadline_ms` (optional — an
+  absolute ceiling on the total delay, fixed at the first call and never extended by a later
+  bounce), `:engine` (default `Dbos`).
+
+  Returns `{:ok, handle}` referring to the same workflow id across every bounce while the key is
+  held. Raises `Dbos.QueueDeduplicatedError` if the key is currently held by a plain (non-debounced)
+  `:deduplication_id` enqueue, or by a debounced workflow under a different name.
+
+  Called from inside a workflow, this consumes a step id and checkpoints a `"DBOS.debounce"` step,
+  so replaying the parent does not bounce a second time.
+  """
+  def debounce(name_or_capture, args, opts \\ []) do
+    {engine, config} = engine_and_config(opts)
+    {name, _mfa} = resolve_workflow(engine, name_or_capture)
+
+    workflow_id =
+      Runtime.run_step(StepNames.debounce(), [], fn ->
+        {:ok, workflow_id} = Debouncer.debounce(config, name, args, opts)
+        workflow_id
+      end)
 
     {:ok, %WorkflowHandle{engine: engine, workflow_id: workflow_id}}
   end
