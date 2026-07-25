@@ -153,6 +153,269 @@ defmodule Dbos.SystemDbTest do
     assert Enum.map(results, & &1.workflow_uuid) == [wf_b]
   end
 
+  test "list_workflows filters by an explicit list of workflow ids", %{config: config} do
+    {:ok, wf_a} =
+      SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1]})
+
+    {:ok, wf_b} =
+      SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [2]})
+
+    {:ok, _wf_c} =
+      SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [3]})
+
+    {:ok, results} = SystemDb.list_workflows(config, workflow_ids: [wf_a, wf_b], sort: :asc)
+
+    assert Enum.map(results, & &1.workflow_uuid) |> Enum.sort() == Enum.sort([wf_a, wf_b])
+  end
+
+  test "list_workflows filters by workflow id prefix", %{config: config} do
+    {:ok, _wf_a} =
+      SystemDb.insert_enqueued_workflow(config, %{
+        workflow_id: "order-1",
+        name: "W",
+        queue_name: "q",
+        inputs: [1]
+      })
+
+    {:ok, _wf_b} =
+      SystemDb.insert_enqueued_workflow(config, %{
+        workflow_id: "refund-1",
+        name: "W",
+        queue_name: "q",
+        inputs: [2]
+      })
+
+    {:ok, results} = SystemDb.list_workflows(config, workflow_id_prefix: "order-")
+
+    assert Enum.map(results, & &1.workflow_uuid) == ["order-1"]
+  end
+
+  test "list_workflows filters by authenticated_user", %{config: config} do
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-user-a",
+      status: :pending,
+      name: "W",
+      authenticated_user: "alice"
+    })
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-user-b",
+      status: :pending,
+      name: "W",
+      authenticated_user: "bob"
+    })
+
+    {:ok, results} = SystemDb.list_workflows(config, authenticated_user: "alice")
+
+    assert Enum.map(results, & &1.workflow_uuid) == ["wf-user-a"]
+  end
+
+  test "list_workflows filters by forked_from", %{config: config} do
+    {:ok, original_id} =
+      SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1]})
+
+    forked_id = SystemDb.fork_workflow(config, original_id, 0)
+
+    {:ok, results} = SystemDb.list_workflows(config, forked_from: original_id)
+
+    assert Enum.map(results, & &1.workflow_uuid) == [forked_id]
+  end
+
+  test "list_workflows filters by parent_workflow_id", %{config: config} do
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-child-a",
+      status: :pending,
+      name: "W",
+      parent_workflow_id: "wf-parent-1"
+    })
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-child-b",
+      status: :pending,
+      name: "W",
+      parent_workflow_id: "wf-parent-2"
+    })
+
+    {:ok, results} = SystemDb.list_workflows(config, parent_workflow_id: "wf-parent-1")
+
+    assert Enum.map(results, & &1.workflow_uuid) == ["wf-child-a"]
+  end
+
+  test "list_workflows filters by has_parent", %{config: config} do
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-has-parent",
+      status: :pending,
+      name: "W",
+      parent_workflow_id: "wf-parent-1"
+    })
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-no-parent",
+      status: :pending,
+      name: "W"
+    })
+
+    {:ok, with_parent} = SystemDb.list_workflows(config, has_parent: true)
+    assert Enum.map(with_parent, & &1.workflow_uuid) == ["wf-has-parent"]
+
+    {:ok, without_parent} = SystemDb.list_workflows(config, has_parent: false)
+    assert Enum.map(without_parent, & &1.workflow_uuid) == ["wf-no-parent"]
+  end
+
+  test "list_workflows filters by deduplication_id", %{config: config} do
+    {:ok, wf_a} =
+      SystemDb.insert_enqueued_workflow(config, %{
+        name: "W",
+        queue_name: "q1",
+        inputs: [1],
+        deduplication_id: "order-42"
+      })
+
+    {:ok, _wf_b} =
+      SystemDb.insert_enqueued_workflow(config, %{
+        name: "W",
+        queue_name: "q2",
+        inputs: [2],
+        deduplication_id: "order-99"
+      })
+
+    {:ok, results} = SystemDb.list_workflows(config, deduplication_id: "order-42")
+
+    assert Enum.map(results, & &1.workflow_uuid) == [wf_a]
+  end
+
+  test "list_workflows filters by completed_after and completed_before", %{config: config} do
+    {:ok, wf_a} =
+      SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1]})
+
+    SystemDb.update_workflow_outcome(config, wf_a, %{status: :success, output: nil})
+    {:ok, %{completed_at: completed_at}} = SystemDb.get_workflow_status(config, wf_a)
+
+    {:ok, wf_b} =
+      SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [2]})
+
+    set_completed_at(config, wf_b, completed_at + 10_000)
+
+    {:ok, after_results} = SystemDb.list_workflows(config, completed_after: completed_at + 1)
+    assert Enum.map(after_results, & &1.workflow_uuid) == [wf_b]
+
+    {:ok, before_results} = SystemDb.list_workflows(config, completed_before: completed_at)
+    assert Enum.map(before_results, & &1.workflow_uuid) == [wf_a]
+  end
+
+  test "list_workflows filters by dequeued_after and dequeued_before", %{config: config} do
+    {:ok, wf_a} =
+      SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1]})
+
+    {:ok, wf_b} =
+      SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [2]})
+
+    set_dequeued_at(config, wf_a, 1_000)
+    set_dequeued_at(config, wf_b, 2_000)
+
+    {:ok, after_results} = SystemDb.list_workflows(config, dequeued_after: 1_500)
+    assert Enum.map(after_results, & &1.workflow_uuid) == [wf_b]
+
+    {:ok, before_results} = SystemDb.list_workflows(config, dequeued_before: 1_500)
+    assert Enum.map(before_results, & &1.workflow_uuid) == [wf_a]
+  end
+
+  test "list_workflows filters by schedule_name", %{config: config} do
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-scheduled",
+      status: :pending,
+      name: "W",
+      schedule_name: "nightly_report"
+    })
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-unscheduled",
+      status: :pending,
+      name: "W"
+    })
+
+    {:ok, results} = SystemDb.list_workflows(config, schedule_name: "nightly_report")
+
+    assert Enum.map(results, & &1.workflow_uuid) == ["wf-scheduled"]
+  end
+
+  test "list_workflows filters by is_debounced", %{config: config} do
+    SystemDb.insert_debounced_workflow(config, %{
+      workflow_id: "wf-debounced",
+      name: "W",
+      queue_name: "q",
+      inputs: [1],
+      debounce_key: "cust-1",
+      delay_until_epoch_ms: System.os_time(:millisecond) + 60_000
+    })
+
+    {:ok, _wf_plain} =
+      SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q2", inputs: [2]})
+
+    {:ok, results} = SystemDb.list_workflows(config, is_debounced: true)
+
+    assert Enum.map(results, & &1.workflow_uuid) == ["wf-debounced"]
+  end
+
+  test "list_workflows filters by attributes containment", %{config: config} do
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-attrs-a",
+      status: :pending,
+      name: "W",
+      attributes: %{"tenant" => "acme", "priority" => "high"}
+    })
+
+    SystemDb.insert_workflow_status(config, %{
+      workflow_id: "wf-attrs-b",
+      status: :pending,
+      name: "W",
+      attributes: %{"tenant" => "globex"}
+    })
+
+    {:ok, results} = SystemDb.list_workflows(config, attributes: %{"tenant" => "acme"})
+
+    assert Enum.map(results, & &1.workflow_uuid) == ["wf-attrs-a"]
+  end
+
+  test "list_workflows omits inputs and output when load_input and load_output are false", %{
+    config: config
+  } do
+    {:ok, workflow_id} =
+      SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1, 2, 3]})
+
+    mark_success(config, workflow_id, %{total: 4999})
+
+    {:ok, [with_payload]} = SystemDb.list_workflows(config, workflow_ids: [workflow_id])
+    assert with_payload.inputs == [1, 2, 3]
+    assert with_payload.output == %{total: 4999}
+
+    {:ok, [without_payload]} =
+      SystemDb.list_workflows(config,
+        workflow_ids: [workflow_id],
+        load_input: false,
+        load_output: false
+      )
+
+    assert without_payload.inputs == nil
+    assert without_payload.output == nil
+  end
+
+  defp set_completed_at(config, workflow_id, completed_at) do
+    Dbos.DB.Postgrex.query!(
+      config.conn,
+      "UPDATE dbos.workflow_status SET completed_at = $2 WHERE workflow_uuid = $1",
+      [workflow_id, completed_at]
+    )
+  end
+
+  defp set_dequeued_at(config, workflow_id, started_at_epoch_ms) do
+    Dbos.DB.Postgrex.query!(
+      config.conn,
+      "UPDATE dbos.workflow_status SET started_at_epoch_ms = $2 WHERE workflow_uuid = $1",
+      [workflow_id, started_at_epoch_ms]
+    )
+  end
+
   test "get_workflow_steps returns steps ordered by function_id with decoded outputs", %{
     config: config
   } do

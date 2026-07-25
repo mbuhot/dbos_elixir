@@ -138,14 +138,25 @@ defmodule Dbos.SystemDb do
     end
   end
 
-  @doc "Lists workflows matching the given filters; `:status`, `:name`, `:queue_name`, `:executor_id`, and `:application_version` each accept a single value or a list."
+  @doc """
+  Lists workflows matching the given filters. `:status`, `:name`, `:queue_name`, `:executor_id`,
+  `:application_version`, `:workflow_ids`, `:authenticated_user`, `:forked_from`,
+  `:parent_workflow_id`, `:deduplication_id`, and `:schedule_name` each accept a single value or
+  a list. `:workflow_id_prefix` matches `workflow_uuid` by prefix. `:created_after`/
+  `:created_before`, `:completed_after`/`:completed_before`, and `:dequeued_after`/
+  `:dequeued_before` bound `created_at`, `completed_at`, and `started_at_epoch_ms` respectively.
+  `:has_parent` (boolean) filters on whether `parent_workflow_id` is set. `:is_debounced`
+  (boolean) filters on the `is_debounced` column. `:attributes` (a map) matches rows whose
+  `attributes` JSONB column contains it. `:load_input`/`:load_output` (default `true`) select
+  `NULL` for `inputs`/`output` instead of the (potentially large) stored value when `false`.
+  """
   def list_workflows(%Config{} = config, opts \\ []) do
     {where_sql, where_params} = list_workflows_where(opts)
     {limit_offset_sql, all_params} = list_workflows_limit_offset(opts, where_params)
     order_sql = if Keyword.get(opts, :sort, :desc) == :asc, do: "ASC", else: "DESC"
 
     sql = """
-    SELECT #{select_list(WorkflowStatus)} FROM #{table(config, "workflow_status")}
+    SELECT #{list_workflows_select_list(opts)} FROM #{table(config, "workflow_status")}
     #{where_sql}
     ORDER BY created_at #{order_sql}
     #{limit_offset_sql}
@@ -153,6 +164,18 @@ defmodule Dbos.SystemDb do
 
     {:ok, result} = query(config, sql, all_params)
     {:ok, Enum.map(result.rows, &WorkflowStatus.from_row/1)}
+  end
+
+  defp list_workflows_select_list(opts) do
+    load_input = Keyword.get(opts, :load_input, true)
+    load_output = Keyword.get(opts, :load_output, true)
+
+    WorkflowStatus.columns()
+    |> Enum.map_join(", ", fn
+      :inputs when not load_input -> "NULL AS inputs"
+      :output when not load_output -> "NULL AS output"
+      column -> Atom.to_string(column)
+    end)
   end
 
   @doc "Returns a workflow's checkpointed steps, ordered by `function_id`."
@@ -1728,7 +1751,7 @@ defmodule Dbos.SystemDb do
       Map.get(attrs, :config_name),
       Serialization.format_name(),
       Map.get(attrs, :delay_until_epoch_ms),
-      encode_json_or_nil(Map.get(attrs, :attributes)),
+      Map.get(attrs, :attributes),
       Map.get(attrs, :schedule_name),
       Map.get(attrs, :debounce_deadline_epoch_ms),
       Map.get(attrs, :is_debounced, false),
@@ -2012,9 +2035,6 @@ defmodule Dbos.SystemDb do
     end
   end
 
-  defp encode_json_or_nil(nil), do: nil
-  defp encode_json_or_nil(term), do: JSON.encode!(term)
-
   defp encode_or_nil(nil), do: nil
   defp encode_or_nil(term), do: Serialization.encode(term)
 
@@ -2265,7 +2285,18 @@ defmodule Dbos.SystemDb do
       {:executor_id, "executor_id", & &1},
       {:application_version, "application_version", & &1},
       {:created_after, "created_at >=", & &1},
-      {:created_before, "created_at <=", & &1}
+      {:created_before, "created_at <=", & &1},
+      {:workflow_ids, "workflow_uuid", & &1},
+      {:authenticated_user, "authenticated_user", & &1},
+      {:forked_from, "forked_from", & &1},
+      {:parent_workflow_id, "parent_workflow_id", & &1},
+      {:deduplication_id, "deduplication_id", & &1},
+      {:completed_after, "completed_at >=", & &1},
+      {:completed_before, "completed_at <=", & &1},
+      {:dequeued_after, "started_at_epoch_ms >=", & &1},
+      {:dequeued_before, "started_at_epoch_ms <=", & &1},
+      {:schedule_name, "schedule_name", & &1},
+      {:is_debounced, "is_debounced", & &1}
     ]
 
     {clauses, params} =
@@ -2281,6 +2312,10 @@ defmodule Dbos.SystemDb do
         end
       end)
 
+    {clauses, params} = list_workflows_add_prefix_clause(clauses, params, opts)
+    {clauses, params} = list_workflows_add_has_parent_clause(clauses, params, opts)
+    {clauses, params} = list_workflows_add_attributes_clause(clauses, params, opts)
+
     clauses =
       if Keyword.get(opts, :queues_only, false),
         do: clauses ++ ["queue_name IS NOT NULL"],
@@ -2288,6 +2323,36 @@ defmodule Dbos.SystemDb do
 
     where_sql = if clauses == [], do: "", else: "WHERE " <> Enum.join(clauses, " AND ")
     {where_sql, params}
+  end
+
+  defp list_workflows_add_prefix_clause(clauses, params, opts) do
+    case Keyword.fetch(opts, :workflow_id_prefix) do
+      {:ok, prefix} ->
+        param_index = length(params) + 1
+        {clauses ++ ["workflow_uuid LIKE $#{param_index}"], params ++ ["#{prefix}%"]}
+
+      :error ->
+        {clauses, params}
+    end
+  end
+
+  defp list_workflows_add_has_parent_clause(clauses, params, opts) do
+    case Keyword.fetch(opts, :has_parent) do
+      {:ok, true} -> {clauses ++ ["parent_workflow_id IS NOT NULL"], params}
+      {:ok, false} -> {clauses ++ ["parent_workflow_id IS NULL"], params}
+      :error -> {clauses, params}
+    end
+  end
+
+  defp list_workflows_add_attributes_clause(clauses, params, opts) do
+    case Keyword.fetch(opts, :attributes) do
+      {:ok, attributes} ->
+        param_index = length(params) + 1
+        {clauses ++ ["attributes @> $#{param_index}"], params ++ [attributes]}
+
+      :error ->
+        {clauses, params}
+    end
   end
 
   defp build_clause(condition, param_index, cast, value) when is_list(value) do
