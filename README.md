@@ -1,6 +1,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/mbuhot/dbos_elixir/blob/main/LICENSE)
 [![Elixir](https://img.shields.io/badge/elixir-~%3E%201.19-purple.svg)](https://elixir-lang.org)
-[![Postgres](https://img.shields.io/badge/postgres-13%2B-blue.svg)](https://www.postgresql.org)
+[![Postgres](https://img.shields.io/badge/postgres-17%2B-blue.svg)](https://www.postgresql.org)
 
 # Dbos for Elixir: Durable Workflow Orchestration on Postgres
 
