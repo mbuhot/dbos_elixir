@@ -1,5 +1,7 @@
+# The SET TRANSACTION ISOLATION LEVEL SQL for each Dbos.DB.isolation level, shared by every
+# Dbos.DB adapter.
 defmodule Dbos.DB.Isolation do
-  @moduledoc "The `SET TRANSACTION ISOLATION LEVEL` SQL for each `Dbos.DB.isolation` level, shared by every `Dbos.DB` adapter."
+  @moduledoc false
 
   @isolation_sql %{
     read_committed: "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",

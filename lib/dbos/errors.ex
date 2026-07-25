@@ -203,12 +203,11 @@ defmodule Dbos.NotSupportedError do
   def message(%__MODULE__{reason: reason}), do: reason
 end
 
+# Raised at a durable wait site to unwind a workflow process that is parking instead of staying
+# resident. Caught by Dbos.WorkflowProcess, which records no outcome — the workflow's row is left
+# PENDING, exactly as Dbos.Waits left it, for the eventual wake to redispatch.
 defmodule Dbos.Waits.Parked do
-  @moduledoc """
-  Raised at a durable wait site to unwind a workflow process that is parking instead of staying
-  resident. Caught by `Dbos.WorkflowProcess`, which records no outcome — the workflow's row is
-  left `PENDING`, exactly as `Dbos.Waits` left it, for the eventual wake to redispatch.
-  """
+  @moduledoc false
 
   defexception [:workflow_id]
 

@@ -2,37 +2,30 @@
 
 ## The guarantee: at-least-once side effects, exactly-once checkpoints
 
-A checkpoint (a step's recorded output, a workflow's recorded outcome) is written exactly once —
-once committed, replay always returns the same recorded value. A **side effect** is not: a crash
-between a step performing its real-world effect (charging a card, sending an email, calling
-another service) and that step's checkpoint committing means replay re-runs the step, performing
-the effect again. Leases (`docs/clustering.md`) and `owner_xid` narrow the window a double
-execution can occur in; nothing closes it to zero.
+A checkpoint — a step's recorded output, a workflow's recorded outcome — is written exactly once,
+and replay always returns the recorded value. A **side effect** is at-least-once: a crash between
+a step performing its real-world effect (charging a card, sending an email, calling a service) and
+that step's checkpoint committing means replay re-runs the step and performs the effect again.
+Executor leases and `owner_xid` narrow that window; nothing closes it to zero.
 
 A step whose side effect must not repeat needs its own idempotency key at that boundary — a
-payment gateway's idempotency-key parameter, an email provider's message-id, a `deduplication_id`
-on the receiving system. See `guides/tutorials/steps.md` for where that key belongs.
+payment gateway's idempotency-key parameter, an email provider's message-id, a deduplication key on
+the receiving system.
 
 ## The core idea
 
-A workflow body re-executes from the top after a crash or restart. Steps that already
-completed do not run again — they return the value already recorded for them. This only
-produces a correct result if the body takes the same path and calls the same steps in the
-same order every time.
+A workflow body re-executes from the top after a crash or restart. Steps that already completed
+return the value already recorded for them. That is only correct if the body takes the same path
+and calls the same steps in the same order every time.
 
 ## Why this is stricter than it looks
 
-Step **arguments are never stored**. Only two things are persisted:
+Step **arguments are never stored**. Two things are persisted: the workflow's own input
+(`workflow_status.inputs`), once, and each step's **output**, keyed by workflow id and step
+position.
 
-- `workflow_status.inputs` — the workflow's own input, once.
-- Each step's **output** — keyed by workflow ID and a step position.
-
-A step's arguments on replay are whatever the surrounding code computes them to be. If
-that computation drifts, the step is called with different arguments, but the engine has
-no record of the original arguments to compare against. It matches on position and step
-name only, finds a recorded output, and returns it — silently.
-
-### Worked example
+A step's arguments on replay are whatever the surrounding code computes them to be. The engine
+matches on position and step name only, finds a recorded output, and returns it.
 
 ```elixir
 defworkflow charge_customer(order_id) do
@@ -42,210 +35,155 @@ defworkflow charge_customer(order_id) do
 end
 ```
 
-Say `load_order` is a plain function (not a step) that reads `order.total` from a
-mutable price table, and prices change between the first attempt and a crash-recovery
-replay:
+Suppose `load_order` is a plain function reading `order.total` from a mutable price table:
 
-1. First run: `order.total` is `100`. `charge_card` runs for real, charges `100`,
-   records output `%{charge_id: "ch_1", amount: 100}` at step position 1.
+1. First run: `order.total` is `100`. `charge_card` charges `100` and records
+   `%{charge_id: "ch_1", amount: 100}` at step position 1.
 2. Crash after `charge_card`, before `send_receipt`.
-3. Replay: prices changed, `order.total` is now `150`. `charge_card` is called with
-   `150`, but position 1 already has a recorded output. The engine returns the **old**
-   `%{charge_id: "ch_1", amount: 100}` without charging anything.
-4. `send_receipt` runs with `charge.id = "ch_1"`, `amount = 100` — the customer's receipt
-   says `100` even though the intended charge was `150`.
+3. Replay: prices changed, `order.total` is now `150`. `charge_card` is called with `150`, position
+   1 already has a recorded output, and the engine returns the old `%{charge_id: "ch_1", amount:
+   100}` without charging anything.
+4. `send_receipt` runs with `amount = 100`. The workflow completes "successfully" with a stale
+   value, no error and no log line.
 
-No error. No log line. The workflow completes "successfully" with a silently stale
-value. This is why every input to a step must itself come from a prior step's recorded
-output or the workflow's own input; a live read of mutable state breaks that guarantee.
+Every input to a step must come from a prior step's recorded output or the workflow's own input.
 
 ## Banned in a workflow body
 
 | Construct | Why it breaks replay | Use instead |
 |---|---|---|
-| `:rand.*` | Different random value every run | Generate randomness inside a step; the value becomes the step's recorded output |
+| `:rand.*` | Different random value every run | Generate randomness inside a step, so the value becomes the step's recorded output |
 | `DateTime.utc_now`, `NaiveDateTime.utc_now`, `Date.utc_today` | Wall-clock value differs on replay | A step that returns the current time |
-| `System.system_time`, `os_time`, `monotonic_time`, `unique_integer` | Same problem — a fresh value every call | A step, or the workflow/step IDs the engine already gives you |
-| `Process.sleep` | Blocks the process; the wait is neither durable nor resumable | The engine's durable sleep operation |
-| `receive` | Waits on messages the engine cannot record or replay | The engine's durable send/recv operations |
-| `spawn`, `spawn_link` | New process has no workflow context; loses checkpointing | Steps, or child workflows |
-| `Task.async`, `Task.await`, `Task.async_stream` | See callout below — silent context loss | A step, or a child workflow if you need concurrency |
-| `send/2` | Ordinary messages are not durable and vanish on crash | The engine's durable send |
-| `make_ref` | Fresh, non-reproducible value | Not needed — use step/workflow IDs |
-| `self()`-dependent logic | Process identity changes across replay (new process each run) | Nothing process-identity-shaped belongs in workflow logic |
+| `System.system_time`, `os_time`, `monotonic_time`, `unique_integer` | A fresh value every call | A step, or the workflow/step ids the engine already gives you |
+| `Process.sleep` | Blocks the process; the wait is neither durable nor resumable | `Dbos.sleep/1` |
+| `receive` | Waits on messages the engine cannot record or replay | `Dbos.send_message/4`, `Dbos.recv_message/2` |
+| `spawn`, `spawn_link`, `spawn_monitor` | New process has no workflow context; loses checkpointing | Steps, or child workflows |
+| `Task.async`, `Task.await`, `Task.async_stream`, `Task.start` | Silent context loss — see below | A step, or a child workflow for concurrency |
+| `send/2` | Ordinary messages are not durable and vanish on crash | `Dbos.send_message/4` |
+| `make_ref` | Fresh, non-reproducible value | The step/workflow ids the engine already gives you |
+| A direct call to the repo passed to `use Dbos` | A side effect with no checkpoint; re-runs for real on every replay | `deftransaction`, so it commits atomically with its checkpoint |
+| `self()`-dependent logic | Process identity changes across replay | Keep process identity out of workflow logic |
 | `node()`-dependent logic | Which node picks up recovery is not deterministic | Push node-specific work into a step |
-| Direct repo calls outside a transactional step | Side effect with no checkpoint; re-runs for real on every replay | A transactional step |
-| Reading mutable module/application state (ETS, `Application.get_env` for values that can change, global counters, in-memory caches) | Value can differ between original run and replay | A step that reads and returns the value |
+| Reading mutable module or application state (ETS, changeable `Application.get_env` values, global counters, in-memory caches) | Value can differ between the original run and replay | A step that reads and returns the value |
+
+## Task is the quiet one
+
+A `Task` does not inherit the calling process's process dictionary, which is where the engine
+tracks "am I inside a workflow, inside a step". A step called from inside a `Task.async` runs with
+none of that context, so it takes the **passthrough path**: the function body runs directly, no
+checkpoint is written, no error is raised, and the call looks like it worked. On replay the same
+code runs again in full with none of its side effects protected.
+
+This is the easiest bug to introduce and the hardest to notice. For concurrency, use child
+workflows.
 
 ## A step body is not a workflow body
 
-A step is where nondeterminism is supposed to live. `DateTime.utc_now`, `:rand.uniform`, a
-database read, an HTTP call — all of that belongs in a step, and is the reason steps exist.
-Banning them there would make the library unusable.
+A step is where nondeterminism belongs. `DateTime.utc_now`, `:rand.uniform`, a database read, an
+HTTP call — all of it is ordinary code inside a step, and none of it is checked there.
+`Process.sleep` is the right tool for a blocking wait in a step; a bare `receive` runs in the
+workflow's own process and loses no context; `send/2`, `make_ref`, and direct repo calls stay put.
 
-What is still unsafe in a `defstep`/`deftransaction` body is anything that hands execution to a
-process the step did not create with the workflow context intact. The engine tracks "am I inside
-a workflow, inside a step" in the process dictionary; a `Task` or a bare `spawn` starts a fresh
-process with none of it. A step called from inside one takes the passthrough path — no
-checkpoint, no error, no log line — the same silent failure the workflow-level `Task` callout
-above describes.
+Only two families are banned in a `defstep`/`deftransaction` body, both because they hand execution
+to a process that starts with an empty process dictionary:
 
-| Construct | Why it's still banned in a step | Use instead |
+| Construct in a step | Use instead |
+|---|---|
+| `spawn`, `spawn_link`, `spawn_monitor` | Run the work inline in this step, or split it into its own step |
+| `Task.async`, `Task.await`, `Task.async_stream`, `Task.start`, `Task.start_link` | Run the work inline, or use a step or child workflow for real concurrency |
+
+## Where the contract is enforced
+
+Two checkers share one banned-construct table, so they always agree.
+
+| Checker | Sees | On a violation |
 |---|---|---|
-| `spawn`, `spawn_link`, `spawn_monitor` | New process has no workflow context | Run the work inline in this step, or split it into its own step |
-| `Task.async`, `Task.await`, `Task.async_stream`, `Task.start`, `Task.start_link` | Same problem — the spawned process starts with an empty process dictionary | Run the work inline, or use a durable step/child workflow for real concurrency |
+| The `defworkflow`/`defstep`/`deftransaction` macros | The literal `do` block handed to the macro | `CompileError` naming the call, its file and line, and the fix |
+| `Credo.Check.Warning.DbosDeterminism` | Same-module `def`/`defp` helpers, followed transitively from every workflow, step and transaction body | A Credo issue naming the entry point, the helper it reaches through, and the fix |
 
-Everything else on the workflow-body ban list above is ordinary code inside a step, and is not
-checked there:
+Add the Credo check to `.credo.exs` under `checks`:
 
-- `:rand.*`, `DateTime.utc_now`, `System.system_time` and friends — this is exactly what a step is
-  for.
-- `Process.sleep` — an ordinary blocking wait in the step's own process. `Dbos.sleep/1` is a
-  workflow-level primitive and cannot be called from a step, so `Process.sleep` is the correct
-  tool here.
-- `receive` — a step body runs in the workflow's own process, not a spawned one, so a bare
-  `receive` does not lose any context. It blocks that process the same way `Process.sleep` does.
-- `send/2`, `make_ref`, a direct repo call — none of these move execution to another process, so
-  none of them touch the process-dictionary failure mode a step's ban list exists to close.
+```elixir
+{Credo.Check.Warning.DbosDeterminism, []}
+```
 
-## Enforced at compile time vs. guidance only
+Beyond the compile-time list, `defworkflow` also warns on a call to a public function in another
+module that is not a registered `defstep`/`deftransaction` — that is where undeclared side effects
+hide. Suppress it with `use Dbos, warn_cross_module_calls: false`.
 
-`defworkflow` (`Dbos.Macros`, `Dbos.Determinism`) runs a compile-time checker over a workflow
-body's AST and rejects the following with a `CompileError` naming the call, the file/line, and
-the fix: `:rand.*`, `DateTime.utc_now`, `NaiveDateTime.utc_now`, `Date.utc_today`,
-`System.system_time`/`os_time`/`monotonic_time`/`unique_integer`, `Process.sleep`, `receive`,
-`spawn`/`spawn_link`/`spawn_monitor`, `Task.async`/`await`/`async_stream`/`start`, `send/2`,
-`make_ref`, and a direct call to the module passed as `use Dbos, repo: ...`. It also warns
-(suppressible with `use Dbos, warn_cross_module_calls: false`) on a call to a public function in
-another module that is not a registered `defstep`/`deftransaction`.
+What neither checker reaches:
 
-`defstep` and `deftransaction` run a separate, narrower compile-time checker over their own body:
-a `CompileError` naming the call, the file/line, and the fix for `spawn`/`spawn_link`/
-`spawn_monitor` and `Task.async`/`await`/`async_stream`/`start`/`start_link` only, per the table
-above.
-
-`self()`-dependent logic, `node()`-dependent logic, and reads of mutable module/application state
-(ETS, `Application.get_env`, global counters, in-memory caches) are **not** mechanically detected
-— there is no fixed list of function names to match against (any expression can read `self()` or
-touch an ETS table), so these remain guidance enforced by code review, since the compiler can't
-reach them. The
-banned-construct table above is the full contract either way; the checker automates the part of
-it that is a closed set of function names.
+- Helpers in another module, calls through `apply/3`, and calls through an unresolvable function
+  value — out of scope for the Credo check.
+- `self()`-dependent logic, `node()`-dependent logic, and reads of mutable module or application
+  state. Any expression can read `self()` or touch an ETS table, so there is no closed set of
+  function names to match. These stay guidance enforced by code review.
 
 ## `mix dbos.explain`
 
 `mix dbos.explain Mod.function/arity` prints a `defworkflow`'s statically-derivable step-id
 sequence — which durable operation each step id maps to — and flags a `case`/`cond`/`if` whose
-branches consume a different number of ids, the "classic bug" from the Step IDs section below.
-Where the sequence depends on a call this tool cannot resolve to a step, a child workflow, or a
-control-flow construct it recurses into, it reports that position as indeterminate. No guess is
-made.
-
-## Task is the quiet one
-
-A `Task` does not inherit the calling process's process dictionary. This engine tracks
-"am I inside a workflow, inside a step" using the process dictionary. A step called from
-inside a `Task.async` runs in a process that has none of that context.
-
-Result: the step takes the **passthrough path** — it just runs the function body
-directly, as if it were an ordinary function call outside any workflow. No checkpoint is
-written. No error is raised. The call looks like it worked. On replay, that same code
-runs again in full, with none of its side effects protected by idempotency.
-
-This is the easiest bug to introduce and the hardest to notice, because everything
-appears to succeed on the first run. Do not call steps from inside a `Task`. If you need
-concurrency, use child workflows.
-
-## What's allowed and encouraged
-
-- Pure computation.
-- Pattern matching and branching on the **results of steps** (values already recorded).
-- Calling other pure functions.
-- Pushing every source of nondeterminism — time, randomness, I/O, external state — into a
-  step, so it gets recorded once and replayed as a fixed value forever after.
-
-A workflow body should read like a deterministic script over already-known values. All
-the "what does the world look like right now" logic belongs inside steps.
+branches consume a different number of ids. Where the sequence depends on something it cannot
+resolve, it reports that position as indeterminate and makes no guess.
 
 ## Step IDs are a contract
 
-Every durable operation — a step call, a sleep, a send, a receive, a `setEvent`, a
-`getEvent`, a stream write, a `getResult`, an enqueue, a child workflow call, a fork, a
-patch check — consumes the next number from a per-workflow counter, starting at 0. That
-sequence of numbers is how the engine matches "the 3rd durable thing this workflow does"
-on replay to "the 3rd durable thing this workflow did" originally.
+Every durable operation consumes the next number from a per-workflow counter, starting at 0. That
+sequence is how the engine matches "the 3rd durable thing this workflow does" on replay to "the 3rd
+durable thing this workflow did" originally.
 
-The counter is never itself persisted. It is rebuilt from scratch, starting at 0, every
-time the workflow body runs — first attempt, replay, or recovery. Reproducing the exact
-same sequence of operations is what keeps replay correct.
+The counter is never persisted. It is rebuilt from scratch, starting at 0, every time the workflow
+body runs.
 
-The classic bug: a branch that allocates a different number of IDs than another branch.
-If the original run took the `true` branch (consuming an extra step ID) and a replay
-somehow takes the `false` branch, every operation after the branch shifts by one
-position and gets matched against the wrong recorded row. If the step names happen to
-differ, the engine raises a hard error. If two steps at those mismatched positions
-happen to share the same name, the engine returns the **wrong step's cached output** with
-no error at all.
-
-### IDs consumed per operation
+The classic bug is a branch that allocates a different number of ids than another branch. If the
+original run took the `true` branch and a replay takes the `false` branch, every operation after it
+shifts by one position and is matched against the wrong recorded row. Mismatched step names raise a
+hard error; two steps that happen to share a name return the wrong cached output silently.
 
 | Operation | IDs consumed | Notes |
 |---|---|---|
 | Step call | 1 | Allocated before checking whether it already ran |
 | Sleep | 1 | |
-| Send (from inside a workflow) | 1 | Sending from outside a workflow consumes 0 |
-| Receive (`recv`) | 2 | One for the receive itself, one for an internal timeout-tracking sleep — both reserved up front, even if no wait ends up happening |
+| Send | 1 | Sending from outside a workflow consumes 0 |
+| Receive (`recv`) | 2 | The receive plus an internal timeout-tracking sleep, both reserved up front |
 | `setEvent` | 1 | |
-| `getEvent` (from inside a workflow) | 2 | Same shape as receive: event + internal timeout sleep, both reserved up front |
+| `getEvent` | 2 | Same shape as receive; from outside a workflow, 0 |
 | Stream write / close | 1 each | |
-| `getResult` (blocking wait on a handle, from inside a workflow) | 1 | Allocated **after** the wait completes — the only operation with this shape |
-| Enqueue (from inside a workflow) | 1 | Enqueueing from outside a workflow consumes 0 |
-| Starting/enqueueing a child workflow | 1 (parent side) | Consumed very early, before any error path — the child's own workflow ID is derived from this number, so it must be stable |
+| `getResult` (blocking wait on a handle) | 1 | Allocated **after** the wait completes — the only operation with this shape. A timed-out wait consumes none |
+| Enqueue | 1 | Enqueueing from outside a workflow consumes 0 |
+| Starting or enqueueing a child workflow | 1 (parent side) | Consumed very early, before any error path — the child's workflow id is derived from it, so it must be stable |
 | Fork | 1 | |
-| Patch check | 0 or 1 | Only consumes an ID if the patch actually applies on this run (see below) |
-| Patch retirement | 0 or 1 | Only consumes an ID if this run recorded the patch marker (see below) |
+| Patch check | 0 or 1 | 1 only when the patch applies on this run |
+| Patch retirement | 0 or 1 | 1 only when this run recorded the patch marker |
 
-The receive/getEvent "reserve 2 up front, even if the second is never used" rule exists
-specifically so that both the "message was already there" path and the "had to wait"
-path consume the same total, keeping every operation after them at a stable position
+Receive and `getEvent` reserve both ids up front so that the "message was already there" path and
+the "had to wait" path consume the same total, keeping every later operation at a stable position
 regardless of timing.
 
 ## Evolving a workflow safely
 
-Once a workflow has in-flight instances recorded, its code cannot simply be edited in
-place — a running instance replays the *old* control flow against a database of *old*
-recorded steps. Three ways to change behavior:
+A workflow with in-flight instances cannot be edited in place: a running instance replays the old
+control flow against a database of old recorded steps. Three ways to change behaviour:
 
 | Option | When to use | Effect on in-flight workflows |
 |---|---|---|
-| Bump the application version | The workflow's code changed in a way that only matters for **new** workflow starts (e.g. deploying alongside unrelated changes) | In-flight workflows recover under the version they started with; new workflows use the new code |
-| Use a patch | You need to change behavior for workflows that are **currently in flight**, in a way that must not shift step IDs for work already recorded | The patch check consumes 0 IDs on the "not yet patched, old code path" branch and 1 ID once the patch actually takes effect for that workflow — this asymmetry is exactly what lets old and new code coexist without breaking ID alignment |
-| Write a new workflow name | The change is big enough that the old and new versions have fundamentally different step sequences | Old in-flight workflows keep running under the old name/code indefinitely; new work is routed to the new name |
+| Bump the application version | The change only matters for **new** workflow starts | In-flight workflows recover under the version they started with; new workflows use the new code |
+| Use a patch (`Dbos.patch/1`) | You must change behaviour for workflows **currently in flight** without shifting step ids for work already recorded | The patch check consumes 0 ids on the old code path and 1 once the patch takes effect for that workflow, which is what lets old and new code coexist |
+| Write a new workflow name | Old and new versions have fundamentally different step sequences | Old in-flight workflows keep running under the old name; new work routes to the new name |
 
-Rule of thumb: if you are tempted to add an `if` branch to a workflow body that changes
-which steps run, reach for a patch. A bare conditional whose truth value can differ
-between original execution and replay is the "branch allocates different IDs" bug from
-the previous section.
+If you are tempted to add an `if` to a workflow body that changes which steps run, reach for a
+patch. A bare conditional whose truth value can differ between the original execution and a replay
+is the "branch allocates different ids" bug.
 
 ## Serialized values are a schema
 
-Step and workflow outputs are stored as encoded Erlang terms. The struct or data shape a
-step returns **on its first run** is the shape that must still decode correctly whenever
-that workflow is replayed, no matter how much later.
+Step and workflow outputs are stored as encoded Erlang terms. The struct or data shape a step
+returns **on its first run** must still decode correctly whenever that workflow is replayed, no
+matter how much later. Treat every struct a step can return as a versioned, append-only schema.
 
-Changing a struct's fields — renaming a key, removing a field, changing a type — between
-the run that recorded a value and a later replay that reads it back is a breaking change
-of the same kind as an incompatible database migration on a live table.
-
-Rule: treat every struct that a step can return as a versioned, append-only schema.
-
-Safe pattern:
-
-- Adding a new field with a default is safe — old recorded values decode fine.
-- Renaming or removing a field is not safe while any workflow that recorded the old
-  shape might still be replayed. Add a new field, and drop the old
-  one only after you are certain no in-flight workflow can still reference it.
-- Changing a field's type (e.g. integer to string) is not safe for the same reason.
-- If a shape must change incompatibly, treat it like a workflow-behavior change: give the
-  step a new name (a new "column" in `operation_outputs`) so old recorded rows keep being
-  read under the old struct and new runs write the new one.
+| Change | Safe? |
+|---|---|
+| Adding a field with a default | Yes — old recorded values decode fine |
+| Renaming or removing a field | Only once no workflow that recorded the old shape can still be replayed |
+| Changing a field's type | Same rule |
+| An unavoidable incompatible change | Give the step a new name, so old recorded rows keep being read under the old struct and new runs write the new one |

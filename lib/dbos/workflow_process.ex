@@ -1,10 +1,9 @@
+# One running workflow instance: establishes the Dbos.Runtime context, invokes the registered
+# function with its decoded inputs, and records the outcome. A Dbos.WorkflowCancelledError
+# escaping the body means the row is already CANCELLED, so it is swallowed, leaving the status as
+# recorded.
 defmodule Dbos.WorkflowProcess do
-  @moduledoc """
-  One running workflow instance: establishes the `Dbos.Runtime` context, invokes the registered
-  function with its decoded inputs, and records the outcome. A `Dbos.WorkflowCancelledError`
-  escaping the body means the row is already `CANCELLED`, so it is swallowed, leaving the status
-  as recorded.
-  """
+  @moduledoc false
 
   use Task, restart: :temporary
 

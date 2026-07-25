@@ -12,18 +12,10 @@ def deps do
 end
 ```
 
-`Dbos` needs a Postgres connection. It reuses your application's own — either a bare
-`Postgrex` pool (`Dbos.DB.Postgrex`) or an existing `Ecto.Repo` (`Dbos.DB.Ecto`). This guide
-uses `Ecto.Repo`, since most Phoenix and OTP apps already have one.
+`Dbos` needs a Postgres connection, and reuses your application's own — a bare `Postgrex`
+pool (`Dbos.DB.Postgrex`) or an `Ecto.Repo` (`Dbos.DB.Ecto`). This guide uses `Ecto.Repo`.
 
-## 2. Create the schema
-
-`Dbos` keeps its own tables, under their own Postgres schema (`dbos` by default), separate
-from your application's tables. In development, let it create that schema for you the first
-time it starts — that's what `migrations: :create_if_absent` below does. (In production you
-verify a schema that's already there; see `guides/integrating-dbos.md`.)
-
-## 3. Write a workflow
+## 2. Write a workflow
 
 ```elixir
 defmodule MyApp.Checkout do
@@ -49,13 +41,14 @@ defmodule MyApp.Checkout do
 end
 ```
 
-`defworkflow` requires an explicit `name:` — recovery re-dispatches a crashed workflow by
-looking up this name. It has to be a stable string you control, independent of the module or
-function. Read `reserve_stock` and `charge_card` as two checkpoints: once either one succeeds,
-its result is durably recorded, and a replay of `process_order` after a crash will not run it
-again.
+`defworkflow` requires an explicit `name:`. Recovery re-dispatches a crashed workflow by
+looking up this name, so it must be a stable string you control, independent of the module
+and function.
 
-## 4. Add the supervisor
+`reserve_stock` and `charge_card` are checkpoints: once one succeeds, its result is durably
+recorded, and a replay of `process_order` after a crash returns that record.
+
+## 3. Add the supervisor
 
 ```elixir
 defmodule MyApp.Application do
@@ -67,8 +60,7 @@ defmodule MyApp.Application do
       {Dbos.Supervisor,
        name: Dbos,
        db: {Dbos.DB.Ecto, MyApp.Repo},
-       workflows: [MyApp.Checkout],
-       migrations: :create_if_absent}
+       otp_app: :my_app}
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one)
@@ -76,33 +68,42 @@ defmodule MyApp.Application do
 end
 ```
 
-`Dbos.Supervisor` starts after `MyApp.Repo` — it needs a live connection to verify or create
-its schema before anything else in the tree runs.
+`otp_app:` discovers every workflow module your application has compiled, so adding a workflow
+needs no change here.
 
-## 5. Start the workflow, with a name you control
+`Dbos` keeps its own tables under their own Postgres schema (`dbos` by default). Install it as a
+migration in your own sequence:
 
-A bare call to `MyApp.Checkout.process_order(order_id, amount)` works, but it always mints a
-random workflow id. For this demo, pin the id explicitly with `Dbos.start/3` so you can look
-the workflow up again from a fresh `iex` session after the crash:
+```console
+$ mix dbos.gen.migration
+$ mix ecto.migrate
+```
+
+At boot `Dbos.Supervisor` verifies the schema is at the version it expects. It starts after
+`MyApp.Repo`, so it has a live connection to check with.
+
+## 4. Start the workflow with an id you control
+
+`MyApp.Checkout.process_order(order_id, amount)` mints a random workflow id. Pin the id with
+`Dbos.start/3` so you can look the workflow up from a fresh `iex` session after the crash:
 
 ```elixir
 iex> {:ok, handle} = Dbos.start("process_order", ["order-1", 4999], workflow_id: "order-1")
 {:ok, %Dbos.WorkflowHandle{engine: Dbos, workflow_id: "order-1"}}
 ```
 
-Within a couple of seconds you should see:
+Within a couple of seconds:
 
 ```
 reserve_stock: reserving stock for order-1
 charge_card: charging 4999 for order-1...
 ```
 
-`charge_card` is now ten seconds into `Process.sleep(10_000)` — and nothing has been
-checkpointed for it yet.
+`charge_card` is ten seconds into `Process.sleep(10_000)`, with nothing checkpointed for it.
 
-## 6. Kill it mid-flight
+## 5. Kill it mid-flight
 
-From another terminal, find the BEAM's OS pid and send it `SIGKILL` for an actual crash:
+From another terminal, find the BEAM's OS pid and `SIGKILL` it:
 
 ```sh
 $ pgrep -f "iex -S mix"
@@ -110,17 +111,17 @@ $ pgrep -f "iex -S mix"
 $ kill -9 83214
 ```
 
-The node is gone. `reserve_stock`'s output is safely committed to `dbos.operation_outputs`;
-`charge_card` was killed mid-sleep and never checkpointed anything.
+`reserve_stock`'s output is committed to `dbos.operation_outputs`. `charge_card` died
+mid-sleep.
 
-## 7. Restart, and watch it resume
+## 6. Restart, and watch it resume
 
 ```sh
 $ iex -S mix
 ```
 
 `Dbos.Recovery` scans for every `PENDING` workflow owned by this executor as soon as the
-supervision tree comes up, before you type a single command. Watch the shell:
+supervision tree comes up, before you type a command:
 
 ```
 reserve_stock: reserving stock for order-1
@@ -128,11 +129,8 @@ charge_card: charging 4999 for order-1...
 charge_card: charged order-1
 ```
 
-`reserve_stock` does **not** print again — its checkpointed output from step 0 was replayed
-without running the step body a second time. `charge_card` never got that far last time, so
-it reruns in full, charges again, and this time finishes and checkpoints.
-
-Confirm it from `iex`:
+`reserve_stock` stays silent — its checkpointed output at step 0 was replayed without running
+the body. `charge_card` had no checkpoint, so it runs in full, and this time finishes.
 
 ```elixir
 iex> Dbos.status("order-1")
@@ -143,12 +141,11 @@ iex> Dbos.result("order-1")
         charge: %{order_id: "order-1", amount: 4999, charge_id: "ch_order-1"}}}
 ```
 
-That's the whole point of the engine: a crash mid-step costs time. Correctness holds, and
-anything already checkpointed costs nothing to redo.
+A crash mid-step costs time. Correctness holds, and anything already checkpointed costs
+nothing to redo.
 
 ## Where to next
 
-- `guides/why-dbos.md` — what problem this solves and when it's the wrong tool.
-- `guides/architecture.md` — how replay, checkpoints, and recovery actually work under the hood.
-- `guides/integrating-dbos.md` — wiring this into a real Phoenix or OTP app: migrations,
-  the LISTEN connection, executor identity, and tests.
+- `guides/why-dbos.md` — what this solves, and when it's the wrong tool.
+- `guides/architecture.md` — the model replay and recovery are built on.
+- `guides/integrating-dbos.md` — wiring into a real Phoenix or OTP app.

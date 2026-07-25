@@ -1,11 +1,10 @@
+# Compile-time determinism checker over a defworkflow body's AST, per docs/determinism.md.
+# Raises a CompileError naming the offending call, its file and line, and the fix, for anything in
+# the banned-construct table. Separately emits a suppressible IO.warn/2 for a call to a public
+# function in another module that is not a registered defstep/deftransaction, since that is where
+# undeclared side effects hide.
 defmodule Dbos.Determinism do
-  @moduledoc """
-  Compile-time determinism checker over a `defworkflow` body's AST, per `docs/determinism.md`.
-  Raises a `CompileError` naming the offending call, its file and line, and the fix, for anything
-  in the banned-construct table. Separately emits a suppressible `IO.warn/2` for a call to a
-  public function in another module that is not a registered `defstep`/`deftransaction`, since
-  that is where undeclared side effects hide.
-  """
+  @moduledoc false
 
   @allowed_pure_modules [
     Kernel,

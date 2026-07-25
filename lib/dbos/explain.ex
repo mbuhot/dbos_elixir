@@ -1,12 +1,11 @@
+# Static step-id sequence analysis for mix dbos.explain, over a defworkflow body's stored AST.
+# Recognizes durable operations this module can prove consume a fixed number of ids — the built-in
+# Dbos.* primitives, and same-module defstep/deftransaction/defworkflow calls — and flags a
+# case/cond/if whose branches consume a different number of ids, the classic replay bug. Anything
+# else (a call this module cannot resolve, a comprehension, a capture, ...) is reported as
+# indeterminate.
 defmodule Dbos.Explain do
-  @moduledoc """
-  Static step-id sequence analysis for `mix dbos.explain`, over a `defworkflow` body's stored AST.
-  Recognizes durable operations this module can prove consume a fixed number of ids — the
-  built-in `Dbos.*` primitives, and same-module `defstep`/`deftransaction`/`defworkflow` calls —
-  and flags a `case`/`cond`/`if` whose branches consume a different number of ids, the classic
-  replay bug. Anything else (a call this module cannot resolve, a comprehension, a capture, ...)
-  is reported as indeterminate.
-  """
+  @moduledoc false
 
   @doc "Parses `\"Mod.fun/arity\"` into `{module, function, arity}`."
   def parse_target(str) do

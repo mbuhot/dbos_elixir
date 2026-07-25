@@ -1,9 +1,10 @@
 defmodule Dbos.Runtime do
   @moduledoc """
-  The workflow context and durable-step protocol. Workflow state (config, workflow id, the
-  step-id counter, and replay status) lives in the process dictionary under one key, matching
-  Ecto's own approach to threading a transaction, since a step body runs on the same process as
-  the workflow that invoked it.
+  The durable-step protocol, and the workflow context ambient to a running workflow.
+
+  `run_step/3` is what `defstep` expands to, and is callable directly for a one-off step that
+  does not warrant its own named function. `current_workflow_id/0`, `in_workflow?/0` and friends
+  report on the workflow the calling process is currently executing.
   """
 
   alias Dbos.Config
@@ -13,11 +14,10 @@ defmodule Dbos.Runtime do
 
   @context_key :dbos_workflow_context
 
+  # One workflow's in-process state: its config, id, step-id counter, replay flag, deadline (if
+  # any), and whether the calling frame is nested inside a step or a transaction body.
   defmodule Context do
-    @moduledoc """
-    One workflow's in-process state: its config, id, step-id counter, replay flag, deadline (if
-    any), and whether the calling frame is nested inside a step or a transaction body.
-    """
+    @moduledoc false
 
     defstruct [
       :config,

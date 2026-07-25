@@ -1,10 +1,9 @@
+# Messaging, event, and stream primitives: send/recv, set_event/get_event, and stream
+# writes/reads, wired into Dbos.Runtime's step-id/checkpoint protocol and Dbos.Notifications'
+# wake mechanism. Backs Dbos's public send_message/4, recv_message/3, set_event/3, get_event/4,
+# write_stream/3, close_stream/2, and read_stream/3.
 defmodule Dbos.Messaging do
-  @moduledoc """
-  Messaging, event, and stream primitives: `send`/`recv`, `set_event`/`get_event`, and stream
-  writes/reads, wired into `Dbos.Runtime`'s step-id/checkpoint protocol and `Dbos.Notifications`'
-  wake mechanism. Backs `Dbos`'s public `send_message/4`, `recv_message/3`, `set_event/3`,
-  `get_event/4`, `write_stream/3`, `close_stream/2`, and `read_stream/3`.
-  """
+  @moduledoc false
 
   alias Dbos.Notifications
   alias Dbos.Runtime

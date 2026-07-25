@@ -1,9 +1,8 @@
+# :telemetry.span/3 wrappers for the engine's four instrumented spans — workflow execution, step
+# execution, queue dequeue, and recovery passes. Every event, its measurements, and its metadata
+# are catalogued in docs/telemetry.md.
 defmodule Dbos.Telemetry do
-  @moduledoc """
-  `:telemetry.span/3` wrappers for the engine's four instrumented spans — workflow execution,
-  step execution, queue dequeue, and recovery passes. Every event, its measurements, and its
-  metadata are catalogued in `docs/telemetry.md`.
-  """
+  @moduledoc false
 
   @doc "Spans a workflow body's execution: `[:dbos, :workflow, :start | :stop | :exception]`."
   def span_workflow(metadata, fun) do

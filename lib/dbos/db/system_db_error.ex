@@ -1,6 +1,6 @@
 defmodule Dbos.SystemDbError do
   @moduledoc """
-  Raised when a system-database statement fails and `Dbos.DB.Retry` cannot recover it. Carries the
+  Raised when a system-database statement fails and the engine's connection retries cannot recover it. Carries the
   statement and the underlying driver error, so the failure is attributable to a query rather than
   surfacing as a bare `MatchError`.
   """

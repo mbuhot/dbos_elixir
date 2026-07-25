@@ -42,27 +42,24 @@ end
 | `context:` | `nil` | A compile-time literal passed as the workflow's second argument on every fire. |
 
 A scheduled workflow's function must take exactly two arguments: `(scheduled_time_ms, context)`.
-`scheduled_time_ms` is the fired occurrence's scheduled epoch-ms time, distinct from wall-clock
-"now" — so a workflow
-that needs to know which window it's covering (a report for "yesterday," an invoice for "last
-month") computes that from `scheduled_time_ms`, making a backfilled run deterministic and
-identical to the original one that would have fired on time. `context` is whatever static value
-was declared alongside the schedule.
+`scheduled_time_ms` is the fired occurrence's scheduled epoch-ms time. Compute the window a run
+covers from it — a report for "yesterday", an invoice for "last month" — and a backfilled run
+produces exactly what the on-time run would have. `context` is the static value declared alongside
+the schedule.
 
-Registering the module on `Dbos.Supervisor`'s `:workflows` list is what makes the schedule active
-— a generated `__dbos_schedules__` reflection function, feeds `Dbos.Scheduler` at boot:
+The schedule goes active once the engine knows about the module, through `:otp_app` discovery or an
+explicit `:workflows` entry:
 
 ```elixir
 {Dbos.Supervisor,
  name: Dbos,
  db: {Dbos.DB.Ecto, MyApp.Repo},
- workflows: [MyApp.Reports]}
+ otp_app: :my_app}
 ```
 
 ## The cron grammar
 
-Six space-separated fields — one more than the traditional five-field cron, with an added
-leading seconds field:
+Six space-separated fields, leading with seconds:
 
 ```
 second minute hour day-of-month month day-of-week
@@ -86,10 +83,9 @@ Each field accepts `*` (any value), a single integer, a comma-separated list (`1
 "0 30 2 1 * ?"        # 2:30am UTC on the 1st of every month
 ```
 
-**Day-of-month and day-of-week are OR'd when both are restricted.** If both fields are something
-other than a wildcard, a candidate date matches if *either* one matches. `"0 0 0 15 * MON"` fires
-on the 15th of every month *and* every Monday, covering more than a Monday that happens to fall
-on the 15th. Leave one of the two as `*` (or `?`) to constrain on only the other.
+**Day-of-month and day-of-week are OR'd when both are restricted.** When neither field is a
+wildcard, a candidate date matches if *either* matches: `"0 0 0 15 * MON"` fires on the 15th of
+every month and on every Monday. Leave one of the two as `*` (or `?`) to constrain only the other.
 
 ### `@` descriptors
 
@@ -108,8 +104,8 @@ schedule: "@every 90s"
 schedule: "@every 1h30m"
 ```
 
-A fixed interval measured from the previous fire time, floating free of any wall-clock calendar
-— units `ns`, `us`/`µs`, `ms`, `s`, `m`, `h` combine (`1h30m`).
+A fixed interval measured from the previous fire time. Units `ns`, `us`/`µs`, `ms`, `s`, `m`, `h`
+combine (`1h30m`).
 
 ## Exactly-once firing across nodes
 
@@ -132,16 +128,13 @@ flowchart LR
 
 Every engine's `Dbos.Scheduler` polls independently (`scheduler_poll_interval_ms`, a
 `Dbos.Supervisor` option, default `30_000`), reading the full `ACTIVE` set fresh from
-`workflow_schedules` on every tick — so several engines sharing one database, or a schedule
-declared by only one of them, all converge on the same set without coordinating directly.
+`workflow_schedules` on every tick, so engines sharing one database converge on the same set
+without coordinating directly.
 
-Each due occurrence is enqueued under a deterministic id: `"sched-<schedule_name>-<scheduled_time_ms>"`.
-Two engines independently computing the same occurrence both attempt to insert the same
-`workflow_uuid`, so they collapse onto one `workflow_status` row (the second insert is a no-op
-against the first). That id collision is what prevents two *rows*; it's the queue's own `FOR
-UPDATE SKIP LOCKED` dequeue — the same mechanism any other queued workflow uses — that guarantees
-the workflow *body* actually runs exactly once, since only one runner's transaction can claim that
-one row.
+Each due occurrence is enqueued under a deterministic id:
+`"sched-<schedule_name>-<scheduled_time_ms>"`. Two engines computing the same occurrence insert the
+same `workflow_uuid` and collapse onto one `workflow_status` row. The queue's `FOR UPDATE SKIP
+LOCKED` dequeue then guarantees exactly one runner claims that row and runs the body.
 
 ## Catch-up after downtime
 
@@ -150,19 +143,13 @@ schedule: [cron: "0 0 3 * * *", automatic_backfill: false]  # default
 schedule: [cron: "0 0 3 * * *", automatic_backfill: true]
 ```
 
-- **`automatic_backfill: false`** (the default): a schedule's starting floor is the moment *this
-  process* first sees it reconcile — any ticks that would have fired while no engine was running
-  at all are silently skipped. Safe default for anything where a missed run is fine to just drop
-  (a "clean up old rows" job, say).
-- **`automatic_backfill: true`**: the starting floor instead comes from the schedule's persisted
-  `last_fired_at` in `workflow_schedules`. Every occurrence missed since the last time *any* engine
-  fired it — whether from downtime, a deploy, or the schedule being newly added — is enqueued on
-  the next reconcile, each under its own deterministic `sched-<name>-<time>` id, and each receiving
-  its own correct `scheduled_time_ms` so the backfilled runs are indistinguishable from ones that
-  fired on time.
-
-Use `automatic_backfill: true` for anything where every occurrence matters (an invoice for every
-month, no matter what) and `false` (or omit it) where only "still running regularly" matters.
+- **`automatic_backfill: false`** (the default): the schedule's starting floor is the moment this
+  process first reconciles it. Ticks that came due while no engine was running are skipped. Use it
+  where dropping a missed run is fine — a "clean up old rows" job.
+- **`automatic_backfill: true`**: the floor comes from the schedule's persisted `last_fired_at`.
+  Every occurrence missed since any engine last fired it — downtime, a deploy, a newly added
+  schedule — is enqueued on the next reconcile, each under its own `sched-<name>-<time>` id and its
+  own `scheduled_time_ms`. Use it where every occurrence matters, like a monthly invoice.
 
 ## Deactivating
 
@@ -171,4 +158,4 @@ Dbos.Scheduler.deactivate(Dbos)
 ```
 
 Also reachable as `GET /deactivate` on the admin server. Stops this engine from firing new
-occurrences; already-enqueued work already in the queue is unaffected and runs to completion.
+occurrences; work already in the queue runs to completion.

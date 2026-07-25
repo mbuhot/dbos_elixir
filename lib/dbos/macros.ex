@@ -2,9 +2,9 @@ defmodule Dbos.Macros do
   @moduledoc """
   `use Dbos` brings in `defstep/2`, `deftransaction/2`, and `defworkflow/2`.
   `defstep`/`deftransaction` wrap a plain function body in `Dbos.Runtime.run_step/3` /
-  `Dbos.transaction/3`, and run `Dbos.Determinism.check_step!/2` over the body at compile time to
-  reject a call that hands execution to another process; `defworkflow` additionally runs
-  `Dbos.Determinism.check!/2` over the body and generates a durable dispatcher.
+  `Dbos.transaction/3`, and reject, at compile time, a call that hands execution to another
+  process; `defworkflow` additionally runs the full determinism check over the body and generates
+  a durable dispatcher.
 
   `defworkflow` calls are captured and processed once, in `@before_compile`, alongside every
   other `defworkflow` in the module: anything that must see every `defworkflow` in the module —
@@ -121,7 +121,7 @@ defmodule Dbos.Macros do
   second `defworkflow` in the same module whose own declared arity happens to equal that
   arity is rejected at compile time instead of silently misdispatching.
 
-  Runs `Dbos.Determinism.check!/2` over the body at compile time. Does not support a `when` guard
+  Runs the determinism check over the body at compile time. Does not support a `when` guard
   on the head (a workflow's name must map to exactly one deterministic body — see
   `docs/determinism.md`); does support default arguments.
 

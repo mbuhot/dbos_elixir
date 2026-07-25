@@ -180,7 +180,6 @@ defmodule Dbos.MixProject do
       "docs/system-database.md",
       "docs/clustering.md",
       "docs/telemetry.md",
-      "docs/interop-migration.md",
       "guides/production-checklist.md",
       "guides/faq.md"
     ]
@@ -199,12 +198,33 @@ defmodule Dbos.MixProject do
 
   defp groups_for_modules do
     [
-      "Writing Workflows": [Dbos, Dbos.RetryPolicy, Dbos.WorkflowHandle],
-      Setup: [Dbos.Supervisor, Dbos.Config, Dbos.Migration, Dbos.Migrator, Dbos.Registry],
-      Queues: [Dbos.Queue, Dbos.Debouncer],
-      Scheduling: [Dbos.Cron, Dbos.Scheduler],
-      Operations: [Dbos.Recovery, Dbos.Cluster, Dbos.AdminServer, Dbos.Waits],
-      "Data Access": [Dbos.DB, Dbos.DB.Ecto, Dbos.DB.Postgrex, Dbos.Serialization],
+      "Writing Workflows": [
+        Dbos,
+        Dbos.Macros,
+        Dbos.Runtime,
+        Dbos.RetryPolicy,
+        Dbos.WorkflowHandle
+      ],
+      "Queues and Scheduling": [Dbos.Queue, Dbos.Debouncer, Dbos.Cron, Dbos.Scheduler],
+      "Inspecting Workflows": [
+        Dbos.Client,
+        Dbos.WorkflowStatus,
+        Dbos.StepInfo,
+        Dbos.Status,
+        Dbos.Notifications
+      ],
+      Setup: [
+        Dbos.Supervisor,
+        Dbos.Config,
+        Dbos.DB,
+        Dbos.DB.Ecto,
+        Dbos.DB.Postgrex,
+        Dbos.Migration,
+        Dbos.Migrator
+      ],
+      Operations: [Dbos.Recovery, Dbos.Cluster, Dbos.AdminServer],
+      Testing: [Dbos.Testing],
+      "Credo Checks": [Credo.Check.Warning.DbosDeterminism],
       Errors: ~r{Dbos\..*Error$}
     ]
   end

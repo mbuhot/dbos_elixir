@@ -1,22 +1,19 @@
 # Architecture
 
-## The core idea in one picture
+## The core idea
 
-A workflow is a function. `Dbos` runs it on an ordinary Elixir process, and after every step
-records what happened in two Postgres tables. A crash loses the process; it does not lose
-those two tables. Recovery starts a fresh process, re-runs the function from the top, and
-every step that already has a row in those tables returns its recorded result. It never
-runs again.
+A workflow is a function. `Dbos` runs it on an ordinary Elixir process and, after every step,
+records what happened in two Postgres tables. A crash loses the process; the tables survive.
+Recovery starts a fresh process, re-runs the function from the top, and every step that
+already has a row returns its recorded result without running again.
 
 ```mermaid
 sequenceDiagram
-    participant Sup as Dbos.WorkflowSup
-    participant P1 as WorkflowProcess (run 1)
+    participant P1 as Workflow (run 1)
     participant DB as Postgres (workflow_status,<br/>operation_outputs)
-    participant Rec as Dbos.Recovery
-    participant P2 as WorkflowProcess (run 2, replay)
+    participant Rec as Recovery
+    participant P2 as Workflow (run 2, replay)
 
-    Sup->>P1: start_workflow(id, mfa, args)
     P1->>DB: workflow_status: PENDING
     P1->>P1: reserve_stock()
     P1->>DB: operation_outputs[0] = reserved
@@ -25,10 +22,9 @@ sequenceDiagram
     Note over DB: row for step 1 never written
 
     Rec->>DB: scan workflow_status WHERE status = PENDING
-    Rec->>Sup: start_workflow(id, mfa, args, replay: true)
-    Sup->>P2: run
+    Rec->>P2: re-dispatch with replay: true
     P2->>DB: check step 0 — found, return recorded output
-    Note over P2: reserve_stock does NOT run again
+    Note over P2: reserve_stock does not run again
     P2->>P2: charge_card() — runs for real
     P2->>DB: operation_outputs[1] = charged
     P2->>DB: workflow_status: SUCCESS
@@ -36,107 +32,86 @@ sequenceDiagram
 
 ## The two tables that carry all state
 
-Everything above rests on two rows.
+**`workflow_status`** — one row per workflow execution: `status` (`PENDING`, `ENQUEUED`,
+`DELAYED`, `SUCCESS`, `ERROR`, `CANCELLED`, `MAX_RECOVERY_ATTEMPTS_EXCEEDED`), the workflow's
+`name`, its `inputs` (persisted once, at start), its final `output`/`error`, `executor_id`
+(the node that owns it), `recovery_attempts`, an optional `parent_workflow_id`, and queue
+columns (`queue_name`, `priority`, `deduplication_id`, `delay_until_epoch_ms`, ...).
 
-**`workflow_status`** — one row per workflow execution. Holds `status` (`PENDING`,
-`ENQUEUED`, `DELAYED`, `SUCCESS`, `ERROR`, `CANCELLED`,
-`MAX_RECOVERY_ATTEMPTS_EXCEEDED`), the workflow's `name`, its `inputs` (persisted once, at
-start), its final `output`/`error`, `executor_id` (which node owns it right now),
-`recovery_attempts`, an optional `parent_workflow_id` for child workflows, and queue-related
-columns (`queue_name`, `priority`, `deduplication_id`, `delay_until_epoch_ms`, ...) for
-workflows started via `Dbos.enqueue/3`.
+**`operation_outputs`** — one row per completed step, keyed by `(workflow_uuid, function_id)`:
+the step's `function_name`, its encoded `output` or `error`, and for a child workflow start,
+the `child_workflow_id`. This table is the replay cache.
 
-**`operation_outputs`** — one row per completed step, keyed by `(workflow_uuid,
-function_id)`. Holds the step's `function_name`, its encoded `output` or `error`, and (for a
-child workflow start) the `child_workflow_id`. This table is the replay cache: a step's
-result, once written here, is never recomputed.
+Values in both tables are encoded with `:erlang.term_to_binary/1` and base64-encoded into a
+`TEXT` column, under the format name `"erl_etf"`.
 
-Both tables, plus supporting ones for cross-workflow messaging (`notifications`,
-`workflow_events`, `streams`), cron (`workflow_schedules`), and queues (`queues`), live under
-one Postgres schema (`dbos` by default) at a fixed migration version. See
-`priv/schema/dbos_schema.sql` for the exact DDL.
+Supporting tables cover cross-workflow messaging (`notifications`, `workflow_events`,
+`streams`), cron (`workflow_schedules`), and queues (`queues`). All of them live under one
+Postgres schema, `dbos` by default.
 
-## The step-id counter, and why replay depends on it
+## The step-id counter
 
-Inside a workflow, `Dbos.Runtime` keeps one counter in the process dictionary: `step_id`,
-starting at `-1`. Every durable operation — a step, a transaction, `Dbos.send_message/4`,
-`Dbos.enqueue/3`, a child workflow start, and more — calls `next_function_id/0` first, which
-increments the counter and returns it. That integer *is* the `function_id` the operation
-checkpoints under in `operation_outputs`.
+Inside a workflow, a counter starting at `-1` is incremented by every durable operation — a
+step, a transaction, `Dbos.send_message/4`, `Dbos.enqueue/3`, a child workflow start. That
+integer is the `function_id` the operation checkpoints under.
 
-There is no other way an operation finds its row. Replay works by re-running the workflow
-body from the top and letting this same counter tick through `0, 1, 2, ...` in the same
-order — the *n*th durable operation on this replay checks for a row at `operation_outputs`
-position *n*, and if the *n*th operation last time was `reserve_stock` but this time it's
-`charge_card`, `Dbos.UnexpectedStepError` is raised, stopping the wrong step's output from
-replaying silently. Replay reproducing the exact call sequence is the entire mechanism — it is
-why the workflow body has a determinism contract at all (`docs/determinism.md`): a workflow
-that calls a different sequence of steps on replay, or computes a step's arguments from
-something that changes between runs, breaks the assumption this counter depends on.
-
-## The supervision tree
-
-```mermaid
-flowchart TB
-    Sup["Dbos.Supervisor (one per engine, namespaced by :name)"]
-    Sup --> Reg[Dbos.Registry<br/><small>workflow name → mfa</small>]
-    Sup --> PReg[process/recv/wait Registries]
-    Sup --> Notif[Dbos.Notifications<br/><small>dedicated LISTEN connection</small>]
-    Sup --> Waits[Dbos.Waits]
-    Sup --> WSup[Dbos.WorkflowSup<br/><small>DynamicSupervisor of WorkflowProcess tasks</small>]
-    Sup --> Rec[Dbos.Recovery<br/><small>scans PENDING at boot</small>]
-    Sup --> QSup[Dbos.Queue.Sup]
-    Sup --> Sched[Dbos.Scheduler]
-    Sup -.opt-in.-> Cluster[Dbos.Cluster + NodeWatcher + OrphanSweep]
-    Sup -.opt-in.-> Admin[Dbos.AdminServer]
+```
+run 1:  reserve_stock → 0    charge_card → 1    notify → 2
+replay: reserve_stock → 0    charge_card → 1    notify → 2
+             (cached)             (cached)        (runs)
 ```
 
-Every child is started under `Supervisor.init(children, strategy: :one_for_one)`, in the
-order shown — the registries and `Dbos.Notifications` come up before `Dbos.WorkflowSup`,
-since a workflow process registers itself and may wait on notifications as soon as it
-starts; `Dbos.Recovery` comes after `Dbos.WorkflowSup`, since recovery dispatches into it.
-Each running workflow is its own `Task` (`Dbos.WorkflowProcess`, `restart: :temporary`)
-under `Dbos.WorkflowSup` — one OS-level process failure takes down only that one workflow;
-its siblings keep running.
+An operation finds its row by position alone. So replay depends on the workflow body issuing
+the same sequence of durable calls: the *n*th operation looks for the row at position *n*, and
+if the recorded row at that position names a different step, `Dbos.UnexpectedStepError` is
+raised.
 
-Multiple engines can run in the same BEAM: every process above is namespaced by the
-`:name` given to `Dbos.Supervisor`, and `Dbos.Config` is stored per name in
-`:persistent_term`, so `Dbos`, `Dbos.Runtime`, and friends never need to be told which
-engine they're talking to beyond that name.
+This is the whole reason for the determinism contract. A workflow that branches on the clock,
+on `:rand`, or on data that changes between runs can emit a different call sequence and break
+the correspondence the counter depends on.
 
-## How recovery rebuilds a workflow from checkpoints
+Deliberate changes to a workflow's shape are a different matter, and are handled by
+`Dbos.patch/1` and `Dbos.deprecate_patch/1`, which record which branch a given execution took
+so an in-flight workflow keeps replaying the code it started on.
 
-`Dbos.Recovery` is a `GenServer` that, in a `handle_continue` right after `start_link`
-returns (so boot never blocks on the scan), calls `recover_pending/1`: every `PENDING` row
-in `workflow_status` owned by this engine's own `executor_id` gets looked up by `name` in
-`Dbos.Registry` and redispatched to `Dbos.WorkflowSup.start_workflow/5` with `replay: true`.
-A workflow whose `queue_name` is set is *not* redispatched directly — it's handed back to the
-queue instead, so `Dbos.Queue.Runner` claims it in its normal rotation. A name that isn't
-registered on this executor is logged and skipped; the rest of the batch still runs.
+## Recovery
 
-The redispatched process is an ordinary `Dbos.WorkflowProcess`: it establishes a fresh
-`Dbos.Runtime` context (`Dbos.Runtime.with_context/2`) and calls the workflow function again
-from the top. Nothing about the function changes between the original run and the replay —
-the only difference is that `check_operation_execution` finds a row waiting at every step
-position the first run got past, so those steps return instantly. Re-execution is skipped.
-The first step position with no row is where real work resumes.
+Every `PENDING` row owned by this engine's `executor_id` is looked up by workflow `name` and
+run again from the top, with its checkpoints in place. The first step position with no row is
+where real work resumes.
 
-`Dbos.Recovery.reclaim/3` is the same mechanism used for a *different* executor's rows: when
-another node in the cluster has gone away (`docs/clustering.md`), a survivor reassigns its
-dead `PENDING` rows to its own `executor_id` and recovers them the same way.
+| Trigger | Scope |
+|---|---|
+| Engine boot | This executor's own `PENDING` rows |
+| A parked wait waking (timer or notification) | One workflow |
+| A peer's lease expiring | The dead executor's `PENDING` rows, reassigned to a survivor |
 
-## Where the host's Postgres fits
+A workflow with a `queue_name` is handed back to its queue, so it re-enters through the
+queue's normal concurrency and rate limits. A workflow `name` that
+isn't registered on this executor is logged and skipped.
 
-`Dbos` does not run its own database. `Dbos.Config` holds a `{db_module, conn}` pair — either
-`{Dbos.DB.Postgrex, pool}` or `{Dbos.DB.Ecto, MyApp.Repo}` — and every checkpoint write goes
-through that adapter, onto the same pool your application already uses for its own queries.
-A transactional step (`deftransaction`) rides in exactly one `config.db.transaction/3` call,
-so the user's own writes and the step's checkpoint commit or roll back together.
+Because recovery finds workflows by `name`, that name is the durable identity of the code: it
+must stay stable across deploys, independent of the module and function it lives in.
 
-There is exactly one exception: a dedicated Postgres connection for `LISTEN`
-(`Dbos.Notifications`), separate from the pool, because `LISTEN` occupies a connection for
-its entire lifetime and can't be borrowed from a pool meant to be checked in and out. Everything
-else — starting workflows, checkpointing steps, querying status, the scheduler's polling,
-the queue runner's dequeue — goes through the host's own repo or pool. See
-`guides/integrating-dbos.md` for how that connection is derived and what happens if it can't
-be established.
+## Waits do not hold a process
+
+A workflow blocked in `Dbos.sleep/1`, `Dbos.recv_message/3`, or `Dbos.get_event/4` for longer
+than `Dbos.Config`'s `park_exit_threshold_ms` gives up its process, leaving a timer and a small
+registry entry behind. The deadline or an incoming notification re-dispatches the workflow,
+which replays from its checkpoints back to the wait site and continues. A workflow can wait for
+days at the cost of a few tens of bytes.
+
+## Where your Postgres fits
+
+`Dbos.Config` holds a `{db_module, conn}` pair — `{Dbos.DB.Postgrex, pool}` or
+`{Dbos.DB.Ecto, MyApp.Repo}` — and every checkpoint write goes through it, onto the pool your
+application already uses. A `deftransaction` step rides in a single transaction call, so your
+own writes and the step's checkpoint commit or roll back together.
+
+One connection sits outside the pool: `LISTEN` occupies a connection for its whole lifetime,
+so notifications get a dedicated one.
+
+Multiple engines can run in the same BEAM. Every process is namespaced by the `:name` given to
+`Dbos.Supervisor`, and that name is the only thing the API needs to address an engine.
+
+For the determinism rules, the full schema, and clustering, see `docs/`.

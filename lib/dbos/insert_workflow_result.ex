@@ -1,8 +1,7 @@
+# The RETURNING shape of Dbos.SystemDb.insert_workflow_status/3: what the row looked like
+# immediately after the upsert, including columns the caller's own insert may have lost a race on.
 defmodule Dbos.InsertWorkflowResult do
-  @moduledoc """
-  The `RETURNING` shape of `Dbos.SystemDb.insert_workflow_status/3`: what the row looked like
-  immediately after the upsert, including columns the caller's own insert may have lost a race on.
-  """
+  @moduledoc false
 
   alias Dbos.Status
 

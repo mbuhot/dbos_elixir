@@ -1,10 +1,9 @@
+# Reads exactly one HTTP/1.1 request off an accepted socket, routes it through
+# Dbos.AdminServer.Router, writes the response, and closes the connection (no keep-alive — the
+# admin API is a low-traffic operator surface, so the simplicity is worth the extra TCP handshake
+# per call).
 defmodule Dbos.AdminServer.Handler do
-  @moduledoc """
-  Reads exactly one HTTP/1.1 request off an accepted socket, routes it through
-  `Dbos.AdminServer.Router`, writes the response, and closes the connection (no keep-alive — the
-  admin API is a low-traffic operator surface, so the simplicity is worth the extra TCP handshake
-  per call).
-  """
+  @moduledoc false
 
   require Logger
 

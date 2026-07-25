@@ -61,8 +61,7 @@ iex> children = [
 ...>    name: Dbos,
 ...>    db: {Dbos.DB.Ecto, DocumentPipeline.Repo},
 ...>    workflows: [DocumentPipeline.Pipeline],
-...>    queues: [Dbos.Queue.new(DocumentPipeline.Pipeline.queue_name(), worker_concurrency: 4)],
-...>    migrations: :create_if_absent}
+...>    queues: [Dbos.Queue.new(DocumentPipeline.Pipeline.queue_name(), worker_concurrency: 4)]}
 ...> ]
 iex> Supervisor.start_link(children, strategy: :one_for_one)
 

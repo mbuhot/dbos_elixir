@@ -1,6 +1,6 @@
 defmodule Dbos.Config do
   @moduledoc """
-  Configuration a `Dbos.SystemDb` call needs to reach the system database: which adapter and
+  Everything the engine needs to reach its system database: which adapter and
   connection to use, which schema the `dbos` tables live under, and this executor's identity.
   """
 

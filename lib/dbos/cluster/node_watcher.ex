@@ -1,20 +1,19 @@
+# Watches for departed nodes via :net_kernel.monitor_nodes/1 and schedules a
+# Dbos.Cluster.OrphanSweep pass for the moment the departed executors' leases expire.
+#
+# A node that dies renewed its lease moments earlier, so at :nodedown that lease still has nearly
+# its full term left and a sweep run right then reclaims nothing. Scheduling the pass for the
+# expiry instant brings reclaim forward to roughly the lease TTL, from the TTL plus however much
+# of the sweep interval remains.
+#
+# The lease stays the sole authority. A :nodedown never shortens a lease: it reports that two BEAM
+# nodes cannot see each other, which says nothing about whether either can still reach Postgres.
+# Letting it expire a peer's lease would let both sides of a netsplit evict each other and run the
+# same workflows at once.
+#
+# Started only when the owning Dbos.Supervisor is given cluster: [enabled: true].
 defmodule Dbos.Cluster.NodeWatcher do
-  @moduledoc """
-  Watches for departed nodes via `:net_kernel.monitor_nodes/1` and schedules a
-  `Dbos.Cluster.OrphanSweep` pass for the moment the departed executors' leases expire.
-
-  A node that dies renewed its lease moments earlier, so at `:nodedown` that lease still has
-  nearly its full term left and a sweep run right then reclaims nothing. Scheduling the pass for
-  the expiry instant brings reclaim forward to roughly the lease TTL, from the TTL plus however
-  much of the sweep interval remains.
-
-  The lease stays the sole authority. A `:nodedown` never shortens a lease: it reports that two
-  BEAM nodes cannot see each other, which says nothing about whether either can still reach
-  Postgres. Letting it expire a peer's lease would let both sides of a netsplit evict each other
-  and run the same workflows at once.
-
-  Started only when the owning `Dbos.Supervisor` is given `cluster: [enabled: true]`.
-  """
+  @moduledoc false
 
   use GenServer
   require Logger

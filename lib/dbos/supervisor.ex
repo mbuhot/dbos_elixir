@@ -36,8 +36,9 @@ defmodule Dbos.Supervisor do
   synchronously, in the calling process, and returns a handle to an already-finished workflow;
   `:manual` runs `Dbos.start/3` the same way but leaves an `Dbos.enqueue/3`'d row untouched until
   `Dbos.Testing.drain_queue/2` or `Dbos.Testing.drain_all/1` claims it. Either mode starts none
-  of `Dbos.Notifications`, `Dbos.Waits`, `Dbos.Lease`, the queue runners, `Dbos.Scheduler`, the
-  boot recovery scan, `Dbos.Cluster*`, or `Dbos.AdminServer` — the point is removing every
+  of `Dbos.Notifications`, the wait parking table, the executor lease, the queue runners,
+  `Dbos.Scheduler`, the boot recovery scan, `Dbos.Cluster`, or `Dbos.AdminServer` — the point is
+  removing every
   process that could touch the database outside the caller's own connection, which is what makes
   these modes compatible with `Ecto.Adapters.SQL.Sandbox`. See `guides/tutorials/testing.md`.
 
@@ -50,7 +51,7 @@ defmodule Dbos.Supervisor do
   `:lease` opts (see `docs/clustering.md`): `:ttl_ms` (default `60_000`) — how long this
   executor's lease stays valid without a renewal; `:renew_interval_ms` (default `10_000`) — how
   often it renews. The lease is written at boot, before recovery runs, and is the sole authority
-  `Dbos.Cluster.OrphanSweep` consults to decide an executor is dead.
+  the orphan sweep consults to decide an executor is dead.
 
   `:orphan_sweep` opts, on by default: `:enabled` (default `true`) — periodically reclaims
   `PENDING` rows whose executor's lease has expired or is entirely absent; `:interval_ms` (default
@@ -69,7 +70,7 @@ defmodule Dbos.Supervisor do
 
   `:park_exit_threshold_ms` (default `60_000`, or `:infinity` to disable parking) — a workflow
   blocked in `sleep`/`recv_message`/`get_event` with more than this much wait remaining exits its
-  process instead of staying resident, per `Dbos.Waits`. `:park_replay_ceiling` (default `500`)
+  process instead of staying resident. `:park_replay_ceiling` (default `500`)
   caps this by how many steps the workflow has already completed in this run, since a parked
   workflow rehydrates by replaying from the top.
   """

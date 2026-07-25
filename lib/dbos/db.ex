@@ -1,6 +1,6 @@
 defmodule Dbos.DB do
   @moduledoc """
-  Behaviour abstracting the SQL connection `Dbos.SystemDb` runs against, so the same queries work
+  Behaviour abstracting the SQL connection the engine runs its system-database queries against, so the same queries work
   over a bare Postgrex pool or over a host application's Ecto repo.
   """
 

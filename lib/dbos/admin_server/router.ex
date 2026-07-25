@@ -1,9 +1,7 @@
+# Routes one decoded HTTP request to an engine operation and renders its JSON (or plain-text)
+# response.
 defmodule Dbos.AdminServer.Router do
-  @moduledoc """
-  Routes one decoded HTTP request to an engine operation and renders its JSON (or plain-text)
-  response. `POST /dbos-garbage-collect` calls `Dbos.SystemDb.garbage_collect_workflows/2` and
-  reports how many rows it deleted.
-  """
+  @moduledoc false
 
   alias Dbos.AdminServer.Render
   alias Dbos.Status

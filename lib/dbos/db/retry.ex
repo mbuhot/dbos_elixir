@@ -1,21 +1,19 @@
+# Backoff retry around a Dbos.DB adapter call, for transient connection-level failures.
+#
+# A Postgres connection dropped underneath a live pool — a killed backend, a restarted server, a
+# pool member mid-reconnect — surfaces to the caller as an ordinary {:error, reason} rather than a
+# raise. Retrying such a call reaches a healthy connection once the pool has re-established one.
+#
+# Two error classes are recognised. retryable_connection_error?/1 covers connection-level
+# failures: DBConnection.ConnectionError, the 08*/57P0* SQLSTATEs, and driver-level Postgrex.Errors
+# carrying no server response. retryable_transaction_error?/1 covers serialization_failure and
+# deadlock_detected, which abort the whole transaction and are opted into per call site.
+#
+# The schedule is exponential with jitter, configurable under
+# config :dbos, :system_db_retry, max_attempts: _, base_delay_ms: _, max_delay_ms: _, factor: _.
+# Attempts are bounded so an unreachable database surfaces an error instead of blocking forever.
 defmodule Dbos.DB.Retry do
-  @moduledoc """
-  Backoff retry around a `Dbos.DB` adapter call, for transient connection-level failures.
-
-  A Postgres connection dropped underneath a live pool — a killed backend, a restarted server, a
-  pool member mid-reconnect — surfaces to the caller as an ordinary `{:error, reason}` rather than
-  a raise. Retrying such a call reaches a healthy connection once the pool has re-established one.
-
-  Two error classes are recognised. `retryable_connection_error?/1` covers connection-level
-  failures: `DBConnection.ConnectionError`, the `08*`/`57P0*` SQLSTATEs, and driver-level
-  `Postgrex.Error`s carrying no server response. `retryable_transaction_error?/1` covers
-  `serialization_failure` and `deadlock_detected`, which abort the whole transaction and are opted
-  into per call site.
-
-  The schedule is exponential with jitter, configurable under
-  `config :dbos, :system_db_retry, max_attempts: _, base_delay_ms: _, max_delay_ms: _, factor: _`.
-  Attempts are bounded so an unreachable database surfaces an error instead of blocking forever.
-  """
+  @moduledoc false
 
   @jitter_min 0.95
   @jitter_max 1.05

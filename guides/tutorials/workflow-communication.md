@@ -2,13 +2,11 @@
 
 Three primitives let workflows exchange data with each other and with the outside world:
 messages, events, and streams. All three are durable — every send/set/write is checkpointed, and
-every receive/get/read survives a crash and resumes waiting where it left off. A fourth
-primitive, durable sleep, isn't communication on its own but shares the same waiting machinery, so
-it's covered here too.
+every receive/get/read survives a crash and resumes waiting where it left off. Durable sleep
+shares the same waiting machinery, so it's covered here too.
 
-Every value passed through any of these travels as a real Erlang term, encoded for storage and
-decoded back on the way out, with no JSON layer in between. Atoms, tuples, and structs make the
-round trip intact.
+Every value travels as an Erlang term, encoded with `:erlang.term_to_binary/1` and base64-encoded
+into a `TEXT` column. Atoms, tuples, and structs arrive exactly as sent.
 
 ```elixir
 Dbos.send_message(other_id, nil, {:approved, %MyApp.Approval{by: "alice", note: "looks good"}})
@@ -16,9 +14,6 @@ Dbos.send_message(other_id, nil, {:approved, %MyApp.Approval{by: "alice", note: 
 # ... in the other workflow:
 {:approved, %MyApp.Approval{by: by, note: note}} = Dbos.recv_message(nil, 30_000)
 ```
-
-No JSON-encode/decode step, no re-parsing a tagged map back into a struct — the tuple and the
-struct arrive exactly as sent.
 
 ## Messages: `send_message` / `recv_message`
 
@@ -82,12 +77,10 @@ stage = Dbos.get_event(upload_workflow_id, "stage", 5_000)
   and outside a workflow, and blocks up to `timeout_ms` (or indefinitely if `nil`) for the key to
   be set, returning `nil` if it times out first.
 
-**Ordering and delivery**: unlike `recv_message`, `get_event` registrations are non-exclusive —
-any number of callers may wait on the same `(target_workflow_id, key)` concurrently, and all of
-them wake when it's set. Reading always returns just the latest value for the key (use a stream
-to see every value it was ever set to). Called from inside a workflow, the wait
-and the read are both checkpointed under their own step ids; called from ordinary code, only the
-wait happens — there's no workflow run to checkpoint into.
+**Ordering and delivery**: `get_event` registrations are non-exclusive — any number of callers may
+wait on the same `(target_workflow_id, key)` concurrently, and all of them wake when it's set.
+Reading returns the key's latest value; use a stream to see every value it was ever set to. Called
+from inside a workflow, the wait and the read are each checkpointed under their own step ids.
 
 ## Streams: `write_stream` / `read_stream` / `close_stream`
 
@@ -116,15 +109,12 @@ end
 - `Dbos.close_stream/2` (`key`, `opts`) writes the close sentinel; further writes to a closed
   stream raise `Dbos.StreamClosedError`.
 - `Dbos.read_stream/3` (`workflow_id`, `key`, `opts`) returns a plain Elixir `Stream`, lazily
-  polling for new values from the beginning and terminating once the close sentinel is read. If
-  the producing workflow reaches a terminal status before closing the stream, `read_stream`
-  performs one final read and stops — closing the race where the last write(s) landed after the
-  reader's last poll but before the workflow finished, without waiting forever for a `close_stream`
-  call that will never come.
+  polling for new values from the beginning and terminating once the close sentinel is read. A
+  producing workflow that reaches a terminal status without closing the stream also terminates the
+  read, after one final read.
 
-**Ordering**: values are delivered in write order, from the start, every time — `read_stream`
-always begins at offset zero. Multiple readers may consume the same stream independently and
-concurrently; each gets its own cursor.
+**Ordering**: values are delivered in write order, from offset zero, every time. Multiple readers
+may consume the same stream independently and concurrently; each gets its own cursor.
 
 ## Durable sleep
 
@@ -138,18 +128,15 @@ end
 `Dbos.sleep/1` checkpoints the absolute wake time under one step, then waits only the *remaining*
 interval — a workflow recovered after a crash mid-sleep waits out only whatever was left.
 
-A wait longer than `park_exit_threshold_ms` (a `Dbos.Supervisor` option, default `60_000` — one
-minute) does something more than just block: the workflow's BEAM process exits entirely, leaving
-behind a single row in an ETS table and a timer. When the timer fires (or a message/event it was
-waiting on arrives), the workflow is redispatched exactly like a crash recovery — replayed from
-its checkpoints back up to the wait site. This applies to `sleep`, `recv_message`, and
-`get_event`, and it's why parking a workflow for hours or days is cheap: no live process, no
-per-workflow supervision tree entry, no memory held — just a timer and a few dozen bytes,
-regardless of how many workflows are waiting or how long they wait for. A workflow already deep
-into a run (more than `park_replay_ceiling` steps completed, default `500`) skips parking even
-past the threshold, since a wait that far in would pay for parking with a proportionally expensive
-replay on wake.
+## Parking a long wait
 
-Cancelling a parked or actively-waiting workflow interrupts the wait immediately —
-`Dbos.cancel/2` wakes any live process, and a woken/redispatched workflow checks
-for cancellation as soon as it resumes.
+A wait longer than `park_exit_threshold_ms` (a `Dbos.Supervisor` option, default `60_000`) parks:
+the workflow's process exits, and the workflow is redispatched — replayed from its checkpoints
+back up to the wait site — when the wait resolves. This applies to `sleep`, `recv_message`, and
+`get_event`, and it is why waiting for hours or days is cheap: no live process and no memory held,
+however many workflows are waiting. A workflow more than `park_replay_ceiling` steps into its run
+(default `500`) stays resident, since parking it would buy a cheap wait at the price of an
+expensive replay on wake.
+
+`Dbos.cancel/2` interrupts a wait immediately: it wakes any live process, and a
+woken or redispatched workflow checks for cancellation as soon as it resumes.

@@ -1,11 +1,10 @@
+# Encodes and decodes Elixir terms for storage in the dbos schema's TEXT serialization columns.
+#
+# Terms are encoded with the External Term Format (:erlang.term_to_binary/1) and then
+# base64-encoded, since the underlying columns are TEXT, not BYTEA, and raw ETF bytes are not
+# guaranteed to be valid UTF-8. The format name stored alongside the value is "erl_etf".
 defmodule Dbos.Serialization do
-  @moduledoc """
-  Encodes and decodes Elixir terms for storage in the `dbos` schema's `TEXT` serialization columns.
-
-  Terms are encoded with the External Term Format (`:erlang.term_to_binary/1`) and then
-  base64-encoded, since the underlying columns are `TEXT`, not `BYTEA`, and raw ETF bytes are not
-  guaranteed to be valid UTF-8. The format name stored alongside the value is `"erl_etf"`.
-  """
+  @moduledoc false
 
   @format_name "erl_etf"
 

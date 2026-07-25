@@ -1,17 +1,20 @@
 defmodule Dbos.Notifications do
   @moduledoc """
-  One dedicated `LISTEN` connection per engine, plus the in-process waiter registration
-  recv/getEvent/streams share. `recv` waiters are exclusive
-  (`Registry.register/3`'s built-in `:unique` semantics reject a second concurrent receiver on
-  the same `(workflow_id, topic)`); event/stream waiters fan out to every registered process.
+  Subscribing a process to workflow progress, over one dedicated Postgres `LISTEN` connection per
+  engine.
 
-  If a dedicated connection cannot be established (no derivable connection options, or the
-  connection attempt fails), falls back to `:poll` mode and logs a warning — `wait_until/3`'s
-  bounded timeout in that mode is what stands in for the missing `NOTIFY`.
+  `subscribe_status/2`, `subscribe_event/3` and `subscribe_stream/3` register the calling process
+  as a waiter; it then receives a message each time the subscribed workflow's status changes, its
+  event key is set, or its stream is appended to. This is the integration point for bridging
+  workflow progress onto another transport — `Phoenix.PubSub`, a LiveView, a websocket. Each has
+  a matching `unsubscribe_*`.
 
-  A dropped listener connection is reconnected with backoff, without taking this GenServer down
-  with it, and every registered waiter is woken to re-probe once the connection is back — a
-  `NOTIFY` fired during the outage would otherwise be lost.
+  Event and stream waiters fan out to every registered process. `subscribe_recv/3` is exclusive:
+  a second concurrent receiver on the same `(workflow_id, topic)` gets `{:error, :conflict}`.
+
+  A subscription is a wake-up, never a payload — the notification carries no value, so a woken
+  process re-reads the current state. `mode/1` reports the transport actually in effect: `:listen`,
+  or `:poll` when no dedicated connection could be established.
   """
 
   use GenServer
@@ -99,10 +102,10 @@ defmodule Dbos.Notifications do
   defp payload(id, topic_or_key), do: id <> "::" <> topic_or_key
 
   @doc """
-  Registers the caller to be woken when `workflow_id` completes. A purely in-process signal from
-  `Dbos.WorkflowProcess` right after it durably records an outcome; `Dbos.await/2` falls back to
-  polling for a workflow finished by a process this engine instance didn't run (a different
-  node, or before this engine started).
+  Registers the caller to be woken when `workflow_id` completes. A purely in-process signal,
+  fired right after this engine durably records the outcome; `Dbos.await/2` falls back to polling
+  for a workflow finished by a process this engine instance didn't run (a different node, or
+  before this engine started).
   """
   def subscribe_status(engine, workflow_id) do
     {:ok, _owner} = Registry.register(wait_registry_name(engine), {:status, workflow_id}, nil)

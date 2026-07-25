@@ -1,7 +1,7 @@
 # Testing
 
-This page is about testing *your* application's workflows and steps — the engine's own test
-suite (`docs/testing.md`) is a different document, about testing `Dbos` itself.
+Testing *your* application's workflows and steps. (`docs/testing.md` covers the engine's own
+suite.)
 
 ## The sandbox setup you already have
 
@@ -15,12 +15,12 @@ makes it work for `Dbos` too:
 | `:manual` | `Dbos.start/3` runs the same way; `Dbos.enqueue/3` only inserts the row — nothing runs until the test calls `Dbos.Testing.drain_queue/2` or `Dbos.Testing.drain_all/1`. |
 | not set | Production behavior: background processes, real concurrency, real timing. |
 
-Either mode starts none of `Dbos.Notifications` (the dedicated `LISTEN` connection),
-`Dbos.Waits`, `Dbos.Lease`, the queue runners, `Dbos.Scheduler`, the boot recovery scan, or
-`Dbos.Cluster*` — every process that would otherwise touch the database on its own schedule,
-outside your test's connection. With nothing left to race the sandbox, there is no
-`Sandbox.allow/3` to call and no separate connection to configure: everything runs on the
-connection your test already checked out.
+Either mode starts none of `Dbos.Notifications` (the dedicated `LISTEN` connection), the wait
+parker, the executor lease, the queue runners, `Dbos.Scheduler`, the boot recovery scan, the
+cluster processes, or the admin server — every process that would otherwise touch the database on
+its own schedule, outside your test's connection. Everything runs on the connection your test
+already checked out, so there is no `Sandbox.allow/3` to call and no second connection to
+configure.
 
 ```elixir
 defmodule MyApp.Checkout.WorkflowTest do
@@ -35,6 +35,7 @@ defmodule MyApp.Checkout.WorkflowTest do
        db: {Dbos.DB.Ecto, MyApp.Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        otp_app: :my_app,
+       queues: [Dbos.Queue.new("reports"), Dbos.Queue.new("orders")],
        migrations: :skip,
        testing: :inline},
       id: name
@@ -47,15 +48,13 @@ defmodule MyApp.Checkout.WorkflowTest do
 end
 ```
 
-`migrations: :skip` — the schema's already applied once, by `test/test_helper.exs`, same as
-`guides/integrating-dbos.md` describes. There is no `Dbos.Recovery.await_boot_recovery/1` call
-here: `:inline`/`:manual` mode never starts the boot recovery scan, so there's nothing to wait
-for.
+`migrations: :skip` assumes the schema was applied once already, by `test/test_helper.exs`. Declare
+every queue the tests drain: `Dbos.Testing.drain_queue/2` raises `ArgumentError` for a queue the
+engine doesn't know about.
 
 ## Testing a workflow end to end
 
-Start it, await it, assert on the unwrapped result — indistinguishable from the non-testing
-form, except it returns instantly:
+Start it, await it, assert on the result:
 
 ```elixir
 test "process_order reserves stock and charges the card", %{engine: engine} do
@@ -67,7 +66,7 @@ end
 ```
 
 A workflow that raises completes with status `:error`, and `await` hands back
-`{:error, exception}` — the exception itself never propagates to the caller:
+`{:error, exception}`:
 
 ```elixir
 test "a declined card surfaces as an error result", %{engine: engine} do
@@ -79,8 +78,8 @@ end
 
 ## Testing a queue with `Dbos.Testing.drain_queue/2`
 
-`:manual` mode is the one to reach for when a test needs to assert on the *before*-drain state —
-an enqueued-but-not-yet-run row — as well as the result:
+Reach for `:manual` mode when a test asserts on the enqueued-but-not-yet-run state as well as the
+result:
 
 ```elixir
 test "enqueuing a report job leaves it queued until drained", %{engine: engine} do
@@ -96,17 +95,15 @@ end
 ```
 
 `drain_queue/2` claims and runs, synchronously in the caller, every currently dispatchable
-workflow on that queue, and returns how many ran — `0`, not an error, when there's nothing to
-claim. `Dbos.Testing.drain_all/1` does the same across every declared queue, including the
-internal one `Dbos.resume/2` and `Dbos.fork/3` target by default.
+workflow on that queue, and returns how many ran (`0` when there's nothing to claim).
+`Dbos.Testing.drain_all/1` does the same across every declared queue, including the internal one
+`Dbos.resume/2` and `Dbos.fork/3` target by default.
 
 ## Testing an approval flow: send before drain, then run
 
-`recv_message/2` and `get_event/4` only ever look at what's already there under `:inline`/
-`:manual`: a pending message is consumed immediately; nothing pending raises
-`Dbos.TestingModeWaitError` right away rather than blocking the test process. The send-before-run
-order already works, so enqueue-then-send-then-drain is the way to test a workflow waiting on an
-external signal:
+Under `:inline`/`:manual`, `recv_message/2` and `get_event/4` consume whatever is already there,
+and raise `Dbos.TestingModeWaitError` immediately when nothing is pending. So enqueue, send, then
+drain:
 
 ```elixir
 test "an order waits for manual approval before shipping", %{engine: engine} do
@@ -124,18 +121,20 @@ test "an order waits for manual approval before shipping", %{engine: engine} do
 end
 ```
 
-`Dbos.sleep/1` follows the same don't-block rule for a different reason: it checkpoints the
-absolute wake time and returns immediately, so a test never waits out the real duration — the
-recorded wake time is still there to assert on afterward.
+`Dbos.sleep/1` checkpoints the absolute wake time and returns immediately in these modes, so a
+test never waits out the real duration. The recorded wake time is there to assert on.
 
-## Simulating a crash and asserting recovery with `Dbos.Testing.recover_pending/1`
+A stream behaves the same way: an open stream with nothing left to read raises
+`Dbos.TestingModeWaitError`. Write the stream (and close it, if the test needs a terminated read)
+before reading it back. A stream whose producing workflow has reached a terminal status reads back
+whatever was written and stops, in every mode.
 
-There's no live process to `Process.exit/2` under `:inline`/`:manual` — everything already ran,
-synchronously, by the time `Dbos.start/3` or `drain_queue/2` returned. Simulate the crash at the
-row instead: flip a finished workflow back to `PENDING` and let `Dbos.Testing.recover_pending/1`
-replay it, then prove a step that already checkpointed did not run its body again — an ETS
-counter bumped only inside the step body, never observable from a replayed, short-circuited
-call, is the usual way to prove that:
+## Simulating a crash with `Dbos.Testing.recover_pending/1`
+
+Everything has already run synchronously by the time `Dbos.start/3` or `drain_queue/2` returns, so
+simulate the crash at the row: flip a finished workflow back to `PENDING`, let
+`Dbos.Testing.recover_pending/1` replay it, and prove an already-checkpointed step did not re-run
+its body. An ETS counter bumped inside the step body is the usual way to show that:
 
 ```elixir
 test "recovering a workflow does not re-run its already-checkpointed steps", %{engine: engine} do
@@ -165,91 +164,45 @@ test "recovering a workflow does not re-run its already-checkpointed steps", %{e
 end
 ```
 
-The counter staying at `3` after recovery — never `6` — is the assertion that matters: proof the
-replayed steps returned their recorded output without re-executing.
+The counter staying at `3` after recovery is the assertion that matters: proof the replayed steps
+returned their recorded output without re-executing.
 
 ## What these modes cannot cover
 
-`:inline`/`:manual` prove checkpointing, replay, and queue mechanics — not the things that only
-exist once real background processes are racing each other:
+`:inline`/`:manual` prove checkpointing, replay, and queue mechanics. The rest needs a real engine
+with no testing mode set:
 
-- A real `LISTEN`/`NOTIFY` wake — `Dbos.Notifications` never starts.
-- Two executors competing for the same `PENDING` row, or a lease actually expiring.
+- A real `LISTEN`/`NOTIFY` wake.
+- Two executors competing for the same `PENDING` row, or a lease expiring.
 - Background timing: a queue runner's polling interval, the scheduler's cron reconciliation, a
   lease's renewal cadence.
-- `workflow_timeout_ms` cancelling a workflow on the wall clock. `resolve_workflow_deadline`
-  still resolves and persists `workflow_deadline_epoch_ms` on the row, so a test can assert on
-  it — but no background task is armed to call `Dbos.cancel/2` once it passes. An
-  `:inline`/`:manual` workflow runs to completion inside one call, so a wall-clock deadline
-  racing that call has nothing meaningful to enforce; test cancellation directly with
-  `Dbos.cancel/2` instead.
-
-Those need a real, running engine against a real database with no testing mode set — which is
-exactly what `Dbos`'s own suite (`test/test_helper.exs`, `test/support/case.ex`) uses throughout.
-
-Reading an open stream with nothing left to read behaves like `recv_message/2` and `get_event/4`:
-it raises `Dbos.TestingModeWaitError` immediately rather than blocking on `Dbos.Notifications`.
-Write the stream (and close it, if the test needs a terminated read) before reading it back, the
-same send-before-run pattern used for messages and events. A stream whose producing workflow has
-already reached a terminal status reads back whatever was written and stops, closed sentinel or
-not — that fallback applies in every mode, not just testing.
+- `workflow_timeout_ms` cancelling a workflow on the wall clock. The deadline is still resolved and
+  persisted to `workflow_deadline_epoch_ms`, so a test can assert on it, and the background task
+  that would call `Dbos.cancel/2` at that moment stays unarmed under these modes. Drive
+  cancellation directly with `Dbos.cancel/2`.
 
 ## Asserting on checkpoints
 
-`Dbos.SystemDb.get_workflow_steps/2` returns every checkpointed `Dbos.StepInfo`, ordered by
-`function_id`, with `output`/`error` already decoded:
+`Dbos.Client.steps/2` returns every checkpointed `Dbos.StepInfo`, ordered by `function_id`, with
+`output`/`error` already decoded:
 
 ```elixir
 test "process_order checkpoints exactly two steps, in order", %{engine: engine} do
   {:ok, handle} = Dbos.start("process_order", ["order-1", 4999], engine: engine)
   {:ok, _result} = Dbos.await(handle)
 
-  config = Dbos.config(engine)
-  {:ok, steps} = SystemDb.get_workflow_steps(config, handle.workflow_id)
+  {:ok, steps} = Dbos.Client.steps(Dbos.config(engine), handle.workflow_id)
 
   assert Enum.map(steps, & &1.function_name) == ["reserve_stock/1", "charge_card/2"]
   assert Enum.map(steps, & &1.function_id) == [0, 1]
 end
 ```
 
-## Testing determinism violations are caught at compile time
-
-The determinism checker (`Dbos.Determinism`) runs at compile time on every `defworkflow` body.
-Test a violation by compiling a small fixture module at test time and asserting on the raised
-`CompileError`, the same way `test/dbos/determinism_test.exs` tests the engine's own checker:
-
-```elixir
-test "a workflow calling DateTime.utc_now/0 directly fails to compile" do
-  source = """
-  defmodule MyApp.BadWorkflowFixture do
-    use Dbos
-
-    defworkflow run(x), name: "bad_workflow" do
-      DateTime.utc_now()
-    end
-  end
-  """
-
-  error =
-    assert_raise CompileError, fn ->
-      Code.compile_string(source, "test/fixture.ex")
-    end
-
-  assert error.description =~ "DateTime.utc_now"
-  assert error.description =~ "nondeterministic"
-end
-```
-
-This is worth one or two smoke tests in your own suite mainly to confirm `use Dbos` is wired up
-the way you expect (the right `:repo`, the right `warn_cross_module_calls` setting). `Dbos`'s own
-tests already cover the checker itself.
-
 ## Mocking a step's external call
 
-A step is checkpointed by its **name and position** alone — there's no built-in way to swap what
-a given `defstep` calls at test time other than ordinary Elixir dependency injection. Push the
-external call behind a module (an HTTP client, a payment gateway wrapper) and pass that module in
-as an argument, or read it from `Application.get_env/2` at the call site inside the step body:
+Swap a step's external call with ordinary Elixir dependency injection: push the call behind a
+module (an HTTP client, a payment gateway wrapper) and pass that module in as an argument, or read
+it from `Application.get_env/2` at the call site inside the step body:
 
 ```elixir
 defworkflow process_order(order_id, amount), name: "process_order" do
@@ -263,8 +216,7 @@ end
 defp payment_client, do: Application.get_env(:my_app, :payment_client, MyApp.StripeClient)
 ```
 
-`payment_client/0` is read from inside the step body. A live read of mutable configuration
-belongs there — inside `defworkflow` itself, a value that could change between the original run
-and a replay is exactly what breaks replay (`docs/determinism.md`). Configure
-`:my_app, :payment_client, MyApp.MockPaymentClient` in `config/test.exs`, or override it per test
-with `Application.put_env/3`.
+Keep the `payment_client/0` read inside the step body, where mutable configuration is safe to
+read: a value that changes between the original run and a replay breaks replay when it is read
+from the workflow body. Configure `:my_app, :payment_client, MyApp.MockPaymentClient` in
+`config/test.exs`, or override it per test with `Application.put_env/3`.

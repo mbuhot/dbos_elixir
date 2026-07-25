@@ -1,5 +1,5 @@
 defmodule Dbos.Uuid do
-  @moduledoc "Generates workflow and owner identifiers."
+  @moduledoc false
 
   @doc "Generates a random UUIDv4 string."
   def v4 do

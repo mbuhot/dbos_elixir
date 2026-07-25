@@ -1,6 +1,8 @@
 defmodule Dbos.Client do
   @moduledoc """
-  Thin public read/enqueue API over `Dbos.SystemDb`.
+  Reading and enqueuing workflows from outside a workflow — a controller, a mix task, an admin
+  page. Every function takes a `Dbos.Config` and talks only to the system database, so none of it
+  requires a workflow context.
   """
 
   alias Dbos.SystemDb
@@ -22,7 +24,7 @@ defmodule Dbos.Client do
   @doc "Fetches one workflow's status by id."
   def status(config, workflow_id), do: SystemDb.get_workflow_status(config, workflow_id)
 
-  @doc "Lists workflows matching the given filters; see `Dbos.SystemDb.list_workflows/2`."
+  @doc "Lists workflows matching the given filters (`:status`, `:name`, `:queue_name`, ...)."
   def list(config, opts \\ []), do: SystemDb.list_workflows(config, opts)
 
   @doc "Returns a workflow's checkpointed steps, ordered by `function_id`."

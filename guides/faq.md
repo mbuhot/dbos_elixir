@@ -1,6 +1,7 @@
 # FAQ
 
 Troubleshooting, in question-per-heading form. Each entry: the symptom, the cause, the fix.
+Background for every entry here lives in the rest of the guides.
 
 ## My workflow fails to compile with "is nondeterministic and breaks replay"
 
@@ -8,16 +9,19 @@ Troubleshooting, in question-per-heading form. Each entry: the symptom, the caus
 `Process.sleep/1`, `receive`, `Task.async/1`, or a direct call to your `:repo` module, pointing at
 the file and line inside a `defworkflow` body.
 
-**Cause:** `Dbos.Determinism` walks every `defworkflow` body at compile time and rejects
+**Cause:** The determinism checker walks every `defworkflow` body at compile time and rejects
 constructs that would produce a different value (or block in a way the engine can't checkpoint)
-on a replay than they did the first time. See `docs/determinism.md` for the full banned list and
-why each entry is on it.
+on a replay than they did the first time.
 
 **Fix:** move the flagged call inside a `defstep`/`deftransaction` — its result becomes a
 checkpointed output, and the workflow body reads that output on replay. The nondeterministic
 operation itself never runs again. For `receive`, use `Dbos.recv_message/2` or `Dbos.sleep/1`.
 For a direct repo call, wrap it in `deftransaction` so it commits atomically with its
 checkpoint.
+
+The macro sees only the literal `do` block. A banned construct reached through a same-module
+helper compiles cleanly, and `mix credo` reports it — the check walks the local call graph out of
+every workflow, step and transaction body, using the same banned-construct tables.
 
 ## What does `Dbos.UnexpectedStepError` mean?
 
@@ -28,13 +32,17 @@ and a `recorded` one.
 name recorded in `operation_outputs` for that same `(workflow_uuid, function_id)` — a replay
 whose step sequence has drifted from what actually happened during the original run. Usually
 this means the workflow's code changed (a step reordered, renamed, or added/removed) while an
-instance of it was still in flight. See `guides/tutorials/upgrading-workflows.md`.
+instance of it was still in flight.
 
-**Fix:** there's no way to repair the mismatch in place — the checkpoint and the code disagree
-about what happened at that step. Restore the code that produced the original layout long enough
-for the workflow to finish (or fork it from before the point of divergence with `Dbos.fork/3`,
-if you know exactly where that is), then apply future changes through a version bump or a new
-workflow name — an in-place edit leaves the mismatch unresolved.
+**Fix:** the checkpoint and the code disagree about what happened at that step, and the mismatch
+cannot be repaired in place. Restore the code that produced the original layout long enough for
+the workflow to finish, or fork the workflow from before the point of divergence with
+`Dbos.fork/3` if you know exactly where that is.
+
+Going forward, guard new code inside the body with `Dbos.patch/1`: executions that already ran
+past the call site keep their recorded step-id sequence and skip the guarded code, while new
+executions take it. Once the old executions have drained, `Dbos.deprecate_patch/1` retires the
+guard. Larger changes want a version bump or a new workflow name.
 
 ## My workflow is stuck `PENDING` and never progresses
 
@@ -45,19 +53,19 @@ process is running it.
 
 1. **Nobody has this workflow's name registered.** `Dbos.Recovery`/reclaim log a warning
    ("workflow ... is not registered on this executor; skipping recovery") and move on without
-   raising — check your logs for it. `workflows:` on `Dbos.Supervisor` must include the
-   module (or the exact `{name, {module, fun, arity}}` tuple).
+   raising — check your logs for it. Pass `otp_app:` to `Dbos.Supervisor` so every module in the
+   application defining a `defworkflow` is discovered, and use `workflows:` for modules that live
+   in a dependency.
 2. **`application_version` mismatch.** A non-queued `PENDING` row is only reclaimed by an
-   executor whose own `config.application_version` matches the row's (`reclaim_pending_workflows/3`
-   filters on it when set). If every live executor is running a different version than the one
-   that started this workflow, nothing will ever pick it up. See
-   `guides/tutorials/upgrading-workflows.md`.
+   executor whose own `config.application_version` matches the row's
+   (`reclaim_pending_workflows/4` filters on it when set). If every live executor is running a
+   different version than the one that started this workflow, nothing will ever pick it up.
 3. **It's actually running, just slow or blocked.** A step body that's genuinely long-running, or
    a `defworkflow` blocked in `Dbos.sleep/1`/`Dbos.recv_message/2` with a long remaining wait,
    looks identical to "stuck" from the status alone — check `operation_outputs` for that
    workflow to see how far it's actually gotten.
 
-**Fix:** register the missing name and restart, or align `application_version`, or call
+**Fix:** register the missing module and restart, or align `application_version`, or call
 `Dbos.Recovery.reclaim/3` (or `POST /dbos-workflow-recovery` on the admin server) explicitly
 naming the executor id it's stuck under.
 
@@ -86,24 +94,21 @@ established; `Dbos.Notifications.mode/1` returns `:poll` even though you configu
 `notifications_conn_opts:` given), or the connection attempt itself failed.
 
 **Fix:** pass `notifications_conn_opts:` explicitly if you're on the Postgrex adapter, or confirm
-`Dbos.DB.Ecto`'s repo config is reachable at boot. This is not fatal — waits still work, on a
-1-second polling cadence. Check whether that's intentional or an unnoticed degradation. Full
-detail: `guides/integrating-dbos.md`, "The dedicated LISTEN connection".
+`Dbos.DB.Ecto`'s repo config is reachable at boot. Waits still work on a 1-second polling
+cadence, so startup continues either way. Check whether the fallback is intentional or an
+unnoticed degradation.
 
 ## The engine refuses to start: migration version mismatch
 
 **Symptom:** a raised error at boot naming a `dbos_migrations.version` that isn't the expected
 one (`42`), or saying the table doesn't exist at all.
 
-**Cause:** `Dbos.Migrator.verify!/1` (run by `migrations: :verify`, the default, and also the
-first check `:create_if_absent` makes) refuses to start against a schema at the wrong version —
-running against tables whose shape doesn't match what the engine expects would silently
-checkpoint into the wrong columns.
+**Cause:** `Dbos.Migrator.verify!/1`, run by `migrations: :verify` (the default), refuses to start
+against a schema at the wrong version. Tables whose shape doesn't match what the engine expects
+would silently checkpoint into the wrong columns.
 
-**Fix:** run `mix dbos.gen.migration` and apply the resulting migration through
-`mix ecto.migrate` (or, for local dev only, switch to `migrations: :create_if_absent`, which
-applies `priv/schema/dbos_schema.sql` verbatim if verification fails). Never point production at
-a schema you haven't migrated deliberately.
+**Fix:** run `mix dbos.gen.migration` and apply the resulting migration through `mix ecto.migrate`,
+as an explicit step in your own migration sequence.
 
 ## A workflow will not cancel
 
@@ -133,24 +138,35 @@ one already in progress still runs to completion.
 point where the slot frees), and this call tried to claim the same slot.
 
 **Fix:** either treat the raise as "already enqueued, nothing to do" (catch it, or check
-`Dbos.SystemDb.get_deduplicated_workflow/3` first to see who holds it), or pick a deduplication
+query the workflow row first to see who holds it), or pick a deduplication
 id that's actually unique to this attempt. Note `deduplication_id` and `partition_key` are
 mutually exclusive on the same enqueue call.
 
-## A `Task` inside a workflow silently loses its checkpoint
+## My enqueued workflow never runs in a test
 
-**Symptom:** durable operations called from inside a `Task.async`/`Task.start` re-run in full on
-every replay. They are never checkpointed — no error, just repeated side effects.
+**Symptom:** `Dbos.enqueue/3` returns a handle, the row is in `workflow_status`, and the test
+times out waiting for a result.
 
-**Cause:** inside a `defworkflow` body, this is actually a compile error — `Dbos.Determinism`
-bans `Task.async`, `Task.await`, `Task.async_stream` and `Task.start` outright, since a spawned `Task` does not inherit
-the workflow context (`Dbos.Runtime.current_workflow_id/0` has nothing to return inside it) and
-anything durable called from within it silently skips checkpointing. The checker only walks
-`defworkflow` bodies, though — the exact same problem can happen unnoticed inside a `defstep`'s
-own body, which isn't checked the same way, if that step itself spawns a `Task` and calls a
-durable operation from inside it.
+**Cause:** under `testing: :manual` the row is inserted and left alone; the queue runners that
+would claim it are among the processes these modes deliberately do not start, which is what keeps
+everything on the caller's own connection and therefore inside `Ecto.Adapters.SQL.Sandbox`.
 
-**Fix:** never spawn a bare `Task` around a durable operation, whether in a workflow body (where
-it won't compile) or a step body (where it will, and will misbehave). Use a step for concurrent
-work that doesn't itself need to be durable, or a child workflow (`Dbos.start/3` from inside a
-workflow) for concurrent work that does.
+**Fix:** call `Dbos.Testing.drain_queue/2` or `Dbos.Testing.drain_all/1` at the point in the test
+where the work should happen, and `Dbos.Testing.recover_pending/1` to exercise recovery. Use
+`testing: :inline` for the enqueue to run synchronously inside the call itself.
+
+## My `Task.async` call will not compile inside a workflow or a step
+
+**Symptom:** a `CompileError` naming `Task.async`, `Task.await`, `Task.async_stream`,
+`Task.start`, `Task.start_link`, `spawn`, `spawn_link`, or `spawn_monitor`, in a `defworkflow`,
+`defstep`, or `deftransaction` body.
+
+**Cause:** a spawned process starts with none of the workflow context the process dictionary
+carries (`Dbos.Runtime.current_workflow_id/0` has nothing to return inside it), so a durable
+operation called from within it takes the passthrough path and skips its checkpoint entirely.
+The determinism checker rejects the construct at compile time in both workflow bodies (`check!/2`)
+and step and transaction bodies (`check_step!/2`).
+
+**Fix:** run the work inline in the step, or use a child workflow (`Dbos.start/3` from inside a
+workflow) for concurrency that itself needs to be durable. A process spawned through a
+same-module helper compiles, and `mix credo` reports it.

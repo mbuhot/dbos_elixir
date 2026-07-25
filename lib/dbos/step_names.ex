@@ -1,5 +1,7 @@
+# The reserved function_name strings for built-in durable operations, so no call site spells one
+# by hand.
 defmodule Dbos.StepNames do
-  @moduledoc "The reserved `function_name` strings for built-in durable operations, so no call site spells one by hand."
+  @moduledoc false
 
   @doc "The `function_name` for awaiting a workflow's result from within another workflow."
   def get_result, do: "DBOS.getResult"

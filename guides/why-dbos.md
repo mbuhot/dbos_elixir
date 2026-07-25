@@ -1,6 +1,6 @@
 # Why Durable Execution
 
-## The problem, precisely
+## The problem
 
 A supervisor restarts a crashed process. The crashed process's **work** stays lost.
 
@@ -16,69 +16,63 @@ sequenceDiagram
     Note over P: reservation? charge?<br/>the new process has no idea
 ```
 
-`reserve_stock` may have already committed. `charge_card` may have charged the customer and
-crashed before recording it, or crashed before charging at all. The restarted process starts
-from `init/1` with none of that history — it does not know which of those things happened,
-so it cannot safely pick up where the old one left off. It can only start over, and starting
-over is only safe if every step is either idempotent or excluded from replay entirely, and
-somebody remembered to make sure of that by hand.
+`reserve_stock` may have committed. `charge_card` may have charged the customer and crashed
+before recording it, or crashed before charging at all. The restarted process begins at
+`init/1` with none of that history, so its only safe move is to start over — which works
+only if every step is idempotent, and somebody checked that by hand.
 
-**Durable execution stores that history.** Every step a workflow takes is written to Postgres
+**Durable execution stores the history.** Every step a workflow takes is written to Postgres
 before the next one starts. A crash of any kind — process, node, deploy — leaves a record of
-exactly how far the workflow got. Recovery does not guess; it replays from that record, and
-"replays" a completed step by returning what it recorded. The step never runs again.
+how far the workflow got. Recovery replays from that record, and a completed step "replays"
+by returning what it recorded.
 
 ## What you get
 
 - A multi-step business process (reserve → charge → ship → notify) that survives a crash at
-  any point between steps, without a queue, a saga library, or a separate worker fleet.
-- Steps checkpoint into the same Postgres database your application already uses — one
-  connection pool, one backup story, one thing to operate.
-- A workflow can wait — for a message, an event, a timer — for arbitrarily long without
-  holding a process or a connection open the whole time; see `guides/architecture.md` for how
-  parking works.
+  any point between steps.
+- Checkpoints in the same Postgres database your application already uses: one connection
+  pool, one backup story.
+- Workflows that wait — for a message, an event, a timer — for arbitrarily long. A long wait
+  gives up its process and is re-dispatched when it wakes.
 - Child workflows, queues (concurrency limits, rate limits, priority, delay, partitioning),
-  and cron scheduling all build on the same checkpoint mechanism.
+  and cron scheduling, all built on the same checkpoint mechanism.
 
 ## What it costs
 
-- Every step is a round trip to Postgres. A workflow doing thousands of trivial, sub-millisecond
-  operations pays a checkpoint write for each one — durability trades throughput for
-  recoverability.
-- Workflow bodies must be deterministic on replay: no direct reads of the clock, no `:rand`, no
-  bare `receive`, no `Task.async` — anything that can produce a different value on a second run
-  has to happen inside a step. This is a real constraint on how you write the code; see
-  `docs/determinism.md` for the full list and why it matters.
-- It is one more moving part: a schema to migrate and keep in sync, a supervision tree to
-  reason about, workflow names that must stay stable across deploys.
+| Cost | Detail |
+|---|---|
+| Latency per step | Every step is a round trip to Postgres. Thousands of trivial sub-millisecond operations pay a checkpoint write each. |
+| Determinism contract | Workflow bodies must replay identically: clock reads, `:rand`, bare `receive`, and `Task.async` belong inside steps. |
+| Operational surface | A schema to migrate and keep in sync, a supervision tree, and workflow names that stay stable across deploys. |
 
 ## When *not* to reach for it
 
-- A single database write that Postgres's own transaction already makes atomic. You don't
-  need a workflow to insert one row.
-- Fire-and-forget background work where "it didn't run" is an acceptable, shruggable outcome —
-  a plain `Task.start/1` or a simple job queue is less machinery.
-- A process whose state is disposable — a cache warmer, a connection, anything a supervisor
-  restart already fixes on its own by starting fresh.
-- Very high-throughput, low-latency hot paths where a database round trip per step is the
-  wrong trade-off.
+- A single database write that a Postgres transaction already makes atomic.
+- Fire-and-forget work where "it didn't run" is a shruggable outcome.
+- A process whose state is disposable — a cache warmer, a connection — where a supervisor
+  restart already fixes things by starting fresh.
+- High-throughput, low-latency hot paths where a round trip per step is the wrong trade-off.
 
-## How this compares to what OTP already gives you
+## How this compares
 
 | | Recovers from | Does **not** recover | Where the state lives |
 |---|---|---|---|
-| **Supervisor restart** | A crashed process, structurally (a new process starts) | Any work the process was doing — in-progress steps, partial side effects | Nowhere; the new process starts from `init/1` |
-| **GenServer state** | Nothing — state lives in one process's memory | The state itself, on crash or node death | The process's own heap |
-| **Plain retries** (`with_retry`, `Retry` libs) | A single failed call, retried in place | Multi-step processes; a crash between steps loses position | Nowhere durable |
-| **Oban** (or similar job queue) | A failed *job*, requeued and retried from the top | Partial progress *within* one job — no built-in step checkpointing | The queue's own table; the job body re-runs in full on retry |
+| **Supervisor restart** | A crashed process, structurally | Work the process was doing — in-progress steps, partial side effects | Nowhere; the new process starts from `init/1` |
+| **GenServer state** | Nothing | The state itself, on crash or node death | The process's own heap |
+| **Plain retries** | A single failed call, retried in place | Multi-step processes; a crash between steps loses position | Nowhere durable |
+| **Oban** | A failed *job*, requeued and retried from the top | Partial progress within one job | The queue's table; the job body re-runs in full |
+| **Temporal** | A crashed workflow, resumed from an event history | — | A separate Temporal cluster you operate |
 | **`Dbos`** | A crashed workflow, resumed from its last completed step | — | `dbos.workflow_status` / `dbos.operation_outputs`, in your own Postgres |
 
-The distinction that matters: Oban guarantees a job *runs*, retried as a whole if it fails.
-`Dbos` guarantees a workflow's *steps* individually survive a crash — the difference between
-"the job will run again from scratch" and "the card will not be charged twice because the
-charge step already recorded that it happened." They're not mutually exclusive: a Dbos
-workflow queue (`Dbos.Queue`) plays a similar role to Oban's queue for *starting* work, while
-`defstep`/`deftransaction` add per-operation durability underneath it.
+Oban guarantees a job *runs*, retried as a whole. `Dbos` guarantees a workflow's *steps*
+individually survive a crash: the card will not be charged twice because the charge step
+already recorded that it happened. The two compose — a `Dbos.Queue` plays a similar role to
+an Oban queue for *starting* work, and `defstep`/`deftransaction` add per-operation durability
+underneath.
+
+Temporal offers the same programming model with a much larger operational footprint: its own
+server cluster, its own storage, and its own deployment lifecycle. `Dbos` runs inside your
+BEAM nodes and stores its state in the database you already run.
 
 ## The one sentence
 

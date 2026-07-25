@@ -1,10 +1,9 @@
+# The DynamicSupervisor owning every running workflow process for one engine. Children are
+# :temporary: a workflow process that dies is recovered from its checkpoints by Dbos.Recovery,
+# never by an OTP restart, since a restart would re-invoke the workflow body outside the replay
+# path.
 defmodule Dbos.WorkflowSup do
-  @moduledoc """
-  The `DynamicSupervisor` owning every running workflow process for one engine. Children are
-  `:temporary`: a workflow process that dies is recovered from its checkpoints by
-  `Dbos.Recovery`, never by an OTP restart, since a restart would re-invoke the workflow body
-  outside the replay path.
-  """
+  @moduledoc false
 
   use DynamicSupervisor
 

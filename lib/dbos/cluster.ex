@@ -1,22 +1,16 @@
 defmodule Dbos.Cluster do
   @moduledoc """
-  The roster of `{node, executor_id}` pairs for every `Dbos.Cluster` live in this deployment,
-  refreshed as `:pg` membership changes. Every engine's `Dbos.Cluster` joins one shared,
-  deployment-wide `:pg` group scoped to the deployment: one BEAM node may host several engines
-  with distinct executor ids, so the mapping is many-to-one, and each of those engines needs to
-  see every executor id live on a node. The roster is a set of pairs.
+  Which `{node, executor_id}` pairs are live in this deployment.
 
-  Degrades to a single-entry roster of just this engine, logging once at `info`, when
-  distributed Erlang is not enabled (`Node.alive?/0` is `false`) or `:pg` is unavailable — the
-  normal path in tests and single-node deployments. Started only when the owning
-  `Dbos.Supervisor` is given `cluster: [enabled: true]`.
+  Every engine started with `cluster: [enabled: true]` joins one deployment-wide `:pg` group. One
+  BEAM node may host several engines with distinct executor ids, so the roster is a set of pairs.
 
-  `roster/1` reflects only *live* membership, for `Dbos.Cluster.OrphanSweep`'s "is this executor
-  still seen anywhere" check. `executor_ids_for_node/2` instead answers from a separate,
-  monotonic history of every executor id ever seen on a node, never pruned on `:pg` leave — it
-  exists specifically to resolve a node's executor ids *after* it has departed, for
-  `Dbos.Cluster.NodeWatcher`'s `:nodedown` handling, and a leave and a `:nodedown` for the same
-  node are otherwise racing notifications with no ordering guarantee between them.
+  `roster/1` reports current membership. `executor_ids_for_node/2` answers from a monotonic
+  history of every executor id ever seen on a node, so it still resolves ids for a node that has
+  already departed.
+
+  Without distributed Erlang (`Node.alive?/0` is `false`) or `:pg`, the roster degrades to this
+  engine alone and logs once at `info`.
   """
 
   use GenServer

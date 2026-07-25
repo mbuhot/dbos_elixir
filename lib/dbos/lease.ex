@@ -1,19 +1,17 @@
+# Per-engine heartbeat that keeps this executor's row in dbos.executor_leases fresh, renewed on
+# Dbos.Config.lease_renew_interval_ms — a small fraction of Dbos.Config.lease_ttl_ms, so a couple
+# of missed renewals are survivable. Renewed over the same connection this executor checkpoints
+# through, so a node that cannot renew also cannot write conflicting checkpoints: this is the
+# property that makes the lease Dbos.Cluster.OrphanSweep's sole authority for automatic reclaim.
+#
+# Writes the first lease synchronously in init/1, before Dbos.Recovery starts, so this engine's
+# own PENDING rows are never briefly lease-less while it boots. A renewal failure is logged and
+# retried on the next tick rather than crashing this process — Dbos.DB.Retry already absorbs
+# transient errors underneath it. Graceful shutdown expires the lease immediately, via
+# terminate/2, so a replacement executor doesn't have to wait out the TTL; this is best-effort,
+# since a non-graceful stop (a killed node, :brutal_kill) never runs it.
 defmodule Dbos.Lease do
-  @moduledoc """
-  Per-engine heartbeat that keeps this executor's row in `dbos.executor_leases` fresh, renewed on
-  `Dbos.Config.lease_renew_interval_ms` — a small fraction of `Dbos.Config.lease_ttl_ms`, so a
-  couple of missed renewals are survivable. Renewed over the same connection this executor
-  checkpoints through, so a node that cannot renew also cannot write conflicting checkpoints:
-  this is the property that makes the lease `Dbos.Cluster.OrphanSweep`'s sole authority for
-  automatic reclaim.
-
-  Writes the first lease synchronously in `init/1`, before `Dbos.Recovery` starts, so this
-  engine's own `PENDING` rows are never briefly lease-less while it boots. A renewal failure is
-  logged and retried on the next tick rather than crashing this process — `Dbos.DB.Retry` already
-  absorbs transient errors underneath it. Graceful shutdown expires the lease immediately, via
-  `terminate/2`, so a replacement executor doesn't have to wait out the TTL; this is best-effort,
-  since a non-graceful stop (a killed node, `:brutal_kill`) never runs it.
-  """
+  @moduledoc false
 
   use GenServer
   require Logger

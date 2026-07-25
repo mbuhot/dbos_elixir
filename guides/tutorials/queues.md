@@ -1,24 +1,22 @@
 # Queues
 
-A queue is a durable, database-backed work list. Enqueueing a workflow onto a queue inserts a
-row and returns immediately — a `Dbos.Queue.Runner` on some engine claims it later and dispatches
-it locally. Every runner across every connected BEAM node pulls from the same table, so
-concurrency limits, rate limits, and priority are all enforced in Postgres, shared across
-every process.
+A queue is a durable, database-backed work list. Enqueueing a workflow inserts a row and returns
+immediately; a queue runner on some engine claims it later and dispatches it locally. Every
+runner across every node pulls from the same table, so concurrency limits, rate limits, and
+priority are enforced in Postgres, shared across every process.
 
 ```mermaid
 flowchart LR
     A["Dbos.enqueue/3"] --> B[("workflow_status\nstatus = ENQUEUED")]
     B --> C1["Runner (node 1)"]
     B --> C2["Runner (node 2)"]
-    C1 -->|"FOR UPDATE SKIP LOCKED / NOWAIT"| D[claims rows, dispatches locally]
-    C2 -->|"FOR UPDATE SKIP LOCKED / NOWAIT"| D
+    C1 -->|row-level locking| D[claims rows, dispatches locally]
+    C2 -->|row-level locking| D
 ```
 
 ## Declaring a queue
 
-Queues are declared once, on `Dbos.Supervisor`'s `:queues` option, as a list of `Dbos.Queue`
-structs:
+Queues are declared once, on `Dbos.Supervisor`'s `:queues` option:
 
 ```elixir
 children = [
@@ -26,7 +24,7 @@ children = [
   {Dbos.Supervisor,
    name: Dbos,
    db: {Dbos.DB.Ecto, MyApp.Repo},
-   workflows: [MyApp.Checkout],
+   otp_app: :my_app,
    queues: [
      Dbos.Queue.new("emails", worker_concurrency: 10),
      Dbos.Queue.new("reports", global_concurrency: 5, rate_limit: %{limit: 100, period_ms: 60_000})
@@ -34,78 +32,78 @@ children = [
 ]
 ```
 
-Every declared queue gets its own `Dbos.Queue.Runner`, a polling `GenServer` that ticks on a
-backing-off interval (starting at `base_polling_interval_ms`, default `1_000`, capped at
-`max_polling_interval_ms`, default `120_000`). A tick that finds contention (another node holding
-the row lock) backs off; a quiet tick scales back toward the base interval. Every engine also gets
-a runner for a reserved internal queue — the default target `Dbos.resume/2` and `Dbos.fork/3`
-re-enqueue onto.
+`Dbos.Queue.new/2` options:
 
-`Dbos.Queue.new/2` validates the combination and raises `Dbos.InvalidQueueOptionError` if
-`worker_concurrency` exceeds `global_concurrency`, if `base_polling_interval_ms` isn't positive,
-or if `rate_limit`'s `limit`/`period_ms` aren't both positive.
+| Option | Default | Meaning |
+|---|---|---|
+| `:worker_concurrency` | `nil` | Cap on workflows this engine runs at once for the queue. |
+| `:global_concurrency` | `nil` | Cap across every engine sharing the database. |
+| `:rate_limit` | `nil` | `%{limit: pos_integer, period_ms: pos_integer}`. |
+| `:priority_enabled` | `false` | Records that this queue is used with priorities; surfaced by the admin server. |
+| `:partition_queue` | `false` | See Partitioned queues, below. |
+| `:base_polling_interval_ms` | `1_000` | Starting poll interval for this queue's runner. |
+
+`Dbos.Queue.new/2` raises `Dbos.InvalidQueueOptionError` when `worker_concurrency` exceeds
+`global_concurrency`, when `base_polling_interval_ms` is not positive, when `rate_limit`'s `limit`
+and `period_ms` are not both positive, or when the name is the reserved internal one.
+
+Each declared queue gets its own polling runner. A tick that hits lock contention backs the
+interval off (up to 120s); a quiet tick scales it back toward the base interval. Every engine also
+runs a reserved internal queue — the default target `Dbos.resume/2` and `Dbos.fork/3` re-enqueue
+onto.
 
 ## Enqueueing
 
 ```elixir
-{:ok, handle} = Dbos.enqueue(MyApp.Reports.generate, [report_id], queue_name: "reports")
+{:ok, handle} = Dbos.enqueue(&MyApp.Reports.generate/1, [report_id], queue_name: "reports")
 {:ok, result} = Dbos.await(handle)
 ```
 
-`Dbos.enqueue/3` accepts:
+The first argument is a registered workflow name or a `&Mod.fun/n` capture. `Dbos.enqueue/3`
+accepts:
 
 | Option | Default | Meaning |
 |---|---|---|
 | `:queue_name` | — (required) | Which declared queue to insert onto. |
 | `:workflow_id` | a fresh UUIDv4 | The workflow's id. |
+| `:engine` | `Dbos` | Which engine to enqueue on. |
 | `:priority` | `0` | Lower runs first. |
 | `:deduplication_id` | `nil` | See Deduplication, below. |
 | `:partition_key` | `nil` | See Partitioned queues, below. |
 | `:delay_ms` | `nil` | See Delayed start, below. |
+| `:timeout_ms` | `nil` | Durable deadline for the workflow once it starts. |
 | `:application_version` | the engine's own | Which version's workers may claim this row. |
 
 `:deduplication_id` and `:partition_key` are mutually exclusive — passing both raises
 `ArgumentError`.
 
-Called from inside a workflow, `enqueue/3` consumes a step id and checkpoints the call under a
-`"DBOS.enqueue"` step, so replaying the parent after a crash does not enqueue a second copy.
-Called from ordinary code, nothing is checkpointed — there's no parent workflow to checkpoint
-into.
+Called from inside a workflow, `enqueue/3` consumes a step id and checkpoints the call, so
+replaying the parent after a crash enqueues nothing further.
 
 ## Worker concurrency vs. global concurrency
 
-Two independent limits, enforced at two different scopes:
-
-| Limit | Scope | Enforced by |
+| Limit | Scope | Counted from |
 |---|---|---|
-| `worker_concurrency` | This one BEAM process's runner | Counting this engine's own live `Dbos.WorkflowProcess`es for the queue (`Dbos.WorkflowSup.count_running/3`), in memory. |
-| `global_concurrency` | Every engine sharing the database | Counting `PENDING` rows for the queue in Postgres, inside the same transaction that claims new work. |
+| `worker_concurrency` | This one engine's runner | This engine's live workflow processes for the queue, in memory. |
+| `global_concurrency` | Every engine sharing the database | `PENDING` rows for the queue, inside the claiming transaction. |
 
-`worker_concurrency` caps how much of a queue's traffic *this instance* runs at once — useful
-for capping local resource usage (say, ten concurrent email sends per node). `global_concurrency`
-caps the queue's traffic *everywhere*, across every node pointed at the same database — useful
-for a hard ceiling on a downstream dependency that doesn't care which node is calling it. Set
-both and the tighter one wins on any given runner: each dequeue pass narrows first by
-`worker_concurrency - local_running_count`, then by `global_concurrency - pending_count`, and
-takes the smaller.
-
-When `global_concurrency` (or a rate limit) is set, the dequeuing transaction runs at
-`:repeatable_read` isolation and locks candidate rows with `FOR UPDATE NOWAIT` (a losing node
-simply claims nothing this tick; it never queues up behind the lock). Otherwise it's a plain
-`:read_committed` transaction with `FOR UPDATE SKIP LOCKED`, so nodes never block each other.
+`worker_concurrency` caps local resource usage (say, ten concurrent email sends per node).
+`global_concurrency` puts a hard ceiling on a downstream dependency that does not care which node
+is calling it. Set both and each dequeue pass narrows first by
+`worker_concurrency - local_running_count`, then by `global_concurrency - pending_count`, taking
+the smaller.
 
 ## Priority
 
 ```elixir
 Dbos.Queue.new("reports", priority_enabled: true)
 
-Dbos.enqueue(MyApp.Reports.generate, [report_id], queue_name: "reports", priority: 1)
+Dbos.enqueue(&MyApp.Reports.generate/1, [report_id], queue_name: "reports", priority: 1)
 ```
 
 Candidates are claimed in `priority ASC, created_at ASC` order: a lower `:priority` number runs
-first, and rows with equal priority run in the order they were enqueued. `priority: 0` (the
-default) sorts before anything positive — most callers only need to set it on the rows that
-should jump the queue.
+first, and rows of equal priority run in enqueue order. `priority: 0` (the default) sorts ahead of
+anything positive, so most callers set `:priority` only on the rows that should jump the queue.
 
 ## Rate limiting
 
@@ -114,9 +112,8 @@ Dbos.Queue.new("reports", rate_limit: %{limit: 100, period_ms: 60_000})
 ```
 
 A rate limit caps how many workflows may *start* on the queue within a sliding window: at most
-`limit` workflows whose `started_at_epoch_ms` falls in the last `period_ms` milliseconds. Each
-tick counts already-started, non-terminal rows in that window before claiming anything new; if the
-count has reached `limit`, the tick claims nothing and tries again next poll.
+`limit` workflows started in the last `period_ms` milliseconds. A tick that finds the window full
+claims nothing and tries again on the next poll.
 
 ## Partitioned queues
 
@@ -127,36 +124,38 @@ Dbos.Queue.new("tenant_jobs",
   rate_limit: %{limit: 50, period_ms: 60_000}
 )
 
-Dbos.enqueue(MyApp.Tenant.run_job, [job_id], queue_name: "tenant_jobs", partition_key: tenant_id)
+Dbos.enqueue(&MyApp.Tenant.run_job/1, [job_id], queue_name: "tenant_jobs", partition_key: tenant_id)
 ```
 
 A partitioned queue runs one independent copy of every flow-control check per distinct
-`:partition_key` value seen on it. **This includes the rate limit** — each partition gets its own
-`limit`-per-`period_ms` allowance, held independently of every other partition. This is
-deliberate: it gives each tenant (or
-customer, or region — whatever the partition key represents) a fair, isolated slice of the
-queue's throughput. One noisy tenant enqueueing thousands of jobs cannot starve another tenant's
-rate limit or concurrency slot, because every check the runner makes is scoped to
-`queue_name = ... AND queue_partition_key = ...`.
+`:partition_key` value. **This includes the rate limit** — each partition gets its own
+`limit`-per-`period_ms` allowance. That is deliberate: it gives each tenant (or customer, or
+region) a fair, isolated slice of throughput, so one noisy tenant enqueueing thousands of jobs
+leaves every other tenant's allowance and concurrency slots intact.
 
-Each poll tick discovers live partitions with `SELECT DISTINCT queue_partition_key ... WHERE
-status = 'ENQUEUED'` and runs the dequeue-and-dispatch step once per partition found.
+Each poll tick discovers the partitions that currently have `ENQUEUED` rows and runs the
+dequeue-and-dispatch pass once per partition.
 
 ### Capping total throughput across all partitions
 
-Per-partition fairness is exactly what makes a *global* cap awkward on a single partitioned
-queue — there's no one place a queue-wide rate limit or concurrency count is computed, only
-per-partition ones. The documented pattern is two queues: a partitioned queue that hands out each
-tenant's fair share, and a plain (non-partitioned) queue underneath it with the real global cap.
-A workflow enqueued on the first only fans out onto the second and waits.
+Per-partition fairness means a single partitioned queue has no queue-wide limit to compute. The
+pattern for a global cap is two queues: a partitioned queue that hands out each tenant's fair
+share, and a plain queue underneath it carrying the global cap. A workflow on the first fans out
+onto the second and waits.
+
+```elixir
+queues: [
+  Dbos.Queue.new("tenant_jobs", partition_queue: true, rate_limit: %{limit: 50, period_ms: 60_000}),
+  Dbos.Queue.new("global_jobs", global_concurrency: 20, rate_limit: %{limit: 200, period_ms: 60_000})
+]
+```
 
 ```elixir
 defmodule MyApp.TenantJobs do
   use Dbos
 
   defworkflow route_job(tenant_id, job_id), name: "route_job" do
-    {:ok, handle} =
-      Dbos.enqueue(&do_job/2, [tenant_id, job_id], queue_name: "global_jobs")
+    {:ok, handle} = Dbos.enqueue(&do_job/2, [tenant_id, job_id], queue_name: "global_jobs")
 
     case Dbos.await(handle) do
       {:ok, result} -> result
@@ -171,28 +170,16 @@ end
 ```
 
 ```elixir
-queues: [
-  Dbos.Queue.new("tenant_jobs",
-    partition_queue: true,
-    rate_limit: %{limit: 50, period_ms: 60_000}
-  ),
-  Dbos.Queue.new("global_jobs", global_concurrency: 20, rate_limit: %{limit: 200, period_ms: 60_000})
-]
-```
-
-```elixir
 Dbos.enqueue(&MyApp.TenantJobs.route_job/2, [tenant_id, job_id],
   queue_name: "tenant_jobs",
   partition_key: tenant_id
 )
 ```
 
-Each tenant gets up to 50 jobs/minute of their own on `tenant_jobs`; `route_job` picks each one up
-under that per-tenant allowance, then re-enqueues the real work onto `global_jobs`, which caps the
-combined total across every tenant at 20 concurrent / 200 per minute. `route_job` blocks on
-`Dbos.await/2` until `do_job` finishes, so its own concurrency slot on `tenant_jobs` is held for
-the job's full duration — sized `tenant_jobs`' `worker_concurrency`/`global_concurrency`
-accordingly if you don't want a tenant's slots consumed by workflows that are just waiting.
+Each tenant gets up to 50 jobs/minute of their own on `tenant_jobs`; `global_jobs` caps the
+combined total at 20 concurrent / 200 per minute. `route_job` blocks on `Dbos.await/2` for the
+job's full duration, holding its slot on `tenant_jobs` the whole time — size `tenant_jobs`'
+concurrency with that in mind.
 
 ## Delayed start
 
@@ -200,11 +187,9 @@ accordingly if you don't want a tenant's slots consumed by workflows that are ju
 Dbos.enqueue(&MyApp.Reminders.send/1, [user_id], queue_name: "reminders", delay_ms: 3_600_000)
 ```
 
-A `:delay_ms` value inserts the row as `DELAYED`, holding it back from `ENQUEUED` until the
-delay elapses. Every runner's poll tick
-starts by sweeping every `DELAYED` row globally (`Dbos.SystemDb.transition_delayed_workflows/1`)
-and promoting the ones whose delay has elapsed to `ENQUEUED`, so it becomes a normal dequeue
-candidate on the very next pass — on whichever engine's runner ticks first.
+`:delay_ms` inserts the row as `DELAYED`. Every runner's poll tick begins by promoting every
+`DELAYED` row whose delay has elapsed to `ENQUEUED`, on whichever engine ticks first, making it a
+normal dequeue candidate on the next pass.
 
 ## Deduplication
 
@@ -216,21 +201,18 @@ Dbos.enqueue(&MyApp.Reports.generate/1, [report_id],
 ```
 
 `:deduplication_id` reserves a single slot per `(queue_name, deduplication_id)` pair. A second
-enqueue attempt with the same pair, while the first is still in the queue or running, raises
-`Dbos.QueueDeduplicatedError` (carrying the id of whichever workflow already holds the slot).
-No duplicate row is inserted.
+enqueue with the same pair, while the first is still queued or running, raises
+`Dbos.QueueDeduplicatedError` carrying the id of the workflow holding the slot. No row is
+inserted.
 
 ## Debouncing
 
-Deduplication rejects a repeat; debouncing instead collapses a burst of repeats into one delayed
-workflow, pushing its start time out with every additional call — the classic "wait until the
-user stops typing" pattern.
+Debouncing collapses a burst of repeats into one delayed workflow, pushing its start time out with
+every additional call — the "wait until the user stops typing" pattern.
 
 ```elixir
-config = Dbos.config()
-
-{:ok, workflow_id} =
-  Dbos.Debouncer.debounce(config, "reindex_document", [doc_id],
+{:ok, handle} =
+  Dbos.debounce(&MyApp.Search.reindex_document/1, [doc_id],
     queue_name: "reindex",
     debounce_key: "doc-#{doc_id}",
     period_ms: 2_000,
@@ -238,16 +220,21 @@ config = Dbos.config()
   )
 ```
 
-Each call either starts a fresh `DELAYED` workflow keyed by `:debounce_key`, or "bounces" one
-still waiting out its delay: replacing its inputs with this call's `args` and pushing
-`delay_until_epoch_ms` forward by `:period_ms` from now. `:deadline_ms`, if given, is fixed at the
-first call and caps how far later bounces can push the delay — the workflow fires no later than
-`deadline_ms` after the first call, no matter how often it keeps bouncing. Every bounce collapses
-onto the same `workflow_id`; the returned id is stable across the whole burst. Raises
-`Dbos.QueueDeduplicatedError` if the key is currently held by a plain (non-debounced)
-`deduplication_id` enqueue, or by a debounced workflow under a different name.
+| Option | Meaning |
+|---|---|
+| `:queue_name` | Required. The queue the delayed workflow sits on. |
+| `:debounce_key` | Required. Identifies the burst being collapsed. |
+| `:period_ms` | Required. How far each call pushes the start time out from now. |
+| `:deadline_ms` | Optional. Ceiling on the total delay, fixed at the first call. |
+| `:engine` | Default `Dbos`. |
 
-`Dbos.Debouncer.debounce/4` is a lower-level entry point than `Dbos.enqueue/3`: it takes a
-`Dbos.Config` directly (`Dbos.config/0` outside a workflow) and the workflow's registered name as
-a plain string; a `defworkflow` capture isn't accepted here — there is currently no
-`Dbos.debounce` convenience wrapper alongside `Dbos.enqueue/3`.
+Each call either starts a fresh `DELAYED` workflow keyed by `:debounce_key`, or bounces one still
+waiting out its delay — replacing its inputs with this call's `args` and pushing its wake time
+forward by `:period_ms`. With `:deadline_ms` set, the workflow fires within that long of the first
+call however often it bounces. Every bounce returns a handle to the same workflow id, stable
+across the whole burst.
+
+`Dbos.QueueDeduplicatedError` is raised when the key is currently held by a plain
+`:deduplication_id` enqueue, or by a debounced workflow under a different name.
+
+Called from inside a workflow, `debounce/3` consumes a step id and checkpoints the call.

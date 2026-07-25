@@ -1,9 +1,8 @@
+# Computes a deterministic application version from a set of workflow modules' compiled code, used
+# as the default application_version when neither DBOS__APPVERSION nor an explicit config value is
+# given.
 defmodule Dbos.Version do
-  @moduledoc """
-  Computes a deterministic application version from a set of workflow modules' compiled code,
-  used as the default `application_version` when neither `DBOS__APPVERSION` nor an explicit
-  config value is given.
-  """
+  @moduledoc false
 
   @doc "A short hex digest over `modules`' compiled code, stable regardless of list order."
   def compute(modules) do

@@ -1,9 +1,8 @@
+# An ETS-backed name to {module, function, arity} map for one engine's registered workflows.
+# The table is owned by this GenServer, so it dies with the engine, and is namespaced under the
+# engine's name so multiple engines can coexist in one BEAM.
 defmodule Dbos.Registry do
-  @moduledoc """
-  An ETS-backed name to `{module, function, arity}` map for one engine's registered workflows.
-  The table is owned by this GenServer, so it dies with the engine, and is namespaced under the
-  engine's name so multiple engines can coexist in one BEAM.
-  """
+  @moduledoc false
 
   use GenServer
 

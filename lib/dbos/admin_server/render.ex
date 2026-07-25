@@ -1,10 +1,9 @@
+# JSON-safe rendering of engine structs for Dbos.AdminServer. The system stores ETF-encoded
+# Elixir terms (inputs/output/error); over HTTP/JSON, which cannot represent an arbitrary Elixir
+# term losslessly, these render through inspect/1 as a readable, unambiguous string. Every other
+# column already is (or trivially converts to) a JSON-safe type.
 defmodule Dbos.AdminServer.Render do
-  @moduledoc """
-  JSON-safe rendering of engine structs for `Dbos.AdminServer`. The system stores ETF-encoded
-  Elixir terms (`inputs`/`output`/`error`); over HTTP/JSON, which cannot represent an arbitrary
-  Elixir term losslessly, these render through `inspect/1` as a readable, unambiguous string.
-  Every other column already is (or trivially converts to) a JSON-safe type.
-  """
+  @moduledoc false
 
   alias Dbos.Status
 

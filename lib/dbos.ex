@@ -1,9 +1,14 @@
 defmodule Dbos do
   @moduledoc """
-  The public entry point for starting and awaiting durable workflows. A running engine's
-  resolved `Dbos.Config` lives in `:persistent_term`, keyed by the engine's `name`, so this
-  module and `Dbos.Runtime` never have to be told which engine they're talking to beyond that
-  name.
+  The entry point for starting, awaiting, and managing durable workflows.
+
+  `use Dbos` brings in the `defworkflow`, `defstep` and `deftransaction` macros (see
+  `Dbos.Macros`). The functions here operate on workflows once they exist: starting and enqueuing
+  them, awaiting their results, cancelling, resuming and forking them, and the messaging, event
+  and stream primitives a workflow uses to communicate.
+
+  Every function takes an engine name, defaulting to `Dbos`; `config/1` resolves that name to the
+  running engine's `Dbos.Config`.
   """
 
   alias Dbos.Client
@@ -58,7 +63,7 @@ defmodule Dbos do
   @doc """
   Enqueues a workflow onto `opts[:queue_name]` rather than starting it directly: the row is
   inserted `ENQUEUED` (or `DELAYED` if `opts[:delay_ms]` is a positive integer, promoted to
-  `ENQUEUED` by `Dbos.Queue.Runner`'s per-tick sweep once it elapses) and a `Dbos.Queue.Runner`
+  `ENQUEUED` once it elapses) and the queue's runner
   claims and dispatches it later. `opts`: `:queue_name` (required), `:engine` (default `Dbos`),
   `:workflow_id`, `:priority` (default `0`, lower runs first), `:deduplication_id`,
   `:partition_key`, `:delay_ms`, `:application_version`. `:deduplication_id` and `:partition_key`
@@ -141,11 +146,10 @@ defmodule Dbos do
 
   @doc """
   Waits until `handle`'s workflow reaches a terminal status, returning `{:ok, output}`,
-  `{:error, exception}`, or `{:error, :timeout}`. Wakes on `Dbos.Notifications.notify_status/2`
-  (fired in-process by `Dbos.WorkflowProcess` right after it durably records an outcome) when
-  possible, falling back to polling every `opts[:poll_interval_ms]` (default `100`) — the transport
-  for a workflow finished by a different engine instance. `opts[:timeout_ms]`, if given, bounds how
-  long this call waits.
+  `{:error, exception}`, or `{:error, :timeout}`. Wakes on `Dbos.Notifications.notify_status/2`,
+  fired in-process the moment this engine durably records the outcome, falling back to polling
+  every `opts[:poll_interval_ms]` (default `100`) — the transport for a workflow finished by a
+  different engine instance. `opts[:timeout_ms]`, if given, bounds how long this call waits.
 
   Called from inside a workflow, this consumes a step id and checkpoints a `"DBOS.getResult"` step
   only after the wait completes: a non-consuming peek at the next id is taken first, and replaying

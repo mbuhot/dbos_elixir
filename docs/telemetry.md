@@ -1,69 +1,70 @@
 # Telemetry
 
-Four `:telemetry.span/3` spans. No OpenTelemetry dependency — attach your own handler
-(`:telemetry.attach/4`, `:telemetry.attach_many/4`) and bridge to whatever backend you use.
+Four `:telemetry.span/3` spans. Attach your own handler (`:telemetry.attach/4`,
+`:telemetry.attach_many/4`) and bridge to whatever backend you use.
 
 Every span emits the standard `:telemetry.span/3` triple: `[..., :start]`, `[..., :stop]`, and
-`[..., :exception]` on a raised/thrown error (which is then re-raised — a span never swallows a
-failure). `:start` measurements always carry `system_time` (native units); `:stop`/`:exception`
-measurements always carry `duration` (native units, convert with
-`System.convert_time_unit(duration, :native, :millisecond)`) plus the fields listed below.
+`[..., :exception]` on a raised or thrown error, which is then re-raised. `:start` measurements
+carry `system_time` (native units); `:stop`/`:exception` measurements carry `duration` (native
+units, convert with `System.convert_time_unit(duration, :native, :millisecond)`).
+
+| Event prefix | One span per |
+|---|---|
+| `[:dbos, :workflow]` | one execution of a workflow body |
+| `[:dbos, :step]` | one execution of a step body |
+| `[:dbos, :queue, :dequeue]` | one dequeue poll of one queue/partition pair |
+| `[:dbos, :recovery]` | one `Dbos.Recovery.reclaim/2,3` pass |
+
+`kind`, `reason`, and `stacktrace` are present on every `:exception` event and are omitted from
+the tables below.
 
 ## `[:dbos, :workflow, :start | :stop | :exception]`
 
-One span per workflow **process** execution (a fresh run, a replay after recovery, or a resumed/
-forked continuation) — wraps the call into the registered workflow function, per
-`Dbos.WorkflowProcess`.
+Wraps one *process run* of a workflow body — a fresh run, a replay after recovery, or a resumed
+or forked continuation. A workflow that is recovered three times emits three spans. Its end-to-end
+lifetime is `workflow_status.created_at`..`completed_at` in the database.
 
-| Metadata | Present | Meaning |
-|---|---|---|
-| `workflow_id` | always | The workflow's id. |
-| `name` | always (`nil` if unresolvable) | The registered workflow name. |
-| `engine` | always | The engine name. |
-| `replay` | always | Whether this run is a recovery replay. |
-| `kind`, `reason`, `stacktrace` | `:exception` only | Standard `:telemetry.span/3` exception fields. |
-
-Firing on every checkpoint-skipping replay, in addition to a workflow's first attempt, is
-deliberate: a span per *process run* mirrors what actually consumed CPU/latency. The workflow's
-full lifetime end to end is already answered separately, from `workflow_status.created_at`..
-`completed_at` in the database.
+| Metadata | Meaning |
+|---|---|
+| `workflow_id` | The workflow's id. |
+| `name` | The registered workflow name (`nil` if unresolvable). |
+| `engine` | The engine name. |
+| `replay` | Whether this run is a recovery replay. |
 
 ## `[:dbos, :step, :start | :stop | :exception]`
 
-One span per step's actual **execution** — `defstep`/`deftransaction`. Does **not** fire when
-`Dbos.Runtime.run_step/3`'s replay short-circuit returns an already-recorded output without
-calling the step body; only real invocations are spanned.
+Wraps one execution of a `defstep`/`deftransaction` body. A step whose output is already
+checkpointed emits nothing on replay — only real invocations are spanned.
 
-| Metadata | Present | Meaning |
-|---|---|---|
-| `function_name` | always | The step's name (`"name/arity"`, or a `name:` override). |
-| `workflow_id` | always | The owning workflow's id. |
-| `kind`, `reason`, `stacktrace` | `:exception` only | Standard exception fields. |
+| Metadata | Meaning |
+|---|---|
+| `function_name` | The step's name (`"name/arity"`, or a `name:` override). |
+| `workflow_id` | The owning workflow's id, `nil` for a step called outside a workflow. |
 
 ## `[:dbos, :queue, :dequeue, :start | :stop | :exception]`
 
-One span per `Dbos.Queue.Runner` poll of one queue/partition pair — wraps the
-`Dbos.SystemDb.dequeue_workflows/3` call.
+Wraps one dequeue poll of one queue/partition pair.
 
-| Metadata | Present | Meaning |
-|---|---|---|
-| `engine` | always | The engine name. |
-| `queue_name` | always | The queue being polled. |
-| `partition_key` | always (`nil` for an unpartitioned queue) | Which partition this poll covers. |
-| `count` | `:stop` only | How many workflows this poll claimed (`0` on an empty poll). |
-| `kind`, `reason`, `stacktrace` | `:exception` only | Fires on **every** lock-contention race (`NOWAIT` losing a claim under `GlobalConcurrency`) alongside genuine failures — contention is an expected, frequent outcome under concurrent dequeuers; filter on `reason` if a handler only cares about non-contention errors (`Dbos.SystemDb.contention_error?/1`). |
+| Metadata | Meaning |
+|---|---|
+| `engine` | The engine name. |
+| `queue_name` | The queue being polled. |
+| `partition_key` | Which partition this poll covers (`nil` for an unpartitioned queue). |
+| `count` | `:stop` only — how many workflows this poll claimed (`0` on an empty poll). |
+
+Lock contention counts as an exception here: a `NOWAIT` claim lost under `GlobalConcurrency`
+raises, and contention is an expected, frequent outcome with concurrent dequeuers. Filter on
+`reason` if a handler only cares about genuine failures.
 
 ## `[:dbos, :recovery, :start | :stop | :exception]`
 
-One span per `Dbos.Recovery.reclaim/2,3` call — covers both the boot-time self-recovery pass
-(`recover_pending/1`) and any dead-executor reclaim (cluster-driven or the
-`POST /dbos-workflow-recovery` admin route).
+Wraps one `Dbos.Recovery.reclaim/2,3` pass: the boot-time self-recovery scan, the orphan sweep's
+reclaim, and the `POST /dbos-workflow-recovery` admin route all go through it.
 
-| Metadata | Present | Meaning |
-|---|---|---|
-| `engine` | always | The engine name. |
-| `executor_ids` | always | The executor ids this pass is reclaiming. |
-| `kind`, `reason`, `stacktrace` | `:exception` only | Standard exception fields. |
+| Metadata | Meaning |
+|---|---|
+| `engine` | The engine name. |
+| `executor_ids` | The executor ids this pass is reclaiming. |
 
 ## Attaching a handler
 
@@ -80,5 +81,5 @@ One span per `Dbos.Recovery.reclaim/2,3` call — covers both the boot-time self
 )
 ```
 
-Tests use `:telemetry_test.attach_event_handlers/2` to assert on these events directly — see
-`test/dbos/telemetry_test.exs`.
+`:telemetry_test.attach_event_handlers/2` is the simplest way to assert on these events in your
+own tests.

@@ -1,25 +1,20 @@
 defmodule Dbos.Recovery do
   @moduledoc """
-  Re-dispatches `PENDING` workflows on engine start, and reclaims a dead executor's `PENDING`
-  workflows on demand. A queued `PENDING` workflow is handed back to its queue rather than
-  re-invoked directly. An unregistered workflow name is logged and skipped; the pass continues
-  with the rest of the batch. A workflow whose redispatch itself fails is isolated the same way:
-  reclaiming moves the whole batch to this executor in one statement, so a failure that escaped
-  would leave every workflow behind it owned by a live executor and invisible to any later
-  recovery pass.
+  Bringing interrupted workflows back to life.
 
-  Reclaiming takes `FOR UPDATE SKIP LOCKED`, so a row whose lock is still held — by a peer
-  executor, or by a backend that has not finished being torn down after its client was killed —
-  is passed over. A pass that skipped a row it has not already handled re-scans, on a short
-  bounded backoff, so a lock released milliseconds later still gets the workflow recovered.
+  `recover_pending/1` re-dispatches this executor's own `PENDING` workflows; the engine runs it
+  once at boot, and it is callable directly to force a pass. `reclaim/3` takes over the `PENDING`
+  workflows of executors named as dead, for an operator driving failover by hand.
+  `await_boot_recovery/1` blocks until the boot pass has finished, which tests need before
+  asserting on recovered work.
 
-  Every reclaim is capability-aware: only rows whose `name` this engine has registered are ever
-  reassigned, from `recover_pending/1`'s own-id reclaim through an operator's `reclaim/2,3`
-  override. A deployment is normally heterogeneous — different nodes run different workflow
-  modules — so a name this engine doesn't implement is routine, not a fault; reassigning it here
-  would strand it permanently, since its new owner's lease is healthy and no future sweep would
-  ever move it again. A row this engine can't run is left exactly where it is, for whichever peer
-  does implement it to claim instead.
+  Recovery is capability-aware: only workflows whose name this engine has registered are ever
+  reassigned. A deployment is normally heterogeneous, so a name this engine doesn't implement is
+  left exactly where it is for whichever peer does implement it to claim.
+
+  A recovered workflow replays from its checkpoints. A queued one is handed back to its queue
+  rather than re-invoked directly. One workflow failing to redispatch is isolated and logged; the
+  pass continues with the rest of the batch.
   """
 
   use GenServer
@@ -54,12 +49,10 @@ defmodule Dbos.Recovery do
   executor and redispatches it. A queued `PENDING` workflow is cleared back to `ENQUEUED`
   instead, so the queue redistributes it, and is not itself redispatched here.
 
-  Every survivor may call this concurrently for the same dead ids: the reassigning `UPDATE`
-  inside `Dbos.SystemDb.reclaim_pending_workflows/3` is the serialization point, so a call that
-  loses the race simply redispatches nothing. `opts[:batch_size]` bounds how many non-queued rows
-  one call claims; the default is unbounded. Callers driven by cluster membership
-  (`Dbos.Cluster.NodeWatcher`, `Dbos.Cluster.OrphanSweep`) pass an explicit
-  `config.reclaim_batch_size` instead.
+  Every survivor may call this concurrently for the same dead ids: the single `UPDATE` that
+  reassigns the batch is the serialization point, so a call that loses the race simply
+  redispatches nothing. `opts[:batch_size]` bounds how many non-queued rows one call claims; the
+  default is unbounded.
 
   Returns every workflow id this call actually acted on (queue-cleared or reclaimed-and-redispatched).
   """

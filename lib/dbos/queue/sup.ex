@@ -1,11 +1,10 @@
+# Registers this engine's declared queues and supervises one Dbos.Queue.Runner per queue, plus one
+# runner for the always-present internal queue (Dbos.Queue.internal_queue_name/0) — the target
+# Dbos.resume/2 and Dbos.fork/3 re-enqueue onto by default. Declared queues are static, from
+# Dbos.Supervisor's :queues option; this does not reconcile against queues added to the queues
+# table by another process at runtime.
 defmodule Dbos.Queue.Sup do
-  @moduledoc """
-  Registers this engine's declared queues and supervises one `Dbos.Queue.Runner` per queue, plus
-  one runner for the always-present internal queue (`Dbos.Queue.internal_queue_name/0`) — the
-  target `Dbos.resume/2` and `Dbos.fork/3` re-enqueue onto by default. Declared queues are
-  static, from `Dbos.Supervisor`'s `:queues` option; this does not reconcile against queues added
-  to the `queues` table by another process at runtime.
-  """
+  @moduledoc false
 
   use Supervisor
 

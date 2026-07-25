@@ -1,17 +1,15 @@
+# Reads and writes against the dbos system database tables. Every function takes a Dbos.Config
+# first, so a call site never has to know which adapter or schema it's running against.
+#
+# Every statement goes through Dbos.DB.Retry, which retries transient connection-level failures on
+# a bounded exponential backoff and never retries a statement issued on a connection already
+# inside a transaction. Two statements opt out because a re-execution would duplicate their
+# effect: the plain INSERT behind insert_debounced_workflow/2, and the offset-appending INSERT
+# behind write_stream/5. fork_workflow/4's transaction opts out for the same reason. A statement
+# that still fails raises Dbos.SystemDbError carrying the statement and the underlying driver
+# error.
 defmodule Dbos.SystemDb do
-  @moduledoc """
-  Reads and writes against the `dbos` system database tables. Every function takes a
-  `Dbos.Config` first, so a call site never has to know which adapter or schema it's running
-  against.
-
-  Every statement goes through `Dbos.DB.Retry`, which retries transient connection-level failures
-  on a bounded exponential backoff and never retries a statement issued on a connection already
-  inside a transaction. Two statements opt out because a re-execution would duplicate their
-  effect: the plain `INSERT` behind `insert_debounced_workflow/2`, and the offset-appending
-  `INSERT` behind `write_stream/5`. `fork_workflow/4`'s transaction opts out for the same reason.
-  A statement that still fails raises `Dbos.SystemDbError` carrying the statement and the
-  underlying driver error.
-  """
+  @moduledoc false
 
   require Logger
 

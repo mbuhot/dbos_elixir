@@ -1,11 +1,10 @@
+# One polling loop per declared queue. Each tick: sweeps DELAYED workflows globally
+# (Dbos.SystemDb.transition_delayed_workflows/1), dequeues from every live partition (or the queue
+# itself, if unpartitioned), and dispatches every claimed workflow into Dbos.WorkflowSup. The
+# polling interval backs off exponentially on lock contention and scales back toward the base
+# interval otherwise, with multiplicative jitter applied every tick.
 defmodule Dbos.Queue.Runner do
-  @moduledoc """
-  One polling loop per declared queue. Each tick: sweeps `DELAYED`
-  workflows globally (`Dbos.SystemDb.transition_delayed_workflows/1`), dequeues from every live
-  partition (or the queue itself, if unpartitioned), and dispatches every claimed workflow into
-  `Dbos.WorkflowSup`. The polling interval backs off exponentially on lock contention and scales
-  back toward the base interval otherwise, with multiplicative jitter applied every tick.
-  """
+  @moduledoc false
 
   use GenServer
 
