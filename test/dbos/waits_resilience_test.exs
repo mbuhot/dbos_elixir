@@ -61,11 +61,12 @@ defmodule Dbos.WaitsResilienceTest do
     engine =
       start_engine([{"sleeper/1", {SampleWorkflows, :sleeper, 1}}], park_exit_threshold_ms: 100)
 
-    {:ok, doomed} = Dbos.start("sleeper/1", [200], engine: engine)
-    {:ok, survivor} = Dbos.start("sleeper/1", [200], engine: engine)
+    {:ok, doomed} = Dbos.start("sleeper/1", [5_000], engine: engine)
+    {:ok, survivor} = Dbos.start("sleeper/1", [5_000], engine: engine)
 
     wait_until(fn -> WorkflowSup.whereis(engine, doomed.workflow_id) == :error end)
     wait_until(fn -> WorkflowSup.whereis(engine, survivor.workflow_id) == :error end)
+    wait_until(fn -> Waits.count(engine) == 2 end)
     assert Waits.count(engine) == 2
 
     FaultyDB.inject_connection_error(
@@ -76,7 +77,7 @@ defmodule Dbos.WaitsResilienceTest do
 
     log =
       capture_log(fn ->
-        assert {:ok, :woke} = Dbos.await(survivor, timeout_ms: 5_000)
+        assert {:ok, :woke} = Dbos.await(survivor, timeout_ms: 20_000)
       end)
 
     assert log =~ "waking parked workflow #{doomed.workflow_id} failed"
@@ -92,11 +93,12 @@ defmodule Dbos.WaitsResilienceTest do
     engine =
       start_engine([{"sleeper/1", {SampleWorkflows, :sleeper, 1}}], park_exit_threshold_ms: 100)
 
-    {:ok, handle_a} = Dbos.start("sleeper/1", [800], engine: engine)
-    {:ok, handle_b} = Dbos.start("sleeper/1", [800], engine: engine)
+    {:ok, handle_a} = Dbos.start("sleeper/1", [5_000], engine: engine)
+    {:ok, handle_b} = Dbos.start("sleeper/1", [5_000], engine: engine)
 
     wait_until(fn -> WorkflowSup.whereis(engine, handle_a.workflow_id) == :error end)
     wait_until(fn -> WorkflowSup.whereis(engine, handle_b.workflow_id) == :error end)
+    wait_until(fn -> Waits.count(engine) == 2 end)
     assert Waits.count(engine) == 2
 
     waits_pid = Process.whereis(Waits.process_name(engine))
@@ -111,7 +113,7 @@ defmodule Dbos.WaitsResilienceTest do
 
     assert Waits.count(engine) == 2
 
-    assert {:ok, :woke} = Dbos.await(handle_a, timeout_ms: 5_000)
-    assert {:ok, :woke} = Dbos.await(handle_b, timeout_ms: 5_000)
+    assert {:ok, :woke} = Dbos.await(handle_a, timeout_ms: 20_000)
+    assert {:ok, :woke} = Dbos.await(handle_b, timeout_ms: 20_000)
   end
 end

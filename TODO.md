@@ -31,9 +31,10 @@ Documented in the production checklist. Deliberate, and it means the port must n
 ## Housekeeping
 
 ### Suite time
-About 44 seconds for 452 tests. Several tests use fixed sleeps where polling would do; the
-scheduler and fork tests dominate. Some sleeps are load-bearing — durable sleep resuming with only
-the remainder, rate limiting over a window — and must stay.
+About 53 seconds for 529 tests, nearly all of it sequential. Several tests use fixed sleeps where
+polling would do; the scheduler and fork tests dominate. Some sleeps are load-bearing — durable
+sleep resuming with only the remainder, rate limiting over a window, a parked wait that must
+outlast its own setup — and must stay.
 
 ### `docs_config.js`
 ex_doc always emits a `<script src="docs_config.js">` tag that only HexDocs supplies. An empty

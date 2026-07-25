@@ -105,7 +105,8 @@ defmodule Dbos.NodeWatcherResilienceTest do
     log =
       capture_log(fn ->
         send(NodeWatcher.process_name(engine), {:nodedown, :departed@nowhere})
-        Process.sleep(50)
+        wait_until(fn -> FaultyDB.injected_count() > 0 end)
+        :sys.get_state(NodeWatcher.process_name(engine))
       end)
 
     assert log =~ "sweep pass triggered by :nodedown"
