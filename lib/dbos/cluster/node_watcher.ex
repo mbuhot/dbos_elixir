@@ -1,21 +1,29 @@
 defmodule Dbos.Cluster.NodeWatcher do
   @moduledoc """
-  Watches for departed nodes via `:net_kernel.monitor_nodes/1` and triggers an immediate
-  `Dbos.Cluster.OrphanSweep` pass on `:nodedown` — a latency optimisation, nothing more. The
-  sweep itself is the sole authority: it still requires the departed node's executors to have an
-  expired lease before reclaiming anything, so a BEAM netsplit (both sides see the other as
-  `:nodedown` while Postgres is reachable to both) degrades to waiting out the lease TTL instead
-  of reclaiming, and possibly double-executing, a node that is merely unreachable, not dead.
+  Watches for departed nodes via `:net_kernel.monitor_nodes/1` and schedules a
+  `Dbos.Cluster.OrphanSweep` pass for the moment the departed executors' leases expire.
 
-  Started only when the owning `Dbos.Supervisor` is given `cluster: [enabled: true]`. Runs the
-  triggered sweep in an unsupervised `Task` so a slow sweep pass never blocks `:nodedown` handling;
-  a failure there is logged and left to the sweep's own recurring timer to retry.
+  A node that dies renewed its lease moments earlier, so at `:nodedown` that lease still has
+  nearly its full term left and a sweep run right then reclaims nothing. Scheduling the pass for
+  the expiry instant brings reclaim forward to roughly the lease TTL, from the TTL plus however
+  much of the sweep interval remains.
+
+  The lease stays the sole authority. A `:nodedown` never shortens a lease: it reports that two
+  BEAM nodes cannot see each other, which says nothing about whether either can still reach
+  Postgres. Letting it expire a peer's lease would let both sides of a netsplit evict each other
+  and run the same workflows at once.
+
+  Started only when the owning `Dbos.Supervisor` is given `cluster: [enabled: true]`.
   """
 
   use GenServer
   require Logger
 
+  alias Dbos.Cluster
   alias Dbos.Cluster.OrphanSweep
+  alias Dbos.SystemDb
+
+  @expiry_margin_ms 250
 
   @doc "Starts the node watcher for the engine named `opts[:name]`."
   def start_link(opts) do
@@ -34,33 +42,66 @@ defmodule Dbos.Cluster.NodeWatcher do
 
   @impl true
   def handle_info({:nodedown, node}, engine_name) do
-    trigger_sweep(engine_name, node)
+    schedule_sweep_at_lease_expiry(engine_name, node)
     {:noreply, engine_name}
   end
 
   def handle_info({:nodeup, _node}, engine_name), do: {:noreply, engine_name}
 
-  defp trigger_sweep(engine_name, node) do
-    Task.start(fn -> safe_sweep(engine_name, node) end)
+  def handle_info({:sweep, node}, engine_name) do
+    run_sweep(engine_name, node)
+    {:noreply, engine_name}
   end
 
-  defp safe_sweep(engine_name, node) do
+  @doc """
+  Milliseconds until the earliest of `executor_ids`' leases expires, `0` when any has none.
+  """
+  def sweep_delay_ms(engine_name, executor_ids) do
+    config = Dbos.config(engine_name)
+    now = System.os_time(:millisecond)
+    expiries = Enum.map(executor_ids, &lease_expiry(config, &1))
+
+    cond do
+      expiries == [] -> 0
+      Enum.any?(expiries, &is_nil/1) -> 0
+      true -> max(Enum.min(expiries) - now + @expiry_margin_ms, 0)
+    end
+  end
+
+  defp schedule_sweep_at_lease_expiry(engine_name, node) do
+    delay_ms =
+      engine_name
+      |> Cluster.executor_ids_for_node(node)
+      |> then(&sweep_delay_ms(engine_name, &1))
+
+    Process.send_after(self(), {:sweep, node}, delay_ms)
+  rescue
+    error -> log_failure(node, error, __STACKTRACE__)
+  end
+
+  defp lease_expiry(config, executor_id) do
+    case SystemDb.get_executor_lease(config, executor_id) do
+      %{lease_expires_epoch_ms: expires_at} -> expires_at
+      nil -> nil
+    end
+  end
+
+  defp run_sweep(engine_name, node) do
     case Process.whereis(OrphanSweep.process_name(engine_name)) do
       nil -> :ok
       _pid -> OrphanSweep.sweep_now(engine_name)
     end
   rescue
-    error ->
-      Logger.error(
-        "dbos: the sweep pass triggered by :nodedown from #{inspect(node)} failed; the " <>
-          "periodic sweep will retry: " <> Exception.format_banner(:error, error, __STACKTRACE__)
-      )
+    error -> log_failure(node, error, __STACKTRACE__)
   catch
-    kind, reason ->
-      Logger.error(
-        "dbos: the sweep pass triggered by :nodedown from #{inspect(node)} failed; the " <>
-          "periodic sweep will retry: " <>
-          Exception.format_banner(kind, reason, __STACKTRACE__)
-      )
+    kind, reason -> log_failure(node, {kind, reason}, __STACKTRACE__)
+  end
+
+  defp log_failure(context, error, stacktrace) do
+    Logger.error(
+      "dbos: the sweep pass triggered by :nodedown from #{inspect(context)} failed; the " <>
+        "periodic sweep will " <>
+        "retry: " <> Exception.format_banner(:error, error, stacktrace)
+    )
   end
 end

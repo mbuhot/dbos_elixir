@@ -198,6 +198,27 @@ defmodule Dbos.Waits.Parked do
   end
 end
 
+defmodule Dbos.TestingModeWaitError do
+  @moduledoc """
+  Raised when a durable wait (`recv_message/2`, `get_event/4`) has nothing pending under an
+  `:inline`/`:manual` testing-mode engine — one with no background process able to wake it
+  later.
+  """
+
+  defexception [:workflow_id, :operation, :topic_or_key]
+
+  @impl true
+  def message(%__MODULE__{
+        workflow_id: workflow_id,
+        operation: operation,
+        topic_or_key: topic_or_key
+      }) do
+    "workflow #{workflow_id}: #{operation} has nothing pending for #{inspect(topic_or_key)} " <>
+      "under a testing-mode engine; send the message or set the event before running the " <>
+      "workflow, or enqueue it and drain with Dbos.Testing under :manual mode"
+  end
+end
+
 defmodule Dbos.MaxStepRetriesExceededError do
   @moduledoc "Raised when a step exhausts its configured retry budget, wrapping the last underlying failure."
 

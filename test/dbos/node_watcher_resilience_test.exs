@@ -117,4 +117,49 @@ defmodule Dbos.NodeWatcherResilienceTest do
 
     wait_until(fn -> status_of(config, "wf-nodedown-sweep-failure").status == :success end)
   end
+
+  test "a departed executor with a live lease defers the sweep until that lease expires" do
+    engine = start_engine([], cluster: [enabled: true])
+    config = Dbos.config(engine)
+    peer = "exec-peer-#{System.unique_integer([:positive])}"
+
+    ttl_ms = 4_000
+    SystemDb.renew_lease(%{config | executor_id: peer}, ttl_ms)
+
+    delay_ms = NodeWatcher.sweep_delay_ms(engine, [peer])
+
+    assert delay_ms > 3_000
+    assert delay_ms <= ttl_ms + 500
+  end
+
+  test "a departed executor whose lease has already expired sweeps immediately" do
+    engine = start_engine([], cluster: [enabled: true])
+    config = Dbos.config(engine)
+    peer = "exec-peer-#{System.unique_integer([:positive])}"
+
+    SystemDb.renew_lease(%{config | executor_id: peer}, -1_000)
+
+    assert NodeWatcher.sweep_delay_ms(engine, [peer]) == 0
+  end
+
+  test "a departed executor that never held a lease sweeps immediately" do
+    engine = start_engine([], cluster: [enabled: true])
+
+    assert NodeWatcher.sweep_delay_ms(engine, ["exec-never-leased"]) == 0
+  end
+
+  test "the earliest lease among several departed executors decides the delay" do
+    engine = start_engine([], cluster: [enabled: true])
+    config = Dbos.config(engine)
+    soon = "exec-soon-#{System.unique_integer([:positive])}"
+    later = "exec-later-#{System.unique_integer([:positive])}"
+
+    SystemDb.renew_lease(%{config | executor_id: soon}, 2_000)
+    SystemDb.renew_lease(%{config | executor_id: later}, 30_000)
+
+    delay_ms = NodeWatcher.sweep_delay_ms(engine, [later, soon])
+
+    assert delay_ms > 1_000
+    assert delay_ms <= 2_500
+  end
 end

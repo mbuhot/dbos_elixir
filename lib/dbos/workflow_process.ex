@@ -20,19 +20,27 @@ defmodule Dbos.WorkflowProcess do
   def start_link(process_args), do: Task.start_link(__MODULE__, :run, [process_args])
 
   @doc "Runs the workflow body and records its outcome. Not meant to be called directly."
-  def run(
-        %{
-          config: config,
-          engine: engine,
-          workflow_id: workflow_id,
-          mfa: {module, function, arity},
-          args: args,
-          replay: replay
-        } = process_args
-      ) do
+  def run(%{engine: engine, workflow_id: workflow_id} = process_args) do
     register_in_process_registry(engine, workflow_id, process_args)
     ack_registration(process_args)
+    finish(process_args, execute(process_args))
+  end
 
+  @doc """
+  Runs the workflow body and records its outcome on the calling process itself, with no
+  supervised child and no process registration — the engine's `:inline`/`:manual` testing modes'
+  synchronous execution path. Not meant to be called directly.
+  """
+  def run_inline(process_args), do: finish(process_args, execute(process_args))
+
+  defp execute(%{
+         config: config,
+         engine: engine,
+         workflow_id: workflow_id,
+         mfa: {module, function, arity},
+         args: args,
+         replay: replay
+       }) do
     metadata = %{
       workflow_id: workflow_id,
       name: workflow_name(engine, module, function, arity),
@@ -40,23 +48,21 @@ defmodule Dbos.WorkflowProcess do
       replay: replay
     }
 
-    outcome =
-      try do
-        value =
-          Runtime.with_context([config: config, workflow_id: workflow_id, replay: replay], fn ->
-            Runtime.arm_deadline(config, workflow_id)
-            Telemetry.span_workflow(metadata, fn -> apply(module, function, args) end)
-          end)
+    value =
+      Runtime.with_context([config: config, workflow_id: workflow_id, replay: replay], fn ->
+        Runtime.arm_deadline(config, workflow_id)
+        Telemetry.span_workflow(metadata, fn -> apply(module, function, args) end)
+      end)
 
-        {:success, value}
-      rescue
-        exception -> classify_failure(:error, exception, __STACKTRACE__)
-      catch
-        kind, value -> classify_failure(kind, value, __STACKTRACE__)
-      end
-
-    record_outcome(config, engine, workflow_id, outcome)
+    {:success, value}
+  rescue
+    exception -> classify_failure(:error, exception, __STACKTRACE__)
+  catch
+    kind, value -> classify_failure(kind, value, __STACKTRACE__)
   end
+
+  defp finish(%{config: config, engine: engine, workflow_id: workflow_id}, outcome),
+    do: record_outcome(config, engine, workflow_id, outcome)
 
   defp classify_failure(:error, %Dbos.WorkflowCancelledError{}, _stacktrace),
     do: :already_cancelled

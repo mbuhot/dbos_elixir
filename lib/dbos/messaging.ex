@@ -56,6 +56,18 @@ defmodule Dbos.Messaging do
     end
   end
 
+  defp do_recv(config, workflow_id, topic, step_id, _sleep_step_id, _timeout_ms)
+       when config.testing in [:inline, :manual] do
+    if SystemDb.notification_pending?(config, workflow_id, topic) do
+      consume_recv(config, workflow_id, topic, step_id, false)
+    else
+      raise Dbos.TestingModeWaitError,
+        workflow_id: workflow_id,
+        operation: "recv_message",
+        topic_or_key: topic
+    end
+  end
+
   defp do_recv(config, workflow_id, topic, step_id, sleep_step_id, timeout_ms) do
     engine = config.name
 
@@ -156,6 +168,9 @@ defmodule Dbos.Messaging do
       {:replay_failure, failure} ->
         Serialization.reraise_failure(failure)
 
+      :none when config.testing in [:inline, :manual] ->
+        get_event_testing(config, workflow_id, target_workflow_id, key, step_id)
+
       :none ->
         engine = config.name
         :ok = Notifications.subscribe_event(engine, target_workflow_id, key)
@@ -193,6 +208,30 @@ defmodule Dbos.Messaging do
         after
           Notifications.unsubscribe_event(engine, target_workflow_id, key)
         end
+    end
+  end
+
+  defp get_event_testing(config, workflow_id, target_workflow_id, key, step_id) do
+    if event_present?(config, target_workflow_id, key) do
+      Runtime.run_step_at(step_id, StepNames.get_event(), [], fn ->
+        case SystemDb.get_event_value(config, target_workflow_id, key) do
+          {:ok, value} -> value
+          :none -> nil
+        end
+      end)
+    else
+      raise Dbos.TestingModeWaitError,
+        workflow_id: workflow_id,
+        operation: "get_event",
+        topic_or_key: key
+    end
+  end
+
+  defp get_event_outside_workflow(config, target_workflow_id, key, _timeout_ms)
+       when config.testing in [:inline, :manual] do
+    case SystemDb.get_event_value(config, target_workflow_id, key) do
+      {:ok, value} -> value
+      :none -> nil
     end
   end
 
@@ -318,13 +357,21 @@ defmodule Dbos.Messaging do
   def sleep(config, ms) do
     function_id = Runtime.next_function_id()
     workflow_id = Runtime.current_workflow_id()
-    engine = config.name
 
     deadline_ms =
       Runtime.run_step_at(function_id, StepNames.sleep(), [], fn ->
         System.os_time(:millisecond) + ms
       end)
 
+    if config.testing in [:inline, :manual] do
+      raise_if_cancelled!(config, workflow_id)
+    else
+      wait_for_deadline(config, workflow_id, deadline_ms)
+    end
+  end
+
+  defp wait_for_deadline(config, workflow_id, deadline_ms) do
+    engine = config.name
     remaining_ms = deadline_ms - System.os_time(:millisecond)
 
     if Waits.should_park?(config, remaining_ms, Runtime.current_step_id()) do

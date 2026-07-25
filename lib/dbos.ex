@@ -67,6 +67,11 @@ defmodule Dbos do
   Called from inside a workflow, this consumes a step id and checkpoints a `"DBOS.enqueue"` step,
   so replaying the parent does not enqueue a second copy. Outside a workflow, no id is allocated
   and nothing is checkpointed.
+
+  Under an `:inline` testing-mode engine (`Dbos.Supervisor`'s `:testing` option), the enqueued
+  workflow is drained and run synchronously, in the caller, before this returns — the handle
+  refers to an already-finished workflow. Under `:manual`, the row is only inserted; nothing
+  runs until `Dbos.Testing.drain_queue/2` or `Dbos.Testing.drain_all/1` is called.
   """
   def enqueue(name_or_capture, args, opts \\ []) do
     if Keyword.has_key?(opts, :deduplication_id) and Keyword.has_key?(opts, :partition_key) do
@@ -96,6 +101,8 @@ defmodule Dbos do
         {:ok, workflow_id} = SystemDb.insert_enqueued_workflow(config, params)
         workflow_id
       end)
+
+    if config.testing == :inline, do: Dbos.Testing.drain_queue(queue_name, engine: engine)
 
     {:ok, %WorkflowHandle{engine: engine, workflow_id: workflow_id}}
   end

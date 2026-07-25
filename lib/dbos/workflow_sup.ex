@@ -21,20 +21,34 @@ defmodule Dbos.WorkflowSup do
   Starts a workflow process running `mfa` with `args` under `workflow_id`. `opts`: `:replay`
   (default `false`), `:queue_name`, `:partition_key` (both default `nil`, used only for the
   live-count registry the queue dequeue needs).
+
+  Under an `:inline`/`:manual` testing-mode engine (`Dbos.Config.testing`), runs synchronously on
+  the calling process instead — no supervised child, no separate process ever touches the
+  connection, which is what makes these modes compatible with `Ecto.Adapters.SQL.Sandbox`.
   """
   def start_workflow(engine_name, workflow_id, mfa, args, opts \\ []) do
+    config = Dbos.config(engine_name)
+
     process_args = %{
-      config: Dbos.config(engine_name),
+      config: config,
       engine: engine_name,
       workflow_id: workflow_id,
       mfa: mfa,
       args: args,
       replay: Keyword.get(opts, :replay, false),
       queue_name: Keyword.get(opts, :queue_name),
-      partition_key: Keyword.get(opts, :partition_key),
-      caller: self()
+      partition_key: Keyword.get(opts, :partition_key)
     }
 
+    if testing_mode?(config) do
+      Dbos.WorkflowProcess.run_inline(process_args)
+      {:ok, self()}
+    else
+      start_supervised_workflow(engine_name, Map.put(process_args, :caller, self()))
+    end
+  end
+
+  defp start_supervised_workflow(engine_name, process_args) do
     case DynamicSupervisor.start_child(
            process_name(engine_name),
            {Dbos.WorkflowProcess, process_args}
@@ -47,6 +61,8 @@ defmodule Dbos.WorkflowSup do
         other
     end
   end
+
+  defp testing_mode?(%Dbos.Config{testing: mode}), do: mode in [:inline, :manual]
 
   defp await_registration(pid) do
     receive do

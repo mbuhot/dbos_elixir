@@ -11,7 +11,8 @@ defmodule Dbos.NotificationsTest do
         name: name,
         db: {Dbos.DB.Postgrex, Dbos.TestConn},
         executor_id: "exec-#{System.unique_integer([:positive])}",
-        migrations: :skip
+        migrations: :skip,
+        workflows: []
       ] ++ extra_opts
 
     start_supervised!({Dbos.Supervisor, opts}, id: name)

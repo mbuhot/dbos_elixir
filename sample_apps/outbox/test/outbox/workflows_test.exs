@@ -9,18 +9,18 @@ defmodule Outbox.WorkflowsTest do
   alias Outbox.Repo
 
   setup do
-    Repo.delete_all(OutboxEvent)
-    Repo.delete_all(Order)
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
 
     start_supervised!(
       {Dbos.Supervisor,
        db: {Dbos.DB.Ecto, Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Outbox.Workflows],
-       migrations: :create_if_absent}
+       migrations: :skip,
+       testing: :inline}
     )
 
-    Dbos.Recovery.await_boot_recovery(Dbos)
     ExternalSystem.reset!()
 
     :ok

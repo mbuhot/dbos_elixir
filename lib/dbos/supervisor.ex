@@ -15,10 +15,31 @@ defmodule Dbos.Supervisor do
 
   @doc """
   Starts the engine. `opts`: `:name` (default `Dbos`), `:db` (`{adapter_module, conn}`),
-  `:executor_id`, `:application_version`, `:schema` (default `"dbos"`), `:workflows` (a list of
-  `{name, {module, function, arity}}`), `:queues` (a list of `Dbos.Queue`, default `[]`),
-  `:migrations` (`:verify` (default), `:create_if_absent`, or `:skip`), `:max_recovery_attempts`
-  (default `3`), `:cluster` (see below).
+  `:executor_id`, `:application_version`, `:schema` (default `"dbos"`), `:otp_app` (discovers
+  workflow modules automatically — see below), `:workflows` (a list of modules or explicit
+  `{name, {module, function, arity}}` entries, additive with `:otp_app`), `:queues` (a list of
+  `Dbos.Queue`, default `[]`), `:migrations` (`:verify` (default), `:create_if_absent`, or
+  `:skip`), `:max_recovery_attempts` (default `3`), `:testing` (see below), `:cluster` (see
+  below).
+
+  `:otp_app` — resolves to every module the named OTP application has compiled
+  (`:application.get_key/2`), keeping the ones that export `__dbos_workflows__/0` (every module
+  with at least one `defworkflow`). This is the primary way to declare workflows: a module added
+  to the app is discovered automatically, so it can never sit un-registered and stuck `PENDING`
+  because a `workflows:` list wasn't updated. `:workflows` is additive on top of discovery —
+  duplicates between the two are harmless — and is the way to bring in a workflow module that
+  lives in a dependency rather than this OTP application. At least one of `:otp_app` or
+  `:workflows` is required; an engine given neither raises, since an engine with no workflows is
+  always a mistake.
+
+  `:testing` (default `nil`, meaning off) — `:inline` runs `Dbos.start/3` and `Dbos.enqueue/3`
+  synchronously, in the calling process, and returns a handle to an already-finished workflow;
+  `:manual` runs `Dbos.start/3` the same way but leaves an `Dbos.enqueue/3`'d row untouched until
+  `Dbos.Testing.drain_queue/2` or `Dbos.Testing.drain_all/1` claims it. Either mode starts none
+  of `Dbos.Notifications`, `Dbos.Waits`, `Dbos.Lease`, the queue runners, `Dbos.Scheduler`, the
+  boot recovery scan, `Dbos.Cluster*`, or `Dbos.AdminServer` — the point is removing every
+  process that could touch the database outside the caller's own connection, which is what makes
+  these modes compatible with `Ecto.Adapters.SQL.Sandbox`. See `guides/tutorials/testing.md`.
 
   `:notifications` (default `:listen`) — `:listen` starts a dedicated `LISTEN` connection
   (`Dbos.Notifications`) for `recv`/`getEvent`/streams to wake on, falling back to `:poll` and
@@ -61,13 +82,15 @@ defmodule Dbos.Supervisor do
   def init(opts) do
     name = Keyword.get(opts, :name, Dbos)
     {db_module, conn} = Keyword.fetch!(opts, :db)
-    workflow_entries = Keyword.get(opts, :workflows, [])
+    workflow_entries = resolve_workflow_entries!(opts)
     workflows = Enum.flat_map(workflow_entries, &normalize_workflow_entry/1)
     schedules = Enum.flat_map(workflow_entries, &collect_schedules/1)
 
     cluster_opts = Keyword.get(opts, :cluster, [])
     orphan_sweep_opts = Keyword.get(opts, :orphan_sweep, [])
     lease_opts = Keyword.get(opts, :lease, [])
+    testing = fetch_testing_mode!(opts)
+    queues = [internal_queue() | Keyword.get(opts, :queues, [])]
 
     config = %Config{
       name: name,
@@ -88,37 +111,94 @@ defmodule Dbos.Supervisor do
       notifications_conn_opts: Keyword.get(opts, :notifications_conn_opts),
       scheduler_poll_interval_ms: Keyword.get(opts, :scheduler_poll_interval_ms, 30_000),
       park_exit_threshold_ms: Keyword.get(opts, :park_exit_threshold_ms, 60_000),
-      park_replay_ceiling: Keyword.get(opts, :park_replay_ceiling, 500)
+      park_replay_ceiling: Keyword.get(opts, :park_replay_ceiling, 500),
+      testing: testing,
+      queues: queues
     }
 
     Dbos.put_config(config)
     run_migrations(Keyword.get(opts, :migrations, :verify), config)
     SystemDb.create_application_version(config, config.application_version)
 
-    queues = Keyword.get(opts, :queues, [])
-
     children =
-      [
-        {Dbos.Registry, name: name, workflows: workflows},
-        {Registry, keys: :unique, name: WorkflowSup.process_registry_name(name)},
-        {Registry, keys: :unique, name: Dbos.Notifications.recv_registry_name(name)},
-        {Registry, keys: :duplicate, name: Dbos.Notifications.wait_registry_name(name)},
-        {Dbos.Notifications, name: name},
-        {Dbos.Waits.Table, name: name},
-        {Dbos.Waits, name: name},
-        {WorkflowSup, name: name},
-        {Dbos.Lease, name: name},
-        {Dbos.Recovery, name: name},
-        {Dbos.Queue.Sup, name: name, queues: queues},
-        {Dbos.Scheduler,
-         name: name, schedules: schedules, poll_interval_ms: config.scheduler_poll_interval_ms}
-      ] ++
-        cluster_children(config) ++
-        orphan_sweep_children(config) ++
-        admin_server_children(name, Keyword.get(opts, :admin_server, []))
+      if testing in [:inline, :manual] do
+        Enum.each(queues, &SystemDb.register_queue(config, &1))
+        testing_children(name, workflows)
+      else
+        full_children(name, workflows, schedules, config, Keyword.get(opts, :queues, []), opts)
+      end
 
     Supervisor.init(children, strategy: :one_for_one)
   end
+
+  defp testing_children(name, workflows) do
+    [
+      {Dbos.Registry, name: name, workflows: workflows},
+      {Registry, keys: :unique, name: WorkflowSup.process_registry_name(name)}
+    ]
+  end
+
+  defp full_children(name, workflows, schedules, config, declared_queues, opts) do
+    [
+      {Dbos.Registry, name: name, workflows: workflows},
+      {Registry, keys: :unique, name: WorkflowSup.process_registry_name(name)},
+      {Registry, keys: :unique, name: Dbos.Notifications.recv_registry_name(name)},
+      {Registry, keys: :duplicate, name: Dbos.Notifications.wait_registry_name(name)},
+      {Dbos.Notifications, name: name},
+      {Dbos.Waits.Table, name: name},
+      {Dbos.Waits, name: name},
+      {WorkflowSup, name: name},
+      {Dbos.Lease, name: name},
+      {Dbos.Recovery, name: name},
+      {Dbos.Queue.Sup, name: name, queues: declared_queues},
+      {Dbos.Scheduler,
+       name: name, schedules: schedules, poll_interval_ms: config.scheduler_poll_interval_ms}
+    ] ++
+      cluster_children(config) ++
+      orphan_sweep_children(config) ++
+      admin_server_children(name, Keyword.get(opts, :admin_server, []))
+  end
+
+  defp internal_queue, do: %Dbos.Queue{name: Dbos.Queue.internal_queue_name()}
+
+  defp fetch_testing_mode!(opts) do
+    case Keyword.get(opts, :testing) do
+      mode when mode in [nil, :inline, :manual] ->
+        mode
+
+      other ->
+        raise ArgumentError,
+              "Dbos.Supervisor's :testing option must be nil, :inline, or :manual, got: " <>
+                inspect(other)
+    end
+  end
+
+  defp resolve_workflow_entries!(opts) do
+    otp_app = Keyword.get(opts, :otp_app)
+
+    unless otp_app || Keyword.has_key?(opts, :workflows) do
+      raise ArgumentError,
+            "Dbos.Supervisor requires :otp_app, :workflows, or both — pass :otp_app to " <>
+              "discover every workflow module in that OTP application automatically, or " <>
+              ":workflows to list modules (or explicit {name, {module, function, arity}} " <>
+              "entries) by hand. An engine given neither has no workflows to run, which is " <>
+              "always a mistake."
+    end
+
+    Enum.uniq(discover_workflow_modules(otp_app) ++ Keyword.get(opts, :workflows, []))
+  end
+
+  defp discover_workflow_modules(nil), do: []
+
+  defp discover_workflow_modules(otp_app) do
+    case :application.get_key(otp_app, :modules) do
+      {:ok, modules} -> Enum.filter(modules, &workflow_module?/1)
+      :undefined -> []
+    end
+  end
+
+  defp workflow_module?(module),
+    do: Code.ensure_loaded?(module) and function_exported?(module, :__dbos_workflows__, 0)
 
   defp admin_server_children(_name, opts) when opts in [nil, false], do: []
 

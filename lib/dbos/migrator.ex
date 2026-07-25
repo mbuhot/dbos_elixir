@@ -10,6 +10,7 @@ defmodule Dbos.Migrator do
 
   @expected_version 42
   @expected_extension_version 1
+  @extension_marker "-- Extension tables:"
 
   @doc "The base schema's `dbos_migrations.version` this engine targets."
   def expected_version, do: @expected_version
@@ -28,16 +29,42 @@ defmodule Dbos.Migrator do
     :ok
   end
 
-  @doc "Applies `priv/schema/dbos_schema.sql` verbatim, statement by statement. For dev and tests."
+  @doc """
+  Applies whichever parts of `priv/schema/dbos_schema.sql` are absent. For dev and tests.
+
+  The base schema and the extension tables are applied independently, each guarded by its own
+  version marker, so a database holding only the base schema gains the extension tables alone.
+  """
   def create!(%Config{} = config) do
-    schema_path()
-    |> File.read!()
-    |> split_statements()
-    |> Enum.each(fn statement ->
-      {:ok, _result} = config.db.query(config.conn, statement, [])
-    end)
+    {base_sql, extension_sql} = schema_parts()
+
+    apply_unless_present(config, "dbos_migrations", base_sql)
+    apply_unless_present(config, "extension_migrations", extension_sql)
 
     :ok
+  end
+
+  defp apply_unless_present(config, marker_table, sql) do
+    case current_version(config, marker_table) do
+      {:ok, _version} ->
+        :ok
+
+      {:error, :not_found} ->
+        sql
+        |> split_statements()
+        |> Enum.each(fn statement ->
+          {:ok, _result} = config.db.query(config.conn, statement, [])
+        end)
+    end
+  end
+
+  defp schema_parts do
+    sql = File.read!(schema_path())
+
+    case String.split(sql, @extension_marker, parts: 2) do
+      [base, extension] -> {base, @extension_marker <> extension}
+      [base] -> {base, ""}
+    end
   end
 
   defp verify_table_version!(config, table, expected_version) do

@@ -23,7 +23,9 @@ defmodule Dbos.Config do
             notifications_conn_opts: nil,
             scheduler_poll_interval_ms: 30_000,
             park_exit_threshold_ms: 60_000,
-            park_replay_ceiling: 500
+            park_replay_ceiling: 500,
+            testing: nil,
+            queues: []
 
   @type t :: %__MODULE__{
           name: atom,
@@ -44,6 +46,8 @@ defmodule Dbos.Config do
           notifications_conn_opts: keyword | nil,
           scheduler_poll_interval_ms: pos_integer,
           park_exit_threshold_ms: pos_integer | :infinity,
-          park_replay_ceiling: pos_integer
+          park_replay_ceiling: pos_integer,
+          testing: nil | :inline | :manual,
+          queues: [Dbos.Queue.t()]
         }
 end

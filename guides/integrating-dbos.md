@@ -16,7 +16,7 @@ def start(_type, _args) do
     {Dbos.Supervisor,
      name: Dbos,
      db: {Dbos.DB.Ecto, MyApp.Repo},
-     workflows: [MyApp.Checkout, MyApp.Onboarding],
+     otp_app: :my_app,
      migrations: :verify}
   ]
 
@@ -24,9 +24,29 @@ def start(_type, _args) do
 end
 ```
 
-`workflows:` takes either module names — every `defworkflow` in each module is registered
-automatically via its generated `__dbos_workflows__/0` — or explicit `{name, {module,
-function, arity}}` tuples if you'd rather list them by hand.
+`otp_app: :my_app` discovers every workflow module compiled into that OTP application —
+anything exporting `__dbos_workflows__/0`, which every module with a `defworkflow` in it does
+automatically. A module added to the app is registered the moment it's compiled in; there is no
+list to remember to update, and no way for a workflow to sit silently un-registered because it
+was left off one.
+
+`workflows:` is still there, additive on top of discovery, for the one case discovery can't
+reach — a workflow module that lives in a dependency rather than in `:my_app` itself:
+
+```elixir
+{Dbos.Supervisor,
+ name: Dbos,
+ db: {Dbos.DB.Ecto, MyApp.Repo},
+ otp_app: :my_app,
+ workflows: [SomeDependency.Workflows],
+ migrations: :verify}
+```
+
+It takes either module names — every `defworkflow` in each is registered the same way discovery
+registers one, via `__dbos_workflows__/0` — or explicit `{name, {module, function, arity}}`
+tuples if you'd rather list them by hand. At least one of `otp_app:` or `workflows:` is
+required; an engine started with neither raises, since an engine with no workflows to run is
+always a mistake.
 
 ## Sharing the repo and pool — there is no second pool
 
@@ -120,36 +140,14 @@ Both are read once, at `Dbos.Supervisor` boot, into the resolved `Dbos.Config` s
 
 ## What to do in tests
 
-Point a test repo or pool at a real scratch Postgres database with the schema already
-applied once, and reuse it across the run — don't apply migrations per test.
+Point a test repo or pool at a real scratch Postgres database with the schema already applied
+once, and reuse it across the run — don't apply migrations per test. `test/test_helper.exs` in
+this codebase does exactly that: drops and recreates a scratch database, applies
+`priv/schema/dbos_schema.sql` once, and starts a plain `Postgrex` connection alongside an
+`Ecto.Repo` so both adapters can be exercised. Model your own `test_helper.exs` the same way
+against your app's test database.
 
-`test/test_helper.exs` in this codebase does exactly that: drops and recreates a scratch
-database, applies `priv/schema/dbos_schema.sql` once, and starts a plain `Postgrex`
-connection alongside an `Ecto.Repo` so both adapters can be exercised. Model your own
-`test_helper.exs` the same way against your app's test database.
-
-Per test, start an engine with a **fresh `:name`** so tests don't collide with each other's
-workflows or registries, `migrations: :skip` (the schema's already there), and an explicit
-`:executor_id` so recovery scoping is deterministic:
-
-```elixir
-name = Module.concat(MyTest, :"Engine#{System.unique_integer([:positive])}")
-
-start_supervised!(
-  {Dbos.Supervisor,
-   name: name,
-   db: {Dbos.DB.Ecto, MyApp.Repo},
-   executor_id: "test-#{System.unique_integer([:positive])}",
-   workflows: [MyApp.Checkout],
-   migrations: :skip},
-  id: name
-)
-
-Dbos.Recovery.await_boot_recovery(name)
-```
-
-`await_boot_recovery/1` blocks until the at-boot recovery pass (kicked off asynchronously via
-`handle_continue`, so `start_link` itself doesn't block) has actually finished — without it, a
-test that starts a workflow right after `start_supervised!` can race that pass. Truncate the
-`dbos` tables between tests (`workflow_status`, `operation_outputs`, and the rest — see
-`test/support/case.ex`); the schema itself stays in place across the run.
+Set `testing: :inline` (or `:manual`) on the test engine and it runs against
+`Ecto.Adapters.SQL.Sandbox` with no special setup — see `guides/tutorials/testing.md` for the
+full walkthrough: the sandbox setup, a workflow test, a queue test, and a crash-and-recover
+test.
