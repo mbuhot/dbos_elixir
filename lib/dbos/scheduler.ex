@@ -1,24 +1,22 @@
 defmodule Dbos.Scheduler do
   @moduledoc """
-  Fires cron-scheduled workflows, backed by `workflow_schedules` (`notes/schema.md`). Registers
-  this engine's own `schedule:`-declared workflows into the table at boot (idempotent), then
-  every `poll_interval_ms` reconciles the full `ACTIVE` set read fresh from the database — so
-  several engines sharing one database, or a schedule declared by only one of them, all converge
-  on the same set.
+  Fires cron-scheduled workflows, backed by `workflow_schedules`. Registers this engine's own
+  `schedule:`-declared workflows into the table at boot (idempotent), then every
+  `poll_interval_ms` reconciles the full `ACTIVE` set read fresh from the database — so several
+  engines sharing one database, or a schedule declared by only one of them, all converge on the
+  same set.
 
   Each due occurrence enqueues under a deterministic id (`"sched-<schedule_name>-<scheduled_time_ms>"`),
   so two engines independently computing the same occurrence collapse onto one `workflow_status`
   row; the queue's `FOR UPDATE SKIP LOCKED` dequeue is what actually guarantees the workflow body
   runs exactly once, not the reconcile timing. The fired workflow receives the scheduled time
-  (epoch ms) and the schedule's static context as its two arguments, mirroring upstream's
-  `ScheduledWorkflowInput{ScheduledTime, Context}`.
+  (epoch ms) and the schedule's static context as its two arguments.
 
   Catch-up: a schedule with `automatic_backfill: false` (the default) starts counting from the
   moment *this process* first sees it — any ticks missed while no engine was running are silently
-  skipped, matching upstream (a fresh `robfig/cron` entry only fires from registration time
-  forward). `automatic_backfill: true` instead seeds its starting floor from the schedule's
+  skipped. `automatic_backfill: true` instead seeds its starting floor from the schedule's
   persisted `last_fired_at`, so every tick missed since the last time any engine ran is enqueued
-  on the next reconcile — matching upstream's `maybeAutomaticBackfill`.
+  on the next reconcile.
 
   `deactivate/1` (the `/deactivate` admin route) stops firing new ticks; already-enqueued work is
   unaffected.

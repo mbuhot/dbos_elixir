@@ -1,7 +1,7 @@
 defmodule Dbos.Queue do
   @moduledoc """
-  A queue's declared configuration, per `notes/queues.md` §1. Queues are declared on
-  `Dbos.Supervisor`'s `:queues` option and persisted to the `queues` table on registration.
+  A queue's declared configuration. Queues are declared on `Dbos.Supervisor`'s `:queues` option
+  and persisted to the `queues` table on registration.
   """
 
   alias Dbos.InvalidQueueOptionError

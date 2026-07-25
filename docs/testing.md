@@ -37,7 +37,7 @@ alias adds `--include integration`.
 | 1 | `hard_node_kill_test.exs` | node1 dies (`SIGKILL`) mid-workflow; node2 recovers it; every step body ran exactly once across both nodes |
 | 2 | `recovery_ownership_test.exs` | node2 recovers only the workflow reassigned to it after node1 dies; a peer row it was never handed stays untouched |
 | 3 | `concurrent_start_test.exs` | the same workflow id started from both nodes at once still leaves one status row and one checkpointed step |
-| 4 | `queue_competition_test.exs` | placeholder — Phase 3's queue dequeue scenario, written up and `@tag :skip`, no dequeue exists yet to test |
+| 4 | `queue_competition_test.exs` | 50 workflows enqueued onto one queue, two nodes racing to dequeue and run them; every workflow executes exactly once with no duplicate claims |
 
 ### How execution is counted
 

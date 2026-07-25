@@ -1,11 +1,8 @@
 defmodule Dbos.Cron do
   @moduledoc """
   Parses and evaluates the 6-field cron expression `Dbos.Scheduler` uses: `second minute hour
-  day-of-month month day-of-week`. Upstream (`scheduler.go`, `models.NewScheduleCronParser`)
-  configures `robfig/cron` with `Second | Minute | Hour | Dom | Month | Dow | Descriptor` — six
-  numeric fields plus `@`-prefixed descriptors (`@daily`, `@every 1h`, ...). This port implements
-  the six numeric fields only (no descriptors, no month/weekday names) — a deliberate scope cut
-  from the reference's full grammar, noted in `DECISIONS.md`.
+  day-of-month month day-of-week`. Supports the six numeric fields; `@`-prefixed descriptors
+  (`@daily`, `@every 1h`, ...) and month/weekday names are not supported.
 
   Each field accepts `*`, a single integer, a comma-separated list, a range `a-b`, and a stepped
   range/wildcard `a-b/n` or `*/n`. Field ranges: second/minute `0-59`, hour `0-23`, day-of-month
@@ -65,7 +62,7 @@ defmodule Dbos.Cron do
     search(cron, %{start | microsecond: {0, 0}}, start_epoch_ms(from_epoch_ms))
   end
 
-  @doc "Every fire time in `(from_epoch_ms, to_epoch_ms]`, ascending, per `notes/` automatic backfill."
+  @doc "Every fire time in `(from_epoch_ms, to_epoch_ms]`, ascending."
   def due_between(%__MODULE__{} = cron, from_epoch_ms, to_epoch_ms) do
     collect(cron, from_epoch_ms, to_epoch_ms, [])
   end

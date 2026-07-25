@@ -78,7 +78,7 @@ defmodule Dbos.NotInWorkflowError do
 end
 
 defmodule Dbos.InvalidQueueOptionError do
-  @moduledoc "Raised when a `Dbos.Queue` configuration is invalid, per `notes/queues.md` §1."
+  @moduledoc "Raised when a `Dbos.Queue` configuration is invalid."
 
   defexception [:reason]
 
@@ -87,10 +87,7 @@ defmodule Dbos.InvalidQueueOptionError do
 end
 
 defmodule Dbos.QueueDeduplicatedError do
-  @moduledoc """
-  Raised when an enqueue's deduplication id already has a live holder on the same queue, per
-  `notes/queues.md` §10.
-  """
+  @moduledoc "Raised when an enqueue's deduplication id already has a live holder on the same queue."
 
   defexception [:workflow_id, :queue_name, :deduplication_id]
 
@@ -108,7 +105,7 @@ end
 defmodule Dbos.ConcurrentCheckpointConflictError do
   @moduledoc """
   Raised when a step checkpoint write races another write for the same `(workflow_uuid,
-  function_id)` and neither is a byte-for-byte match, per `notes/engine-core.md` §3.
+  function_id)` and neither is a byte-for-byte match.
   """
 
   defexception [:workflow_id, :function_id, :reason]
@@ -120,10 +117,7 @@ defmodule Dbos.ConcurrentCheckpointConflictError do
 end
 
 defmodule Dbos.RecvConflictError do
-  @moduledoc """
-  Raised when a `recv` registers as the receiver for a `(workflow_id, topic)` pair already held
-  by another in-progress `recv`, per `notes/notifications.md` §2 (`subscribeExclusive`).
-  """
+  @moduledoc "Raised when a `recv` registers as the receiver for a `(workflow_id, topic)` pair already held by another in-progress `recv`."
 
   defexception [:workflow_id, :topic]
 
@@ -134,10 +128,7 @@ defmodule Dbos.RecvConflictError do
 end
 
 defmodule Dbos.RecvTimeoutError do
-  @moduledoc """
-  Raised when `recv`'s durable timeout elapses with no message consumed, per
-  `notes/notifications.md` §4.
-  """
+  @moduledoc "Raised when `recv`'s durable timeout elapses with no message consumed."
 
   defexception [:workflow_id, :topic]
 
@@ -159,11 +150,7 @@ defmodule Dbos.StreamClosedError do
 end
 
 defmodule Dbos.NestedTransactionError do
-  @moduledoc """
-  Raised when `Dbos.transaction/3` is called from inside another `Dbos.transaction/3`'s body, per
-  `notes/datasource.md` §5 (rejected unconditionally, matching upstream's `RunAsTransaction`
-  nesting guard).
-  """
+  @moduledoc "Raised when `Dbos.transaction/3` is called from inside another `Dbos.transaction/3`'s body."
 
   defexception [:workflow_id]
 
@@ -176,10 +163,7 @@ end
 defmodule Dbos.StepInTransactionError do
   @moduledoc """
   Raised when `Dbos.Runtime.run_step/3` (or any durable operation built on it — `send_message`,
-  `recv_message`, `set_event`, etc.) is called from inside a `Dbos.transaction/3` body. Upstream
-  prevents this at compile time (a transaction's function type does not expose step-capable
-  context methods); this port has no equivalent type-level guard, so it is added here explicitly,
-  per `notes/datasource.md` §5/§7 (a deliberate addition, not upstream behavior).
+  `recv_message`, `set_event`, etc.) is called from inside a `Dbos.transaction/3` body.
   """
 
   defexception [:workflow_id, :function_name]
@@ -200,10 +184,7 @@ defmodule Dbos.NotSupportedError do
 end
 
 defmodule Dbos.MaxStepRetriesExceededError do
-  @moduledoc """
-  Raised when a step exhausts its configured retry budget. Mirrors upstream's
-  `MaxStepRetriesExceededError`, wrapping the last underlying failure.
-  """
+  @moduledoc "Raised when a step exhausts its configured retry budget, wrapping the last underlying failure."
 
   defexception [:workflow_id, :function_name, :max_retries, :cause]
 

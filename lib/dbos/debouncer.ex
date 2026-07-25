@@ -1,15 +1,10 @@
 defmodule Dbos.Debouncer do
   @moduledoc """
-  Collapses rapid, repeated enqueues of the same logical unit of work into one delayed workflow,
-  per `notes/queues.md` §8. Each call either starts a fresh `DELAYED` workflow keyed by
-  `opts[:debounce_key]`, or "bounces" an existing one still waiting out its delay: replacing its
-  inputs and pushing `delay_until_epoch_ms` forward by `opts[:period_ms]`, capped at an optional
-  absolute `opts[:deadline_ms]` from the first call.
-
-  The reference's `debouncer.go` classifies a failed bounce (`bounceReturn`/`bounceEnqueue`/
-  `bounceRaise`/`bounceRetry`) using internals this port's `notes/` does not fully transcribe; the
-  three outcomes below are inferred from the documented columns and SQL, not copied verbatim —
-  flagged in `DECISIONS.md`.
+  Collapses rapid, repeated enqueues of the same logical unit of work into one delayed workflow.
+  Each call either starts a fresh `DELAYED` workflow keyed by `opts[:debounce_key]`, or "bounces"
+  an existing one still waiting out its delay: replacing its inputs and pushing
+  `delay_until_epoch_ms` forward by `opts[:period_ms]`, capped at an optional absolute
+  `opts[:deadline_ms]` from the first call.
   """
 
   alias Dbos.Config

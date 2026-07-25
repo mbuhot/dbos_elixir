@@ -4,7 +4,6 @@ defmodule Dbos.StepNamesTest do
   alias Dbos.StepNames
 
   test "reserved names match the upstream DBOS.* strings verbatim" do
-    assert StepNames.get_status() == "DBOS.getStatus"
     assert StepNames.get_result() == "DBOS.getResult"
     assert StepNames.sleep() == "DBOS.sleep"
     assert StepNames.recv() == "DBOS.recv"

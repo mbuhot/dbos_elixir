@@ -1,18 +1,15 @@
 defmodule Dbos.Macros do
   @moduledoc """
-  `use Dbos` brings in `defstep/2`, `deftransaction/2`, and `defworkflow/2`, per `DECISIONS.md`.
+  `use Dbos` brings in `defstep/2`, `deftransaction/2`, and `defworkflow/2`.
   `defstep`/`deftransaction` wrap a plain function body in `Dbos.Runtime.run_step/3` /
   `Dbos.transaction/3`; `defworkflow` additionally runs `Dbos.Determinism.check!/2` over the body
-  at compile time and generates a durable dispatcher (`DECISIONS.md`'s "bare workflow call").
+  at compile time and generates a durable dispatcher.
 
-  `defworkflow` calls are captured (not expanded immediately) and processed once, in
-  `@before_compile`, alongside every other `defworkflow` in the module — this is deliberate, not
-  incidental: reading a plain `Module.put_attribute/3` write back out from a *later*, separately
-  macro-expanded top-level form is unreliable in this compiler (each top-level form's compile-time
-  side effects are only guaranteed visible once the whole module's forms have all been processed),
-  so anything that must see "every `defworkflow` in this module" — the determinism checker's
-  repo/warn config, and duplicate-name-or-arity detection — has to run after every form has been
-  captured via a real `@attr` push, not read speculatively mid-module.
+  `defworkflow` calls are captured and processed once, in `@before_compile`, alongside every
+  other `defworkflow` in the module: anything that must see every `defworkflow` in the module —
+  the determinism checker's repo/warn config, and duplicate-name-or-arity detection — runs after
+  every form has pushed onto a real `@attr`, once compile-time side effects across all of the
+  module's top-level forms are guaranteed visible.
 
   `use Dbos` options: `:repo` — the module direct calls to which are banned inside a workflow
   body (see `docs/determinism.md`); `:warn_cross_module_calls` (default `true`) — set `false` to
@@ -76,10 +73,9 @@ defmodule Dbos.Macros do
   end
 
   @doc """
-  Wraps `call`'s body in `Dbos.Runtime.run_step/3`. The step name defaults to `"name/arity"`
-  (module excluded, per `DECISIONS.md`); override with `name:`. Any other option
-  (`:max_retries`, `:base_interval_ms`, `:backoff_factor`, `:max_interval_ms`) is forwarded to
-  `Dbos.RetryPolicy`.
+  Wraps `call`'s body in `Dbos.Runtime.run_step/3`. The step name defaults to `"name/arity"`;
+  override with `name:`. Any other option (`:max_retries`, `:base_interval_ms`,
+  `:backoff_factor`, `:max_interval_ms`) is forwarded to `Dbos.RetryPolicy`.
   """
   defmacro defstep(call, do_block), do: build_step(call, do_block)
   defmacro defstep(call, opts, do_block), do: build_step(call, Keyword.merge(opts, do_block))
@@ -96,17 +92,16 @@ defmodule Dbos.Macros do
   @doc """
   Defines a durable workflow. `name:` is required (recovery dispatches on it). Generates two
   functions: the workflow body (run by the engine, under a generated internal name) and a public
-  dispatcher under `call`'s own name/arity — the "bare workflow call" from `DECISIONS.md`: inside
-  a workflow it starts and awaits a child workflow; outside one it starts and awaits a root
-  workflow; with the engine not started, `Dbos.start/3` raises `Dbos.NotStartedError`.
+  dispatcher under `call`'s own name/arity: inside a workflow it starts and awaits a child
+  workflow; outside one it starts and awaits a root workflow; with the engine not started,
+  `Dbos.start/3` raises `Dbos.NotStartedError`.
 
   Runs `Dbos.Determinism.check!/2` over the body at compile time. Does not support a `when` guard
   on the head (a workflow's name must map to exactly one deterministic body — see
   `docs/determinism.md`); does support default arguments.
 
-  `schedule:` declares this workflow as cron-scheduled (`Dbos.Scheduler`, `notes/schema.md`'s
-  `workflow_schedules`), consistent with `defstep`/`deftransaction`'s existing `name:`-as-option
-  style rather than a separate `defscheduled` macro. Either a bare cron string (`"0 * * * * *"`,
+  `schedule:` declares this workflow as cron-scheduled (`Dbos.Scheduler`, `workflow_schedules`).
+  Either a bare cron string (`"0 * * * * *"`,
   six fields: second minute hour day-of-month month day-of-week — see `Dbos.Cron`), or a keyword
   list: `cron:` (required), `name:` (the schedule's own name, default this workflow's name),
   `automatic_backfill:` (default `false`), `timezone:`, `queue_name:`, `context:` (a compile-time
@@ -121,9 +116,9 @@ defmodule Dbos.Macros do
   end
 
   @doc """
-  Runtime support for a bare workflow call, per `DECISIONS.md`: starts `name` with `args`
-  (a child workflow if called from inside a workflow context, a root workflow otherwise) and
-  blocks for its result, returning the unwrapped value or re-raising the recorded exception.
+  Runtime support for a bare workflow call: starts `name` with `args` (a child workflow if called
+  from inside a workflow context, a root workflow otherwise) and blocks for its result, returning
+  the unwrapped value or re-raising the recorded exception.
   """
   def dispatch_workflow(name, args) do
     {:ok, handle} = Dbos.start(name, args)

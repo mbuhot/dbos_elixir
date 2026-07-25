@@ -1,10 +1,9 @@
 defmodule Dbos.Cluster.OrphanSweep do
   @moduledoc """
   Periodically reclaims `PENDING` workflows whose `executor_id` is absent from `Dbos.Cluster`'s
-  live roster and whose `updated_at` is at least `config.orphan_sweep_threshold_ms` old, per the
-  Phase 3b dead-executor reclaim design in `DECISIONS.md`. Covers executors no live node ever saw
-  depart — a whole-cluster restart, or a pod that is permanently gone — which
-  `Dbos.Cluster.NodeWatcher`'s `:nodedown` detection cannot see.
+  live roster and whose `updated_at` is at least `config.orphan_sweep_threshold_ms` old. Covers
+  executors no live node ever saw depart — a whole-cluster restart, or a pod that is permanently
+  gone — which `Dbos.Cluster.NodeWatcher`'s `:nodedown` detection cannot see.
 
   Off by default. Started only when the owning `Dbos.Supervisor` is given `cluster: [enabled:
   true, orphan_sweep: [enabled: true]]`.

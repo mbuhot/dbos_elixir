@@ -95,17 +95,14 @@ defmodule Dbos do
   Waits until `handle`'s workflow reaches a terminal status, returning `{:ok, output}`,
   `{:error, exception}`, or `{:error, :timeout}`. Wakes on `Dbos.Notifications.notify_status/2`
   (fired in-process by `Dbos.WorkflowProcess` right after it durably records an outcome) when
-  possible, falling back to polling every `opts[:poll_interval_ms]` (default `100`) — the only
-  transport available for a workflow finished by a different engine instance, since upstream has
-  no `pg_notify` channel for workflow completion. `opts[:timeout_ms]`, if given, bounds how long
-  this call waits.
+  possible, falling back to polling every `opts[:poll_interval_ms]` (default `100`) — the transport
+  for a workflow finished by a different engine instance. `opts[:timeout_ms]`, if given, bounds how
+  long this call waits.
 
-  Called from inside a workflow, this consumes a step id and checkpoints a `"DBOS.getResult"`
-  step — but only *after* the wait completes, unlike every other durable operation, per
-  `notes/step-ids.md`: a non-consuming peek at the next id is taken first, and replaying a
-  completed await replays the checkpointed outcome without waiting again. A `{:error, :timeout}`
-  outcome is never checkpointed, matching upstream (`workflow.go:209-316`). Outside a workflow,
-  no id is allocated and nothing is checkpointed.
+  Called from inside a workflow, this consumes a step id and checkpoints a `"DBOS.getResult"` step
+  only after the wait completes: a non-consuming peek at the next id is taken first, and replaying
+  a completed await replays the checkpointed outcome without waiting again. A `{:error, :timeout}`
+  outcome is never checkpointed. Outside a workflow, no id is allocated and nothing is checkpointed.
   """
   def await(%WorkflowHandle{} = handle, opts \\ []) do
     if Runtime.in_workflow?() do
@@ -252,7 +249,7 @@ defmodule Dbos do
   @doc """
   Runs `fun.(conn)` as a durable transactional step named `name`: the user's writes made through
   `conn` and the step's `operation_outputs` checkpoint commit together in one database
-  transaction, per `notes/datasource.md`. Must be called from inside a workflow. Raises
+  transaction. Must be called from inside a workflow. Raises
   `Dbos.NestedTransactionError` from inside another transaction's body, and
   `Dbos.StepInTransactionError` if any durable step is called from inside this transaction's
   body. `opts[:isolation]`: `:read_committed` | `:repeatable_read` | `:serializable`.
@@ -263,7 +260,7 @@ defmodule Dbos do
 
   @doc """
   Cancels `workflow_id`: durably marks it `CANCELLED` (a no-op if it is already
-  `SUCCESS`/`ERROR`/`CANCELLED`), per `notes/recovery.md` §3. If the workflow has a live process
+  `SUCCESS`/`ERROR`/`CANCELLED`). If the workflow has a live process
   on this engine, wakes it immediately so a blocked `recv`/`get_event`/`sleep` is interrupted
   promptly rather than waiting out its timeout; a workflow actively running plain steps instead
   stops cooperatively at its next step boundary, where `check_operation_execution` observes the
@@ -284,9 +281,9 @@ defmodule Dbos do
 
   @doc """
   Resumes `workflow_id` from its last checkpoint: clears its queue assignment and deadline and
-  re-enqueues it onto `opts[:queue_name]` (default `Dbos.Queue.internal_queue_name/0`), per
-  `notes/recovery.md` §4. Matches upstream: resuming a workflow already `SUCCESS`/`ERROR` is a
-  silent no-op (the row is left unchanged). `opts[:engine]` defaults to `Dbos`.
+  re-enqueues it onto `opts[:queue_name]` (default `Dbos.Queue.internal_queue_name/0`). Resuming a
+  workflow already `SUCCESS`/`ERROR` is a silent no-op (the row is left unchanged). `opts[:engine]`
+  defaults to `Dbos`.
   """
   def resume(workflow_id, opts \\ []) do
     config = opts |> engine() |> config()
@@ -298,8 +295,8 @@ defmodule Dbos do
   @doc """
   Forks `workflow_id` from step `start_step`: copies every checkpoint before `start_step` into a
   new workflow (`opts[:new_workflow_id]`, default a fresh random id), marks the original
-  `was_forked_from`, and enqueues the fork so it re-runs starting at `start_step`, per
-  `notes/recovery.md` §5. `opts`: `:new_workflow_id`, `:queue_name` (default the internal queue),
+  `was_forked_from`, and enqueues the fork so it re-runs starting at `start_step`. `opts`:
+  `:new_workflow_id`, `:queue_name` (default the internal queue),
   `:application_version`, `:engine` (default `Dbos`).
   """
   def fork(workflow_id, start_step, opts \\ []) do

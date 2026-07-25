@@ -1,6 +1,6 @@
 defmodule Dbos.Queue.Runner do
   @moduledoc """
-  One polling loop per declared queue, per `notes/queues.md` §9. Each tick: sweeps `DELAYED`
+  One polling loop per declared queue. Each tick: sweeps `DELAYED`
   workflows globally (`Dbos.SystemDb.transition_delayed_workflows/1`), dequeues from every live
   partition (or the queue itself, if unpartitioned), and dispatches every claimed workflow into
   `Dbos.WorkflowSup`. The polling interval backs off exponentially on lock contention and scales

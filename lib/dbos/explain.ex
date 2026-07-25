@@ -1,11 +1,11 @@
 defmodule Dbos.Explain do
   @moduledoc """
-  Static step-id sequence analysis for `mix dbos.explain`, over a `defworkflow` body's stored AST
-  (per `notes/step-ids.md`). Recognizes durable operations this module can prove consume a fixed
-  number of ids — the built-in `Dbos.*` primitives, and same-module `defstep`/`deftransaction`/
-  `defworkflow` calls — and flags a `case`/`cond`/`if` whose branches consume a different number
-  of ids, the classic replay bug. Anything else (a call this module cannot resolve, a
-  comprehension, a capture, ...) is reported as indeterminate rather than guessed.
+  Static step-id sequence analysis for `mix dbos.explain`, over a `defworkflow` body's stored AST.
+  Recognizes durable operations this module can prove consume a fixed number of ids — the
+  built-in `Dbos.*` primitives, and same-module `defstep`/`deftransaction`/`defworkflow` calls —
+  and flags a `case`/`cond`/`if` whose branches consume a different number of ids, the classic
+  replay bug. Anything else (a call this module cannot resolve, a comprehension, a capture, ...)
+  is reported as indeterminate.
   """
 
   @doc "Parses `\"Mod.fun/arity\"` into `{module, function, arity}`."
@@ -108,8 +108,8 @@ defmodule Dbos.Explain do
     header_line =
       if uneven? do
         "#{kind} at id #{id}: UNEVEN ID ALLOCATION ACROSS BRANCHES — replaying a different " <>
-          "branch than the one originally taken will misalign every step id after this point " <>
-          "(notes/step-ids.md, \"the classic bug\"). Use a patch instead of a bare conditional here."
+          "branch than the one originally taken will misalign every step id after this point. " <>
+          "Use a patch instead of a bare conditional here."
       else
         "#{kind} at id #{id}:"
       end

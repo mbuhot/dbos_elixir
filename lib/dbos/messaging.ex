@@ -2,9 +2,8 @@ defmodule Dbos.Messaging do
   @moduledoc """
   Messaging, event, and stream primitives: `send`/`recv`, `set_event`/`get_event`, and stream
   writes/reads, wired into `Dbos.Runtime`'s step-id/checkpoint protocol and `Dbos.Notifications`'
-  wake mechanism, per `notes/notifications.md` and `notes/step-ids.md`. Backs `Dbos`'s public
-  `send_message/4`, `recv_message/3`, `set_event/3`, `get_event/4`, `write_stream/3`,
-  `close_stream/2`, and `read_stream/3`.
+  wake mechanism. Backs `Dbos`'s public `send_message/4`, `recv_message/3`, `set_event/3`,
+  `get_event/4`, `write_stream/3`, `close_stream/2`, and `read_stream/3`.
   """
 
   alias Dbos.Notifications
@@ -13,13 +12,12 @@ defmodule Dbos.Messaging do
   alias Dbos.StepNames
   alias Dbos.SystemDb
 
-  @doc "The sentinel topic a no-topic `send`/`recv` uses, per `notes/notifications.md` §3 (`NullTopic`)."
+  @doc "The sentinel topic a no-topic `send`/`recv` uses."
   def null_topic, do: SystemDb.null_topic()
 
   @doc """
   Sends `message` to `destination_id` on `topic` (`nil` normalizes to `null_topic/0`). A
-  durable, checkpointed step (one id) inside a workflow; a direct write (no id) outside one, per
-  `notes/step-ids.md` §2.
+  durable, checkpointed step (one id) inside a workflow; a direct write (no id) outside one.
   """
   def send_message(config, destination_id, topic, message) do
     topic = topic || null_topic()
@@ -32,9 +30,9 @@ defmodule Dbos.Messaging do
 
   @doc """
   Receives a message on `topic` (`nil` normalizes to `null_topic/0`), blocking up to
-  `timeout_ms`. Allocates two step ids up front — `DBOS.recv` then `DBOS.sleep` — per
-  `notes/step-ids.md` §2, so the layout is stable whether or not a wait actually happens.
-  Registers as the exclusive receiver before rechecking the table, closing the race where a
+  `timeout_ms`. Allocates two step ids up front — `DBOS.recv` then `DBOS.sleep` — so the layout
+  is stable whether or not a wait actually happens. Registers as the exclusive receiver before
+  rechecking the table, closing the race where a
   `send` lands between the check and the registration. Raises `Dbos.RecvConflictError` if
   another `recv` is already registered for this `(workflow_id, topic)`, or
   `Dbos.RecvTimeoutError` if the deadline passes with nothing consumed.
@@ -112,7 +110,7 @@ defmodule Dbos.Messaging do
 
   @doc """
   Sets `workflow_events[key]` for the current workflow, upserting `workflow_events_history`
-  under this call's step id, per `notes/notifications.md` §5. One step id.
+  under this call's step id. One step id.
   """
   def set_event(config, key, value) do
     workflow_id = Runtime.current_workflow_id()
@@ -128,8 +126,7 @@ defmodule Dbos.Messaging do
   `nil` on timeout. Inside a workflow: allocates two step ids (`DBOS.getEvent` then
   `DBOS.sleep`), checkpointed like `recv_message/3` but with a non-exclusive registration —
   multiple `get_event` calls may wait on the same key concurrently. Outside a workflow: the same
-  wait, but the read itself is not checkpointed (no workflow to checkpoint into), per
-  `notes/notifications.md` §5.
+  wait, but the read itself is not checkpointed (no workflow to checkpoint into).
   """
   def get_event(config, target_workflow_id, key, timeout_ms) do
     if Runtime.in_workflow?() do
@@ -208,7 +205,7 @@ defmodule Dbos.Messaging do
     match?({:ok, _value}, SystemDb.get_event_value(config, workflow_id, key))
   end
 
-  @doc "Appends `value` to stream `key` for the current workflow. One step id, per `notes/notifications.md` §6."
+  @doc "Appends `value` to stream `key` for the current workflow. One step id."
   def write_stream(config, key, value) do
     workflow_id = Runtime.current_workflow_id()
     function_id = Runtime.next_function_id()
@@ -244,7 +241,7 @@ defmodule Dbos.Messaging do
   An Elixir `Stream` over `workflow_id`'s stream `key`, from the beginning, terminating once the
   close sentinel is read (never yielded itself). Falls back to a final read-then-stop once the
   producing workflow reaches a terminal status, closing the race where the last write(s) landed
-  after the last poll but before the workflow finished, per `notes/notifications.md` §6.
+  after the last poll but before the workflow finished.
   """
   def read_stream(config, workflow_id, key) do
     Stream.resource(

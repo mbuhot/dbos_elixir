@@ -69,8 +69,7 @@ defmodule Dbos.Runtime do
   @doc """
   Returns the id that the next `next_function_id/0` call would allocate, without consuming it.
   Used by operations that must peek at a step's checkpoint before deciding whether to consume its
-  id — currently `DBOS.getResult`, per `notes/step-ids.md`. Raises `Dbos.NotInWorkflowError`
-  outside an active context.
+  id — currently `DBOS.getResult`. Raises `Dbos.NotInWorkflowError` outside an active context.
   """
   def peek_next_function_id, do: fetch_context!().step_id + 1
 
@@ -104,7 +103,7 @@ defmodule Dbos.Runtime do
   directly and records nothing.
 
   `opts`: `:max_retries` (default `0`), `:base_interval_ms` (default `100`), `:backoff_factor`
-  (default `2.0`), `:max_interval_ms` (default `5000`) — see `notes/steps-retry.md`.
+  (default `2.0`), `:max_interval_ms` (default `5000`).
   """
   def run_step(name, opts \\ [], fun)
 
@@ -121,8 +120,7 @@ defmodule Dbos.Runtime do
   Like `run_step/3`, but against a `function_id` the caller has already allocated (via
   `next_function_id/0`) rather than allocating its own. Used by operations that must reserve
   more than one id up front regardless of which branch they end up taking — `recv` and
-  `getEvent`'s internal timeout-sleep step, per `notes/step-ids.md`. Must be called from within a
-  workflow context.
+  `getEvent`'s internal timeout-sleep step. Must be called from within a workflow context.
   """
   def run_step_at(function_id, name, opts \\ [], fun) do
     context = fetch_context!()
@@ -209,16 +207,14 @@ defmodule Dbos.Runtime do
   end
 
   @doc """
-  Runs `fun.(conn)` as a durable transactional step named `name`, per `notes/datasource.md`. Only
-  the `sameAsSystemDB` path is implemented (`DECISIONS.md`): the user's writes made through `conn`
-  and the `operation_outputs` checkpoint commit together in one `config.db.transaction/3` call on
-  the system database's own connection/pool.
+  Runs `fun.(conn)` as a durable transactional step named `name`: the user's writes made through
+  `conn` and the `operation_outputs` checkpoint commit together in one `config.db.transaction/3`
+  call on the system database's own connection/pool.
 
-  Nesting (`notes/datasource.md` §5): raises `Dbos.NestedTransactionError` from inside another
-  transaction's body. Called from inside a plain step's body, runs a real transaction but records
-  no separate durability row — it rides on the enclosing step's own checkpoint. `opts`:
-  `:isolation` (`:read_committed` | `:repeatable_read` | `:serializable`, default the adapter's
-  own default).
+  Raises `Dbos.NestedTransactionError` from inside another transaction's body. Called from
+  inside a plain step's body, runs a real transaction but records no separate durability row — it
+  rides on the enclosing step's own checkpoint. `opts`: `:isolation` (`:read_committed` |
+  `:repeatable_read` | `:serializable`, default the adapter's own default).
   """
   def run_transaction(name, opts \\ [], fun) do
     context = fetch_context!()
@@ -304,13 +300,12 @@ defmodule Dbos.Runtime do
   end
 
   @doc """
-  Resolves and arms this workflow's durable deadline, per `notes/recovery.md` §6: if a
-  `workflow_timeout_ms` is set but no `workflow_deadline_epoch_ms` yet, computes and persists
-  `now + timeout`; otherwise reuses whatever deadline is already recorded (so recovery/resume/fork
-  do not restart the clock). If a deadline results, stores it on the active context (so a child
-  workflow started from here inherits it, per `notes/recovery.md` §6) and starts an unsupervised
-  timer task that calls `Dbos.cancel/2` once the deadline passes — a no-op if the workflow has
-  already reached a terminal status by then.
+  Resolves and arms this workflow's durable deadline: if a `workflow_timeout_ms` is set but no
+  `workflow_deadline_epoch_ms` yet, computes and persists `now + timeout`; otherwise reuses
+  whatever deadline is already recorded (so recovery/resume/fork do not restart the clock). If a
+  deadline results, stores it on the active context (so a child workflow started from here
+  inherits it) and starts an unsupervised timer task that calls `Dbos.cancel/2` once the deadline
+  passes — a no-op if the workflow has already reached a terminal status by then.
   """
   def arm_deadline(config, workflow_id) do
     case SystemDb.resolve_workflow_deadline(config, workflow_id) do

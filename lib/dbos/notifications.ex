@@ -1,7 +1,7 @@
 defmodule Dbos.Notifications do
   @moduledoc """
-  One dedicated `LISTEN` connection per engine (`notes/notifications.md` §2), plus the
-  in-process waiter registration recv/getEvent/streams share. `recv` waiters are exclusive
+  One dedicated `LISTEN` connection per engine, plus the in-process waiter registration
+  recv/getEvent/streams share. `recv` waiters are exclusive
   (`Registry.register/3`'s built-in `:unique` semantics reject a second concurrent receiver on
   the same `(workflow_id, topic)`); event/stream waiters fan out to every registered process.
 
@@ -26,7 +26,7 @@ defmodule Dbos.Notifications do
   @reconnect_base_backoff_ms 200
   @reconnect_max_backoff_ms 5_000
 
-  @doc "The polling fallback's fixed cadence, per `notes/notifications.md` §2."
+  @doc "The polling fallback's fixed cadence."
   def poll_interval_ms, do: @poll_interval_ms
 
   def start_link(opts) do
@@ -100,10 +100,9 @@ defmodule Dbos.Notifications do
 
   @doc """
   Registers the caller to be woken when `workflow_id` completes. A purely in-process signal from
-  `Dbos.WorkflowProcess` right after it durably records an outcome — upstream has no `pg_notify`
-  channel for workflow completion, so `Dbos.await/2` still falls back to polling for a workflow
-  finished by a process this engine instance didn't run (a different node, or before this
-  engine started).
+  `Dbos.WorkflowProcess` right after it durably records an outcome; `Dbos.await/2` falls back to
+  polling for a workflow finished by a process this engine instance didn't run (a different
+  node, or before this engine started).
   """
   def subscribe_status(engine, workflow_id) do
     {:ok, _owner} = Registry.register(wait_registry_name(engine), {:status, workflow_id}, nil)
@@ -124,8 +123,7 @@ defmodule Dbos.Notifications do
   Blocks until `recheck_fun.()` (a zero-arg predicate) is truthy or `deadline_ms` (an absolute
   `System.os_time(:millisecond)`, or `nil` for no deadline) passes, re-invoking `recheck_fun` on
   every wake. A wake — a real `NOTIFY`, or, in `:poll` mode, the bounded timeout standing in for
-  one — is always only a hint to recheck, matching upstream's `notificationWait` (never itself
-  proof the condition holds). Returns `:found` or `:timeout`.
+  one — is only a hint to recheck. Returns `:found` or `:timeout`.
   """
   def wait_until(engine, deadline_ms, recheck_fun) do
     if recheck_fun.() do

@@ -136,7 +136,7 @@ defmodule Dbos.MessagingAcceptanceTest do
         {:ok, pid} = WorkflowSup.whereis(engine, handle.workflow_id)
         Process.exit(pid, :kill)
 
-        Process.sleep(500)
+        wait_until(fn -> WorkflowSup.whereis(engine, handle.workflow_id) == :error end)
 
         Dbos.Recovery.recover_pending(engine)
 

@@ -1,8 +1,5 @@
 defmodule Dbos.RetryPolicy do
-  @moduledoc """
-  A step's retry budget and backoff schedule. See `notes/steps-retry.md` for the defaults and
-  the delay formula.
-  """
+  @moduledoc "A step's retry budget and backoff schedule."
 
   defstruct max_retries: 0,
             base_interval_ms: 100,

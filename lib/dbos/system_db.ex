@@ -34,9 +34,9 @@ defmodule Dbos.SystemDb do
 
   @doc """
   Inserts a workflow directly onto a queue: `status = 'ENQUEUED'`, or `'DELAYED'` with
-  `delay_until_epoch_ms` set if `params[:delay_ms]` is a positive integer, per
-  `notes/queues.md` §7. Idempotent on `workflow_uuid`. Raises `Dbos.QueueDeduplicatedError` if
-  `params[:deduplication_id]` is already held by another workflow on the same queue.
+  `delay_until_epoch_ms` set if `params[:delay_ms]` is a positive integer. Idempotent on
+  `workflow_uuid`. Raises `Dbos.QueueDeduplicatedError` if `params[:deduplication_id]` is already
+  held by another workflow on the same queue.
   """
   def insert_enqueued_workflow(%Config{} = config, params) do
     workflow_id = Map.get(params, :workflow_id) || Uuid.v4()
@@ -162,7 +162,7 @@ defmodule Dbos.SystemDb do
   Returns a workflow's outcome: `{:ok, term}`, `{:error, exception}`, `{:error,
   %Dbos.WorkflowCancelledError{}}`, `{:error, %Dbos.MaxRecoveryAttemptsExceededError{}}`, or
   `:pending` while still running. Distinguishes `:cancelled` and
-  `:max_recovery_attempts_exceeded` rather than collapsing them into `:pending`.
+  `:max_recovery_attempts_exceeded` as their own outcomes.
   """
   def get_workflow_result(%Config{} = config, workflow_id) do
     case get_workflow_status(config, workflow_id) do
@@ -188,12 +188,12 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Upserts a `workflow_status` row: `INSERT ... ON CONFLICT (workflow_uuid) DO UPDATE`, per
-  `notes/engine-core.md` §1. `opts[:increment_attempts]` gates whether a re-entrant call bumps
-  `recovery_attempts` (only when the incoming status is not `:enqueued`/`:delayed`);
-  `opts[:max_retries]` gates the `MAX_RECOVERY_ATTEMPTS_EXCEEDED` transition. `attrs[:owner_xid]`
-  defaults to a fresh UUID, as upstream generates on every call; it is written only on first
-  insert and is returned unchanged on every later call for the same workflow id.
+  Upserts a `workflow_status` row: `INSERT ... ON CONFLICT (workflow_uuid) DO UPDATE`.
+  `opts[:increment_attempts]` gates whether a re-entrant call bumps `recovery_attempts` (only
+  when the incoming status is not `:enqueued`/`:delayed`); `opts[:max_retries]` gates the
+  `MAX_RECOVERY_ATTEMPTS_EXCEEDED` transition. `attrs[:owner_xid]` defaults to a fresh UUID; it
+  is written only on first insert and is returned unchanged on every later call for the same
+  workflow id.
 
   Returns a `Dbos.InsertWorkflowResult`, or raises `Dbos.MaxRecoveryAttemptsExceededError` if this
   call tips the row into `MAX_RECOVERY_ATTEMPTS_EXCEEDED`.
@@ -231,7 +231,7 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  The ordered `CheckOperationExecution` checks (`notes/engine-core.md` §2): workflow existence,
+  The ordered operation-execution checks: workflow existence,
   cancellation, whether the step already ran, and (if so) that its recorded `function_name`
   matches. Returns `:none` (not yet run), `{:replay, output}`, or `{:replay_failure, failure}`
   with both decoded via `Dbos.Serialization.decode/1`.
@@ -249,7 +249,7 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Checkpoints a step outcome (`notes/engine-core.md` §3): `output`/`error` are already-encoded
+  Checkpoints a step outcome: `output`/`error` are already-encoded
   strings (or `nil`). `ON CONFLICT (workflow_uuid, function_id) DO NOTHING`, then, only on the
   branch that actually inserted a row, re-stamps `workflow_status.executor_id` to
   `config.executor_id`, swallowing its own failure with a logged warning. A retried write that
@@ -268,10 +268,10 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Writes a workflow's terminal outcome (`notes/engine-core.md` §4): `attrs[:status]` is `:success`
+  Writes a workflow's terminal outcome: `attrs[:status]` is `:success`
   or `:error`, `attrs[:output]`/`attrs[:error]` are already-encoded strings or `nil`. Clears
-  `deduplication_id` only; `queue_name` and `started_at_epoch_ms` are left as-is, matching
-  upstream. Refuses to overwrite a row already `:success`/`:error`/`:cancelled`; if the row was
+  `deduplication_id` only; `queue_name` and `started_at_epoch_ms` are left as-is. Refuses to
+  overwrite a row already `:success`/`:error`/`:cancelled`; if the row was
   cancelled underneath this call, raises `Dbos.WorkflowCancelledError` instead of reporting the
   outcome this call intended to write.
   """
@@ -309,7 +309,7 @@ defmodule Dbos.SystemDb do
 
   @doc """
   Checks whether a child workflow has already been recorded at `(parent_workflow_id,
-  parent_step_id)`, per `notes/step-ids.md` §6 (`CheckChildWorkflow`). Returns `:none` if no
+  parent_step_id)`. Returns `:none` if no
   child has been started at that step yet, `{:existing, child_workflow_id}` if one has and its
   recorded `function_name` matches `child_name`, or raises `Dbos.UnexpectedStepError` if a
   different child workflow was recorded at that step.
@@ -338,8 +338,8 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Puts a queued `PENDING` workflow back to `ENQUEUED`, clearing `started_at_epoch_ms`, per
-  `notes/recovery.md` §1 (`ClearQueueAssignment`). Returns `:cleared`, or `:not_cleared` if the
+  Puts a queued `PENDING` workflow back to `ENQUEUED`, clearing `started_at_epoch_ms`.
+  Returns `:cleared`, or `:not_cleared` if the
   row was not `PENDING` with a `queue_name` (e.g. another executor already claimed it).
   """
   def clear_queue_assignment(%Config{} = config, workflow_id) do
@@ -361,10 +361,9 @@ defmodule Dbos.SystemDb do
 
   @doc """
   Atomically reassigns up to `opts[:batch_size]` non-queued `PENDING` rows owned by any of
-  `dead_executor_ids` to `config.executor_id`, per the Phase 3b dead-executor reclaim design
-  (`DECISIONS.md`). `opts[:batch_size]` defaults to unbounded. Filters by
-  `config.application_version` when set, exactly as `ListWorkflows` does upstream, since this
-  executor can only usefully re-run code matching its own registered version. Queued rows are
+  `dead_executor_ids` to `config.executor_id`. `opts[:batch_size]` defaults to unbounded. Filters
+  by `config.application_version` when set, since this executor can only usefully re-run code
+  matching its own registered version. Queued rows are
   excluded — the caller clears their queue assignment via
   `list_queued_pending_workflow_ids/2`/`clear_queue_assignment/2` instead. `FOR UPDATE SKIP
   LOCKED` lets concurrent callers claim disjoint batches without blocking on each other, the same
@@ -407,8 +406,8 @@ defmodule Dbos.SystemDb do
     do: {"AND application_version = $#{index}", [version], index + 1}
 
   @doc """
-  The workflow ids of queued `PENDING` rows owned by any of `dead_executor_ids`, per the Phase 3b
-  reclaim design. The caller clears each via `clear_queue_assignment/2` so the queue redistributes
+  The workflow ids of queued `PENDING` rows owned by any of `dead_executor_ids`.
+  The caller clears each via `clear_queue_assignment/2` so the queue redistributes
   it, rather than re-invoking it directly.
   """
   def list_queued_pending_workflow_ids(%Config{} = config, dead_executor_ids) do
@@ -425,7 +424,7 @@ defmodule Dbos.SystemDb do
 
   @doc """
   The distinct `executor_id`s among `PENDING` rows whose `updated_at` is at least
-  `threshold_ms` old, per the Phase 3b orphan sweep (`Dbos.Cluster.OrphanSweep`).
+  `threshold_ms` old, for `Dbos.Cluster.OrphanSweep`.
   """
   def list_stale_pending_executor_ids(%Config{} = config, threshold_ms) do
     sql = """
@@ -439,12 +438,11 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Cancels every workflow in `workflow_ids`, per `notes/recovery.md` §3 (`CancelWorkflows`): a
-  data-modifying CTE that updates every row not already `SUCCESS`/`ERROR`/`CANCELLED` to
-  `CANCELLED` (nulling `started_at_epoch_ms`, `queue_name`, `deduplication_id`; setting
-  `completed_at`), then returns every id that existed at all — including ids already terminal,
-  which are left untouched but still reported as "existing", matching upstream. `CancelChildren`
-  expansion is not implemented (deviation, see report).
+  Cancels every workflow in `workflow_ids`: a data-modifying CTE that updates every row not
+  already `SUCCESS`/`ERROR`/`CANCELLED` to `CANCELLED` (nulling `started_at_epoch_ms`,
+  `queue_name`, `deduplication_id`; setting `completed_at`), then returns every id that existed
+  at all — including ids already terminal, which are left untouched but still reported as
+  "existing".
   """
   def cancel_workflows(%Config{} = config, workflow_ids) do
     now = System.os_time(:millisecond)
@@ -476,9 +474,8 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Cancels every `PENDING`/`ENQUEUED`/`DELAYED` workflow created at or before `cutoff_ms`, per
-  `notes/recovery.md` §3 (`CancelAllBefore`) — the operation backing `POST /dbos-global-timeout`
-  (the HTTP route itself is Phase 6). Returns the cancelled ids.
+  Cancels every `PENDING`/`ENQUEUED`/`DELAYED` workflow created at or before `cutoff_ms` — the
+  operation backing `POST /dbos-global-timeout`. Returns the cancelled ids.
   """
   def cancel_all_before(%Config{} = config, cutoff_ms) do
     sql = """
@@ -499,12 +496,12 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Resumes every workflow in `workflow_ids`, per `notes/recovery.md` §4 (`ResumeWorkflows`):
-  re-enqueues onto `opts[:queue_name]` (default `Dbos.Queue.internal_queue_name/0`), resetting
-  `recovery_attempts` to `0` and clearing `workflow_deadline_epoch_ms`, `deduplication_id`,
-  `started_at_epoch_ms`, `completed_at`. Rows already `SUCCESS`/`ERROR` are excluded by the guard
-  and left untouched, but are still reported as "existing" — matching upstream, resuming an
-  already-terminal (success/error) workflow is a silent no-op. Returns the existing ids.
+  Resumes every workflow in `workflow_ids`: re-enqueues onto `opts[:queue_name]` (default
+  `Dbos.Queue.internal_queue_name/0`), resetting `recovery_attempts` to `0` and clearing
+  `workflow_deadline_epoch_ms`, `deduplication_id`, `started_at_epoch_ms`, `completed_at`. Rows
+  already `SUCCESS`/`ERROR` are excluded by the guard and left untouched, but are still reported
+  as "existing": resuming an already-terminal (success/error) workflow is a silent no-op. Returns
+  the existing ids.
   """
   def resume_workflows(%Config{} = config, workflow_ids, opts \\ []) do
     queue_name = Keyword.get(opts, :queue_name, Dbos.Queue.internal_queue_name())
@@ -549,7 +546,7 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Resolves this workflow's durable deadline, per `notes/recovery.md` §6: if a
+  Resolves this workflow's durable deadline: if a
   `workflow_timeout_ms` is set but no `workflow_deadline_epoch_ms` yet, computes and durably
   persists `now + timeout` (guarded so a race between concurrent resolvers only ever persists
   once); otherwise returns whatever deadline is already recorded. Returns `nil` if no timeout is
@@ -597,8 +594,8 @@ defmodule Dbos.SystemDb do
 
   @doc """
   Forks `original_workflow_id` from step `start_step` into a new workflow id
-  (`opts[:new_workflow_id]`, default a fresh random UUID), per `notes/recovery.md` §5
-  (`ForkWorkflows`): copies `operation_outputs`/`workflow_events_history`/`streams` rows with
+  (`opts[:new_workflow_id]`, default a fresh random UUID): copies
+  `operation_outputs`/`workflow_events_history`/`streams` rows with
   `function_id < start_step`, recomputes `workflow_events` from the latest history row per key
   before the fork point, marks the original `was_forked_from = TRUE`, and enqueues the fork onto
   `opts[:queue_name]` (default the internal queue) so it re-runs starting at `start_step`.
@@ -784,8 +781,7 @@ defmodule Dbos.SystemDb do
 
   @doc """
   Deletes every `workflow_status` row (cascading to its `operation_outputs` etc.) older than an
-  effective cutoff, per `notes/recovery.md` §7 (`GarbageCollectWorkflows`) — upstream's admin HTTP
-  route is a documented no-op stub; this is the real, working operation underneath it.
+  effective cutoff — the operation backing the admin `/dbos-garbage-collect` route.
   `opts[:cutoff_epoch_timestamp_ms]` and/or `opts[:rows_threshold]` (keep at least this many of
   the newest rows) may be given; the effective cutoff is the max of both. `PENDING`/`ENQUEUED`/
   `DELAYED` rows are never deleted. Returns the number of rows deleted.
@@ -848,7 +844,7 @@ defmodule Dbos.SystemDb do
 
   @doc """
   Inserts a fresh debounced workflow: always `DELAYED` (even for a zero-length bounce window),
-  `is_debounced = TRUE`, `deduplication_id = params[:debounce_key]`, per `notes/queues.md` §8.
+  `is_debounced = TRUE`, `deduplication_id = params[:debounce_key]`.
   """
   def insert_debounced_workflow(%Config{} = config, params) do
     workflow_id = Map.get(params, :workflow_id) || Uuid.v4()
@@ -897,7 +893,7 @@ defmodule Dbos.SystemDb do
   @doc """
   Bounces an existing debounced, still-`DELAYED` workflow held at `(name, queue_name,
   debounce_key)`: extends `delay_until_epoch_ms` (capped at `debounce_deadline_epoch_ms` if one
-  is set) and replaces `inputs`, per `notes/queues.md` §8 (`debounceDelayedWorkflowInternal`).
+  is set) and replaces `inputs`.
   Returns `{:bounced, workflow_id}` if a row matched, or `:not_found` if none did (the caller
   must then fall back to `get_debounce_holder/3`).
   """
@@ -942,8 +938,8 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Looks up whoever currently holds `(queue_name, debounce_key)`'s deduplication slot, per
-  `notes/queues.md` §8's bounce-miss follow-up query. Returns `:none` if the slot is free, or
+  Looks up whoever currently holds `(queue_name, debounce_key)`'s deduplication slot.
+  Returns `:none` if the slot is free, or
   `{:holder, workflow_id, is_debounced, name}`.
   """
   def get_debounce_holder(%Config{} = config, queue_name, debounce_key) do
@@ -962,7 +958,7 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Registers/updates a schedule's static definition in `workflow_schedules`, per `notes/schema.md`.
+  Registers/updates a schedule's static definition in `workflow_schedules`.
   Idempotent on `schedule_name`: an existing row's `last_fired_at`/`status` are left untouched
   (an operator-paused schedule, or one already mid-catch-up, survives a redeploy unchanged) —
   every other column is overwritten from the caller's declared definition. Returns
@@ -1081,9 +1077,8 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Promotes every `DELAYED` workflow whose `delay_until_epoch_ms` has passed to `ENQUEUED`, per
-  `notes/queues.md` §7 (`TransitionDelayedWorkflows`). Run once per reconcile tick by
-  `Dbos.Queue.Sup`, globally across all queues.
+  Promotes every `DELAYED` workflow whose `delay_until_epoch_ms` has passed to `ENQUEUED`. Run
+  once per reconcile tick by `Dbos.Queue.Sup`, globally across all queues.
   """
   def transition_delayed_workflows(%Config{} = config) do
     sql = """
@@ -1106,10 +1101,9 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Registers or updates a queue's persisted configuration in the `queues` table, per
-  `notes/queues.md` §1. Mirrors upstream's default `QueueConflictUpdateIfLatestVersion`
-  resolution: an existing row is overwritten only if this executor's application version is the
-  latest registered version, or if no version has been registered yet. Returns the row actually
+  Registers or updates a queue's persisted configuration in the `queues` table: an existing row
+  is overwritten only if this executor's application version is the latest registered version,
+  or if no version has been registered yet. Returns the row actually
   persisted (which may differ from `queue` if an existing row was left untouched).
   """
   def register_queue(%Config{} = config, %Dbos.Queue{} = queue) do
@@ -1238,8 +1232,7 @@ defmodule Dbos.SystemDb do
     do: %{limit: limit, period_ms: round(period_sec * 1000.0)}
 
   @doc """
-  The distinct, non-null partition keys among `ENQUEUED` workflows on `queue_name`, per
-  `notes/queues.md` §6 (`GetQueuePartitions`).
+  The distinct, non-null partition keys among `ENQUEUED` workflows on `queue_name`.
   """
   def get_queue_partitions(%Config{} = config, queue_name) do
     sql = """
@@ -1253,16 +1246,14 @@ defmodule Dbos.SystemDb do
 
   @doc """
   Whether `error` is a Postgres row-lock contention failure (`NOWAIT` finding a held lock), the
-  only error `Dbos.Queue.Runner` treats as retryable backoff rather than a logged failure, per
-  `notes/queues.md` §2.
+  only error `Dbos.Queue.Runner` treats as retryable backoff rather than a logged failure.
   """
   def contention_error?(%{postgres: %{code: :lock_not_available}}), do: true
   def contention_error?(_error), do: false
 
   @doc """
   Claims up to a concurrency- and rate-limit-derived number of `ENQUEUED` workflows from `queue`
-  for this executor, transitioning them to `PENDING`. Literal port of `DequeueWorkflows`,
-  `notes/queues.md` §2. `opts`: `:partition_key` (default `nil`), `:local_running_count` (default
+  for this executor, transitioning them to `PENDING`. `opts`: `:partition_key` (default `nil`), `:local_running_count` (default
   `0`, the caller's in-process count of workflows already running for this queue/partition).
   Returns a list of `%{workflow_id:, name:, inputs:, config_name:}`, `inputs` already decoded.
   """
@@ -1819,14 +1810,14 @@ defmodule Dbos.SystemDb do
   @null_topic "__null__topic__"
   @stream_closed_marker :__dbos_stream_closed__
 
-  @doc "The sentinel topic `send`/`recv` substitute for `nil`, per `notes/notifications.md` §3 (`NullTopic`)."
+  @doc "The sentinel topic `send`/`recv` substitute for `nil`."
   def null_topic, do: @null_topic
 
   @doc """
-  Writes a message into `notifications`, per `notes/notifications.md` §3 (`Send`). Raises
+  Writes a message into `notifications`. Raises
   `Dbos.NonExistentWorkflowError` if `destination_id` has no `workflow_status` row (the
   `destination_uuid` foreign key violation). Sending to a terminal workflow is not rejected —
-  only existence is checked, matching upstream.
+  only existence is checked.
   """
   def send_notification(%Config{} = config, destination_id, topic, message) do
     sql = """
@@ -1868,9 +1859,9 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Consumes the oldest unconsumed message for `(destination_id, topic)`, per
-  `notes/notifications.md` §4 (`ConsumeMessage`): selects the oldest by `created_at_epoch_ms`,
-  updates by `message_uuid` (never a `DELETE`, never keyed by timestamp). Returns `{:ok, term}`
+  Consumes the oldest unconsumed message for `(destination_id, topic)`: selects the oldest by
+  `created_at_epoch_ms`, updates by `message_uuid` (never a `DELETE`, never keyed by timestamp).
+  Returns `{:ok, term}`
   or `:none`.
   """
   def consume_notification(%Config{} = config, destination_id, topic) do
@@ -1896,8 +1887,7 @@ defmodule Dbos.SystemDb do
 
   @doc """
   Upserts `workflow_events` (per-key, last write wins) and inserts into
-  `workflow_events_history` (per-step, keyed by `function_id`), per `notes/notifications.md` §5
-  (`SetEvent`). Returns `value` unchanged.
+  `workflow_events_history` (per-step, keyed by `function_id`). Returns `value` unchanged.
   """
   def set_event_value(%Config{} = config, workflow_id, function_id, key, value) do
     encoded = Serialization.encode(value)
@@ -1932,7 +1922,7 @@ defmodule Dbos.SystemDb do
     value
   end
 
-  @doc "Reads `workflow_events`'s current value for `(workflow_id, key)`, per `notes/notifications.md` §5 (`GetEventValue`)."
+  @doc "Reads `workflow_events`'s current value for `(workflow_id, key)`."
   def get_event_value(%Config{} = config, workflow_id, key) do
     sql =
       "SELECT value FROM #{table(config, "workflow_events")} WHERE workflow_uuid = $1 AND key = $2"
@@ -1943,14 +1933,13 @@ defmodule Dbos.SystemDb do
     end
   end
 
-  @doc "The encoded stream-closed sentinel, per `notes/notifications.md` §6 (`StreamClosedSentinel`), an atom rather than upstream's literal string since ETF is not cross-language."
+  @doc "The encoded stream-closed sentinel: an atom, since ETF is not cross-language."
   def stream_closed_marker, do: @stream_closed_marker
 
   @doc """
   Appends `value` to stream `key` at the next sequential offset (`MAX(offset)+1`, or `0` if
-  none, computed in the same statement as the insert), per `notes/notifications.md` §6
-  (`WriteStream`). Returns `{:error, :stream_closed}` without inserting if the close sentinel was
-  already written for this `(workflow_id, key)`.
+  none, computed in the same statement as the insert). Returns `{:error, :stream_closed}` without
+  inserting if the close sentinel was already written for this `(workflow_id, key)`.
   """
   def write_stream(%Config{} = config, workflow_id, function_id, key, value) do
     check_sql = """
@@ -1985,15 +1974,14 @@ defmodule Dbos.SystemDb do
     end
   end
 
-  @doc "Writes the close sentinel for stream `key`, per `notes/notifications.md` §6 (`CloseStream`)."
+  @doc "Writes the close sentinel for stream `key`."
   def close_stream(%Config{} = config, workflow_id, function_id, key) do
     write_stream(config, workflow_id, function_id, key, @stream_closed_marker)
   end
 
   @doc """
-  Reads stream `key` from `from_offset` (inclusive), per `notes/notifications.md` §6
-  (`ReadStream`): stops at the close sentinel without including it. Returns
-  `{values, next_offset, closed?}`.
+  Reads stream `key` from `from_offset` (inclusive): stops at the close sentinel without
+  including it. Returns `{values, next_offset, closed?}`.
   """
   def read_stream_page(%Config{} = config, workflow_id, key, from_offset) do
     sql = """

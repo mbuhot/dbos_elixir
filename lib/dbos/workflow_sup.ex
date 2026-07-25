@@ -20,7 +20,7 @@ defmodule Dbos.WorkflowSup do
   @doc """
   Starts a workflow process running `mfa` with `args` under `workflow_id`. `opts`: `:replay`
   (default `false`), `:queue_name`, `:partition_key` (both default `nil`, used only for the
-  live-count registry Phase 3's dequeue needs).
+  live-count registry the queue dequeue needs).
   """
   def start_workflow(engine_name, workflow_id, mfa, args, opts \\ []) do
     process_args = %{

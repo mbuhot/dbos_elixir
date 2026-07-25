@@ -36,8 +36,8 @@ defmodule Dbos.Supervisor do
   ever saw depart.
 
   `:admin_server` opts, off by default: `:enabled` — starts `Dbos.AdminServer`; `:port` (default
-  `3001`, matching upstream). `:scheduler_poll_interval_ms` (default `30_000`, matching upstream)
-  controls how often `Dbos.Scheduler` reconciles cron schedules from `workflow_schedules`.
+  `3001`). `:scheduler_poll_interval_ms` (default `30_000`) controls how often `Dbos.Scheduler`
+  reconciles cron schedules from `workflow_schedules`.
   """
   def start_link(opts) do
     name = Keyword.get(opts, :name, Dbos)
@@ -63,10 +63,9 @@ defmodule Dbos.Supervisor do
       executor_id: resolve_executor_id(opts),
       application_version: resolve_application_version(opts, workflows),
       max_recovery_attempts: Keyword.get(opts, :max_recovery_attempts, 3),
-      cluster_enabled: Keyword.get(cluster_opts, :enabled, false),
+      cluster_mode: resolve_cluster_mode(cluster_opts, orphan_sweep_opts),
       cluster_group: Keyword.get(cluster_opts, :group, Dbos.Cluster.Group),
       reclaim_batch_size: Keyword.get(cluster_opts, :batch_size, 50),
-      orphan_sweep_enabled: Keyword.get(orphan_sweep_opts, :enabled, false),
       orphan_sweep_interval_ms: Keyword.get(orphan_sweep_opts, :interval_ms, 300_000),
       orphan_sweep_threshold_ms: Keyword.get(orphan_sweep_opts, :threshold_ms, 300_000),
       notifications: Keyword.get(opts, :notifications, :listen),
@@ -109,19 +108,27 @@ defmodule Dbos.Supervisor do
     end
   end
 
-  defp cluster_children(%Config{cluster_enabled: false}), do: []
+  defp cluster_children(%Config{cluster_mode: :disabled}), do: []
 
-  defp cluster_children(%Config{cluster_enabled: true, name: name} = config) do
+  defp cluster_children(%Config{name: name} = config) do
     [
       {Dbos.Cluster, name: name},
       {Dbos.Cluster.NodeWatcher, name: name}
     ] ++ orphan_sweep_children(config)
   end
 
-  defp orphan_sweep_children(%Config{orphan_sweep_enabled: false}), do: []
-
-  defp orphan_sweep_children(%Config{orphan_sweep_enabled: true, name: name}),
+  defp orphan_sweep_children(%Config{cluster_mode: :cluster_and_orphan_sweep, name: name}),
     do: [{Dbos.Cluster.OrphanSweep, name: name}]
+
+  defp orphan_sweep_children(%Config{}), do: []
+
+  defp resolve_cluster_mode(cluster_opts, orphan_sweep_opts) do
+    cond do
+      not Keyword.get(cluster_opts, :enabled, false) -> :disabled
+      Keyword.get(orphan_sweep_opts, :enabled, false) -> :cluster_and_orphan_sweep
+      true -> :cluster_only
+    end
+  end
 
   defp resolve_executor_id(opts) do
     Keyword.get(opts, :executor_id) || System.get_env("DBOS__VMID") || node_executor_id()

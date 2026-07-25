@@ -1,9 +1,8 @@
 defmodule Dbos.Cluster.NodeWatcher do
   @moduledoc """
   Watches for departed nodes via `:net_kernel.monitor_nodes/1` and reclaims a departed node's
-  `PENDING` workflows through `Dbos.Cluster`'s cached roster and `Dbos.Recovery.reclaim/3`, per
-  the Phase 3b dead-executor reclaim design in `DECISIONS.md`. Started only when the owning
-  `Dbos.Supervisor` is given `cluster: [enabled: true]`.
+  `PENDING` workflows through `Dbos.Cluster`'s cached roster and `Dbos.Recovery.reclaim/3`.
+  Started only when the owning `Dbos.Supervisor` is given `cluster: [enabled: true]`.
 
   Reclaim runs in an unsupervised `Task` so a slow or failing reclaim pass never blocks this
   process (and so `:nodedown` messages keep being handled promptly).

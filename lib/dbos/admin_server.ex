@@ -1,17 +1,15 @@
 defmodule Dbos.AdminServer do
   @moduledoc """
-  The operator-facing HTTP API from `notes/recovery.md` §8 (`/dbos-healthz`,
-  `/dbos-workflow-recovery`, `/deactivate`, `/dbos-workflow-queues-metadata`,
-  `/dbos-garbage-collect`, `/dbos-global-timeout`, `/queues`, `/workflows`, `/workflows/{id}`,
-  `/workflows/{id}/steps`, `/workflows/{id}/cancel`, `/workflows/{id}/resume`,
-  `/workflows/{id}/fork`) — everything except `/conductor`, which is out of scope. Opt-in via
-  `Dbos.Supervisor`'s `:admin_server` option; default port `3001`, matching upstream.
+  The operator-facing HTTP API (`/dbos-healthz`, `/dbos-workflow-recovery`, `/deactivate`,
+  `/dbos-workflow-queues-metadata`, `/dbos-garbage-collect`, `/dbos-global-timeout`, `/queues`,
+  `/workflows`, `/workflows/{id}`, `/workflows/{id}/steps`, `/workflows/{id}/cancel`,
+  `/workflows/{id}/resume`, `/workflows/{id}/fork`). Opt-in via `Dbos.Supervisor`'s
+  `:admin_server` option; default port `3001`.
 
-  Built directly on `:gen_tcp` (already part of `:kernel`, so this adds no dependency and enables
-  no extra OTP application) rather than `:inets`'s `httpd`: a dozen small JSON routes are simpler
-  to implement and test as one `:gen_tcp.recv/3` + `:erlang.decode_packet(:http_bin, ...)` loop
-  than through `httpd`'s Erlang `mod`-callback/config-file surface, which is built for serving
-  static content plus CGI-style modules, not a small typed JSON API.
+  Built directly on `:gen_tcp`: a dozen small JSON routes are simpler to implement and test as one
+  `:gen_tcp.recv/3` + `:erlang.decode_packet(:http_bin, ...)` loop than through `:inets`'s `httpd`
+  Erlang `mod`-callback/config-file surface, which is built for serving static content plus
+  CGI-style modules.
 
   One process per accepted connection, one request per connection (no keep-alive) — see
   `Dbos.AdminServer.Handler`. Routing and rendering live in `Dbos.AdminServer.Router` and

@@ -1,10 +1,8 @@
 defmodule Dbos.AdminServer.Router do
   @moduledoc """
   Routes one decoded HTTP request to an engine operation and renders its JSON (or plain-text)
-  response, per `notes/recovery.md` §8. `POST /dbos-garbage-collect` is a deliberate divergence
-  from upstream: upstream's route is a documented no-op stub (`DECISIONS.md`); this one calls the
-  real, already-implemented `Dbos.SystemDb.garbage_collect_workflows/2` and reports how many rows
-  it deleted, rather than silently doing nothing.
+  response. `POST /dbos-garbage-collect` calls `Dbos.SystemDb.garbage_collect_workflows/2` and
+  reports how many rows it deleted.
   """
 
   alias Dbos.AdminServer.Render

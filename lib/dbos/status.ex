@@ -1,7 +1,5 @@
 defmodule Dbos.Status do
-  @moduledoc """
-  The seven workflow statuses upstream stores as strings in `workflow_status.status`, as atoms.
-  """
+  @moduledoc "The seven workflow statuses stored as strings in `workflow_status.status`, as atoms."
 
   @type t ::
           :pending
@@ -26,10 +24,10 @@ defmodule Dbos.Status do
 
   @terminal [:success, :error, :cancelled, :max_recovery_attempts_exceeded]
 
-  @doc "Converts a status atom to its upstream string."
+  @doc "Converts a status atom to its stored string."
   def to_string(status), do: Map.fetch!(@strings, status)
 
-  @doc "Parses an upstream status string, raising `ArgumentError` on an unknown value."
+  @doc "Parses a stored status string, raising `ArgumentError` on an unknown value."
   def from_string(string) do
     case Map.fetch(@atoms, string) do
       {:ok, status} -> status

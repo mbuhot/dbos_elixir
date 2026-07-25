@@ -14,7 +14,7 @@ flowchart LR
     A[workflow starts] --> B[step 1: reserve stock]
     B --> C[step 2: charge card]
     C -->|crash here| X((💥))
-    X -.->|recovery replays from checkpoints| C2[step 2 result already recorded — not re-run]
+    X -.->|recovery replays from checkpoints| C2[step 2 result replayed from checkpoint]
     C2 --> D[step 3: ship order]
 ```
 

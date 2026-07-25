@@ -1,10 +1,9 @@
 defmodule Dbos.Recovery do
   @moduledoc """
   Re-dispatches `PENDING` workflows on engine start, and reclaims a dead executor's `PENDING`
-  workflows on demand, per `notes/recovery.md` §1 and the Phase 3b dead-executor reclaim design
-  in `DECISIONS.md`. A queued `PENDING` workflow is handed back to its queue rather than
-  re-invoked directly, since Phase 3 owns dequeueing. An unregistered workflow name is logged and
-  skipped; the pass continues with the rest of the batch.
+  workflows on demand. A queued `PENDING` workflow is handed back to its queue rather than
+  re-invoked directly. An unregistered workflow name is logged and skipped; the pass continues
+  with the rest of the batch.
   """
 
   use GenServer
@@ -24,8 +23,7 @@ defmodule Dbos.Recovery do
 
   @doc """
   Synchronously recovers every `PENDING` workflow owned by this executor and application
-  version: the special case of `reclaim/3` reclaiming its own executor id, with an unbounded
-  batch, so its behaviour is unchanged from before `reclaim/3` existed.
+  version: `reclaim/3` reclaiming its own executor id, with an unbounded batch.
   """
   def recover_pending(engine_name) do
     config = Dbos.config(engine_name)
@@ -40,12 +38,11 @@ defmodule Dbos.Recovery do
   Every survivor may call this concurrently for the same dead ids: the reassigning `UPDATE`
   inside `Dbos.SystemDb.reclaim_pending_workflows/3` is the serialization point, so a call that
   loses the race simply redispatches nothing. `opts[:batch_size]` bounds how many non-queued rows
-  one call claims; the default is unbounded, matching `recover_pending/1`'s historical behaviour.
-  Callers driven by cluster membership (`Dbos.Cluster.NodeWatcher`, `Dbos.Cluster.OrphanSweep`)
-  pass an explicit `config.reclaim_batch_size` instead.
+  one call claims; the default is unbounded. Callers driven by cluster membership
+  (`Dbos.Cluster.NodeWatcher`, `Dbos.Cluster.OrphanSweep`) pass an explicit
+  `config.reclaim_batch_size` instead.
 
-  Returns every workflow id this call actually acted on (queue-cleared or reclaimed-and-redispatched),
-  matching upstream's `POST /dbos-workflow-recovery` response shape.
+  Returns every workflow id this call actually acted on (queue-cleared or reclaimed-and-redispatched).
   """
   def reclaim(engine_name, dead_executor_ids, opts \\ []) do
     config = Dbos.config(engine_name)

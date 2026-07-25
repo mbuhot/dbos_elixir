@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Dbos.Explain do
   @moduledoc """
   Prints the statically derivable step-id sequence for a `defworkflow`, and flags branches
   (`case`/`cond`/`if`) that allocate ids unevenly across their branches — the classic replay bug
-  described in `notes/step-ids.md` and `docs/determinism.md`.
+  described in `docs/determinism.md`.
 
       mix dbos.explain Checkout.process_order/2
 
