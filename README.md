@@ -1,179 +1,268 @@
-# Dbos
+<div align="center">
 
-A durable execution engine for Elixir, ported from [DBOS Transact](https://github.com/dbos-inc/dbos-transact-golang).
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/mbuhot/dbos_elixir/blob/main/LICENSE)
+[![Elixir](https://img.shields.io/badge/elixir-~%3E%201.19-purple.svg)](https://elixir-lang.org)
+[![Postgres](https://img.shields.io/badge/postgres-13%2B-blue.svg)](https://www.postgresql.org)
 
-## The problem
+# Dbos for Elixir: Durable Workflow Orchestration on Postgres
 
-A normal function call is gone the moment the process crashes. `Dbos` makes a function call
-**durable**: every step it takes is checkpointed in your existing Postgres database, so a crash,
-a deploy, or a killed node resumes exactly where it left off — no queue infrastructure, no
-second database, no separate worker fleet.
+#### [Documentation](https://mbuhot.github.io/dbos_elixir/) &nbsp;&nbsp;•&nbsp;&nbsp; [Examples](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps) &nbsp;&nbsp;•&nbsp;&nbsp; [Determinism Contract](https://mbuhot.github.io/dbos_elixir/determinism.html)
 
-```mermaid
-flowchart LR
-    A[workflow starts] --> B[step 1: reserve stock]
-    B --> C[step 2: charge card]
-    C -->|crash here| X((💥))
-    X -.->|recovery replays from checkpoints| C2[step 2 result replayed from checkpoint]
-    C2 --> D[step 3: ship order]
-```
+</div>
 
-## What lives where
+---
 
-| Piece | What it gives you |
+## Credit
+
+This library is a port of **[DBOS Transact for Go](https://github.com/dbos-inc/dbos-transact-golang)**, created by **[DBOS, Inc.](https://www.dbos.dev)** and released under the MIT License.
+
+The design is theirs. The database schema, the status and step-name protocol, the SQL, and the algorithms for checkpointing, replay, recovery, queue dequeueing, messaging, and transactional steps are all derived from their work, at commit [`2a7705c`](https://github.com/dbos-inc/dbos-transact-golang/commit/2a7705c37c93e5fd1d5c1ce049a4224ec2f1f969). This documentation follows the structure of [docs.dbos.dev](https://docs.dbos.dev), with every example rewritten for Elixir.
+
+If this library is useful to you, the credit belongs upstream. Please [star the original project](https://github.com/dbos-inc/dbos-transact-golang).
+
+DBOS and DBOS Transact are marks of DBOS, Inc. This is an independent port and carries no endorsement. [LICENSE](https://github.com/mbuhot/dbos_elixir/blob/main/LICENSE) reproduces their copyright notice in full.
+
+---
+
+## What is Dbos?
+
+Dbos provides durable workflow orchestration on top of the Postgres you already run. Annotate your functions, and the engine checkpoints their progress. When a process dies, the workflow resumes from its last completed step.
+
+Everything lives in your existing database and your existing supervision tree. No orchestration server, no message broker, no second connection pool.
+
+## When should I use it?
+
+Reach for Dbos when your application must **reliably survive failure** partway through a multi-step operation — a payment that charges then ships, a pipeline that fetches then embeds then indexes, an agent making a long chain of expensive API calls.
+
+An OTP supervisor restarts a dead process. The half-finished work that process was doing dies with it. Dbos is what recovers the work.
+
+| You get | You pay |
 |---|---|
-| Workflows, steps, transactions | `defworkflow`/`defstep`/`deftransaction` — durable functions |
-| Queues | Concurrency limits, rate limits, priority, partitioning, delayed/debounced enqueue |
-| Recovery | Crash/restart resumes from the last checkpoint, on this node or another |
-| Scheduler | Cron-driven workflows, backed by the database, no separate scheduler process elsewhere |
-| Admin server | An HTTP API to inspect, cancel, resume, and fork running workflows |
-| Telemetry | `:telemetry` spans for workflow/step/queue/recovery events — see `docs/telemetry.md` |
+| Steps that never re-run once they complete | A determinism contract on workflow bodies, enforced at compile time |
+| Automatic recovery after any crash | One row per workflow and one per step in Postgres |
+| Durable queues, notifications, scheduling, and sleep | Values persist as Erlang terms, readable from Elixir |
 
-## Quickstart
+## Features
 
-Add the dependency:
+<details open><summary><strong>💾 Durable Workflows</strong></summary>
 
-```elixir
-def deps do
-  [{:dbos, "~> 0.1.0"}]
-end
-```
-
-Write a workflow:
+A workflow checkpoints each completed step. After a crash, restarting replays the body, and every step that already finished returns its recorded value.
 
 ```elixir
 defmodule MyApp.Checkout do
-  use Dbos, repo: MyApp.Repo
+  use Dbos
 
   defworkflow process_order(order_id, amount), name: "process_order" do
     charge = charge_card(order_id, amount)
     record_receipt(order_id, charge)
+    ship(order_id)
   end
 
   defstep charge_card(order_id, amount) do
-    PaymentGateway.charge!(order_id, amount)
+    MyApp.Payments.charge(order_id, amount)
   end
 
   deftransaction record_receipt(order_id, charge) do
-    Ecto.Multi.new()
-    |> Ecto.Multi.insert(:receipt, %Receipt{order_id: order_id, charge_id: charge.id})
-    |> MyApp.Repo.transaction()
+    MyApp.Repo.insert!(%MyApp.Receipt{order_id: order_id, charge_id: charge.id})
+  end
+
+  defstep ship(order_id) do
+    MyApp.Shipping.dispatch(order_id)
   end
 end
 ```
 
-Start the engine in your supervision tree:
+Add the engine to your supervision tree, after your repo:
 
 ```elixir
-defmodule MyApp.Application do
-  use Application
-
-  def start(_type, _args) do
-    children = [
-      MyApp.Repo,
-      {Dbos.Supervisor,
-       name: Dbos,
-       db: {Dbos.DB.Ecto, MyApp.Repo},
-       workflows: [MyApp.Checkout],
-       migrations: :create_if_absent}
-    ]
-
-    Supervisor.start_link(children, strategy: :one_for_one)
-  end
-end
+children = [
+  MyApp.Repo,
+  {Dbos.Supervisor,
+   db: {Dbos.DB.Ecto, MyApp.Repo},
+   workflows: [MyApp.Checkout]}
+]
 ```
 
-Run your first durable workflow — a bare call to `process_order/2` is already durable. Called
-from ordinary code (a controller, a test, `iex`), it starts the workflow and returns a handle
-immediately, without blocking for however long the workflow takes to run:
+Start a workflow and collect its result:
 
 ```elixir
-{:ok, handle} = MyApp.Checkout.process_order("order-123", 4999)
+{:ok, handle} = MyApp.Checkout.process_order("ord_1", 4999)
 {:ok, result} = Dbos.await(handle)
 ```
 
-The same call made from inside another workflow's body is a child workflow instead: it blocks
-for the child's result and returns the unwrapped value directly, with no handle in sight —
+Kill the node between `charge_card` and `ship`. On restart the card stays charged exactly once, and shipping proceeds.
+
+A `deftransaction` commits your write and its checkpoint in one Postgres transaction, so the two always agree.
+
+</details>
+
+<details><summary><strong>📒 Durable Queues</strong></summary>
+
+Enqueue a workflow and any process pointed at the same database may claim it. Concurrency limits, rate limits, and priority are enforced in Postgres, shared across every node.
 
 ```elixir
-defworkflow parent_flow(order_id), name: "parent_flow" do
-  receipt = process_order(order_id, 4999)
-  receipt
+{Dbos.Supervisor,
+ db: {Dbos.DB.Ecto, MyApp.Repo},
+ workflows: [MyApp.Reports],
+ queues: [
+   Dbos.Queue.new("reports", worker_concurrency: 5, rate_limit: %{limit: 100, period_ms: 60_000})
+ ]}
+```
+
+```elixir
+{:ok, handle} = Dbos.enqueue(&MyApp.Reports.generate/1, [report_id], queue_name: "reports")
+{:ok, report} = Dbos.await(handle)
+```
+
+Queues support worker and global concurrency, rate limiting, priority, partition keys for per-tenant fairness, delayed start, deduplication, and debouncing. A node that dies mid-task releases its claim, and another node picks the work up.
+
+</details>
+
+<details><summary><strong>🎫 Exactly-Once Event Processing</strong></summary>
+
+Give a workflow an id derived from the event, and a duplicate delivery collapses onto the original run.
+
+```elixir
+{:ok, handle} = MyApp.Webhooks.handle_event(payload, workflow_id: "stripe-#{event.id}")
+```
+
+Acknowledge the webhook immediately. The workflow completes in the background exactly once, whether the sender retries or your node restarts.
+
+</details>
+
+<details><summary><strong>📅 Durable Scheduling</strong></summary>
+
+Declare a cron schedule on the workflow itself. Several nodes may run the same schedule, and exactly one firing happens per tick.
+
+```elixir
+defworkflow nightly_report(scheduled_time_ms, _context),
+  name: "nightly_report",
+  schedule: "0 0 2 * * *" do
+  MyApp.Reports.build_for(scheduled_time_ms)
 end
 ```
 
-Kill the BEAM mid-charge and restart: `process_order/2` resumes from whichever step last
-checkpointed, without re-charging a card that already succeeded.
+The grammar covers six fields including seconds, month and day names, the `@daily` family, and `@every`.
 
-A capture of the workflow function (`&MyApp.Checkout.process_order/2`) resolves the same way a
-name string does, everywhere a workflow name or capture is accepted (`Dbos.start/3`,
-`Dbos.enqueue/3`).
-
-### Start options
-
-`defworkflow` also generates a second, one-arity-higher dispatcher taking every argument
-explicitly plus a trailing options list — the way to pin a `workflow_id` (making a repeated
-start idempotent), set `priority`, or a `deduplication_id`:
+Durable sleep records its wake time, so a workflow sleeps through restarts:
 
 ```elixir
-MyApp.Checkout.process_order("order-123", 4999, workflow_id: "order-123-checkout")
-```
-
-### An inline step
-
-`Dbos.step/2` checkpoints a one-off step without a named `defstep`:
-
-```elixir
-defworkflow process_order(order_id, amount), name: "process_order" do
-  Dbos.step("notify_ops", fn -> OpsChannel.notify(order_id) end)
+defworkflow trial_reminder(user_id), name: "trial_reminder" do
+  Dbos.sleep(:timer.hours(24 * 14))
+  send_reminder(user_id)
 end
 ```
 
-### Cancelling a workflow tree
+A wait longer than a minute releases its process entirely and is rebuilt on wake, so parking a hundred thousand workflows for a fortnight costs about 16MB and zero processes.
 
-`Dbos.cancel/2` cancels one workflow; `cancel_children: true` walks its child tree and cancels
-every descendant too:
+</details>
+
+<details><summary><strong>📫 Durable Notifications</strong></summary>
+
+Pause a workflow until a message arrives, or publish events for external readers. Both persist in Postgres with exactly-once delivery, and both survive a restart.
 
 ```elixir
-Dbos.cancel(workflow_id, cancel_children: true)
+defworkflow await_approval(order_id), name: "await_approval" do
+  Dbos.set_event("status", :awaiting_approval)
+
+  case Dbos.recv_message("decision", :timer.hours(48)) do
+    %{outcome: :approve, approver: who} -> ship(order_id, who)
+    %{outcome: :reject} -> refund(order_id)
+  end
+end
 ```
 
-## Supervision tree
-
-```mermaid
-flowchart TB
-    Sup["Dbos.Supervisor (one per engine, namespaced by :name)"]
-    Sup --> Reg[Dbos.Registry]
-    Sup --> WSup[Dbos.WorkflowSup]
-    Sup --> Rec[Dbos.Recovery]
-    Sup --> Q[Dbos.Queue.Sup]
-    Sup --> Sched[Dbos.Scheduler]
-    Sup --> Notif[Dbos.Notifications]
-    Sup -.optional.-> Cluster[Dbos.Cluster + NodeWatcher]
-    Sup -.optional.-> Admin[Dbos.AdminServer]
+```elixir
+Dbos.send_message(order_workflow_id, "decision", %{outcome: :approve, approver: "sam"})
 ```
 
-Multiple engines can run in one BEAM (each given a distinct `:name`) — every process above is
-namespaced under it. See `Dbos.Supervisor`'s module docs for every option, and:
+Note the atoms in that payload. Values round-trip as Erlang terms, so what you send is exactly what the workflow receives.
 
-- `docs/clustering.md` — dead-node work reclaim, opt-in, built on `:pg`/`:net_kernel`.
-- `docs/telemetry.md` — every emitted `:telemetry` span.
-- `docs/testing.md` — how the two test suites (unit/acceptance vs. Docker-based node-kill) work.
-- `docs/interop-migration.md` — what is and isn't readable by a non-Elixir process.
+A message that arrives before the workflow reaches its `recv_message` is still delivered.
 
-## The determinism contract, in one paragraph
+</details>
 
-A workflow body re-executes from the top after a crash; steps that already completed return
-their recorded output instead of running again. This is only correct if the body takes the same
-path and calls steps with the same arguments every time it replays — a workflow computing a step
-argument from a live read of mutable state (the current time, a random number, a database row
-that can change between runs) risks the step returning a **stale** recorded result on replay
-instead of an error, because step arguments are never themselves persisted. `defworkflow` catches
-the common mistakes at compile time. Full contract, worked example, and the banned-construct
-table: `docs/determinism.md`.
+## Getting Started
 
-## Testing
+```elixir
+def deps do
+  [{:dbos, github: "mbuhot/dbos_elixir"}]
+end
+```
 
-`mix test` runs the unit/acceptance suite against a local Postgres. `mix test.integration` runs
-a Docker-based suite that kills a whole node and checks a second node recovers it. See
-`docs/testing.md`.
+The [quickstart](https://mbuhot.github.io/dbos_elixir/quickstart.html) takes you from an empty project to watching a workflow survive a crash. The [programming guide](https://mbuhot.github.io/dbos_elixir/programming-guide.html) builds one application end to end.
+
+Read the [determinism contract](https://mbuhot.github.io/dbos_elixir/determinism.html) before writing a workflow body. It is short, and the compiler enforces most of it.
+
+## Documentation
+
+[https://mbuhot.github.io/dbos_elixir/](https://mbuhot.github.io/dbos_elixir/)
+
+## Examples
+
+Ten runnable applications live in [`sample_apps/`](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps), each a standalone Mix project with its own tests.
+
+| Example | Demonstrates |
+|---|---|
+| [widget_store](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/widget_store) | Fault-tolerant checkout with inventory and refunds |
+| [outbox](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/outbox) | Transactional outbox, at-least-once publishing |
+| [queue_worker](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/queue_worker) | Durable background workers surviving worker death |
+| [queue_patterns](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/queue_patterns) | Fan-out, per-tenant fairness, priority, debouncing |
+| [agent_inbox](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/agent_inbox) | Human-in-the-loop approvals that wait for days |
+| [document_pipeline](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/document_pipeline) | Concurrent ingestion that re-embeds nothing |
+| [hacker_news_agent](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/hacker_news_agent) | A research agent whose LLM calls survive a crash |
+| [customer_service_agent](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/customer_service_agent) | An agent with a refund tool that runs exactly once |
+| [s3_mirror](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/s3_mirror) | Resumable bulk copy with live progress |
+| [deploy_slackbot](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/deploy_slackbot) | Exactly-once notifications from a deploy feed |
+
+## Dbos vs. other Elixir tools
+
+<details><summary><strong>Dbos vs. OTP supervision</strong></summary>
+
+####
+
+A supervisor restarts a process that died. A restarted `GenServer` begins from its initial state, and the work in flight is gone.
+
+Dbos records progress in Postgres, so a recovered workflow resumes at its last completed step with every earlier result intact.
+
+**When to use OTP supervision:** you need a process to keep running.
+
+**When to use Dbos:** you need the work to finish.
+
+They compose. Dbos runs inside your supervision tree and depends on it.
+
+</details>
+
+<details><summary><strong>Dbos vs. Oban</strong></summary>
+
+####
+
+Both are Postgres-backed, and both give you durable queues with concurrency limits, priority, and retries. Oban is a mature job system with a large ecosystem and an excellent UI.
+
+Dbos adds durable *workflows*: a function whose intermediate steps are individually checkpointed. A workflow can enqueue a thousand children and await their results, and a crash resumes it mid-flight with each completed step preserved.
+
+**When to use Oban:** you need background jobs with a mature ecosystem and tooling around them.
+
+**When to use Dbos:** you need a multi-step operation to survive a crash partway through, with each step recorded.
+
+</details>
+
+<details><summary><strong>Dbos vs. Temporal</strong></summary>
+
+####
+
+Both provide durable execution. Temporal runs an external orchestration cluster, and your workflows move into Temporal workers. Dbos is a library over the Postgres you already have.
+
+**When to use Temporal:** you want a dedicated orchestration platform, or you need languages this port does not cover.
+
+**When to use Dbos:** you want durable execution inside an existing Elixir application, on your current infrastructure.
+
+</details>
+
+## Scope
+
+This port serves Elixir applications. Persisted values are Erlang terms, which preserves atoms, tuples, structs and dates exactly, and means a service in another language reads them as opaque bytes. The [migration guide](https://mbuhot.github.io/dbos_elixir/interop-migration.html) covers the path to a portable format if that changes.
+
+## License
+
+MIT. [LICENSE](https://github.com/mbuhot/dbos_elixir/blob/main/LICENSE) carries the DBOS, Inc. copyright notice in full, as a derivative work requires.
