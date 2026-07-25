@@ -35,6 +35,7 @@ defmodule Dbos.MixProject do
       {:telemetry, "~> 1.3"},
       {:ecto_sql, "~> 3.13", optional: true},
       {:jason, "~> 1.4", only: [:dev, :test]},
+      {:credo, "~> 1.7", only: [:dev, :test]},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end

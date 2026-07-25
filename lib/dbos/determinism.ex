@@ -51,6 +51,15 @@ defmodule Dbos.Determinism do
     :ok
   end
 
+  @doc """
+  The banned-construct entry `{description, fix}` for `node` in a workflow body, or `nil` when the
+  node is allowed. Repo-call detection needs a `Macro.Env`, so it is not covered here.
+  """
+  def workflow_banned_construct(node), do: banned(node, %{repo: nil})
+
+  @doc "The banned-construct entry `{description, fix}` for `node` in a step body, or `nil`."
+  def step_banned_construct(node), do: step_banned(node)
+
   defp collect_violation(node, acc, context) do
     case banned(node, context) do
       nil -> {node, acc}
