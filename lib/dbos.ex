@@ -256,6 +256,35 @@ defmodule Dbos do
   end
 
   @doc """
+  Checks whether `patch_name`'s new code path should run. Must be called from inside a workflow
+  context, and never from inside a step. Peeks (non-consuming) at the next step id and checks
+  `operation_outputs` for a checkpoint there:
+
+  - No row → a brand-new workflow, or an old workflow that has not yet reached this point.
+    Writes `"DBOS.patch-<patch_name>"` at that id and returns `true`, consuming the id.
+  - A row already recorded with that same `function_name` → a replay of an execution that
+    already took the patched path. Returns `true` again, consuming the id the same way.
+  - A row recorded with a different `function_name` → an execution that already ran past this
+    point under the old code. Returns `false` without consuming an id, so its original step-id
+    sequence stays intact and the new code this patch guards is skipped on replay.
+  """
+  def patch(patch_name) do
+    config = Runtime.current_config()
+    workflow_id = Runtime.current_workflow_id()
+    peeked_id = Runtime.peek_next_function_id()
+    function_name = StepNames.patch(patch_name)
+
+    case SystemDb.patch(config, workflow_id, peeked_id, function_name) do
+      true ->
+        Runtime.next_function_id()
+        true
+
+      false ->
+        false
+    end
+  end
+
+  @doc """
   Runs `fun` as a one-off durable step named `name`, without a `defstep`: the escape hatch for a
   step that does not deserve its own named function. Same checkpoint/replay semantics as
   `defstep` — see `Dbos.Runtime.run_step/3`. `opts` (default `[]`): `:max_retries`,

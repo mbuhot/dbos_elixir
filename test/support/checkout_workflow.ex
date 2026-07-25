@@ -43,6 +43,16 @@ defmodule Dbos.CheckoutWorkflow do
     :ok = Dbos.resume(target_workflow_id)
   end
 
+  defworkflow uses_a_patch(order_id), name: "uses_a_patch" do
+    charge = charge_card(order_id, 100)
+
+    if Dbos.patch("fraud-check") do
+      record_receipt(order_id, charge)
+    end
+
+    charge
+  end
+
   defworkflow even_branches(order_id, outcome), name: "even_branches" do
     case outcome do
       :approve -> charge_card(order_id, 100)

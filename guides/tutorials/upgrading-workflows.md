@@ -143,15 +143,45 @@ require running two application versions in parallel — both bodies live in the
 code at once. The tradeoff is code you have to keep around (and keep registered) until the old
 name's last instance finishes, and a naming scheme (`_v2`, `_v3`, ...) to track.
 
-### 3. A patch (not available in this port)
+### 3. A patch
 
-The upstream DBOS SDKs support an in-place "patch": a marker recorded once at a fixed point in a
-workflow so an *existing* instance's replay takes the old path while every fresh instance takes
-the new one, without a version bump or a new name. `lib/dbos/step_names.ex` reserves the
-step-name format this would use (`"DBOS.patch-" <> patch_name`), but there is no public
-`Dbos.patch` (or `deprecate_patch`) function in this port yet — the reservation is there for
-future support; no usable API exists today. Until it exists, use strategy 1 or 2 above for anything
-that would otherwise call for a patch.
+`Dbos.patch/1` inserts new steps into a workflow body without a version bump or a new name. It
+returns a boolean: `true` for code taking the new path, `false` for an existing instance whose
+replay must skip it and keep its original step sequence intact.
+
+```elixir
+defworkflow process_order(order_id), name: "process_order" do
+  charge = charge_card(order_id)
+
+  if Dbos.patch("fraud-check") do
+    fraud_check(order_id)
+  end
+
+  ship(order_id)
+end
+```
+
+| Call site | What `Dbos.patch("fraud-check")` returns | Why |
+|---|---|---|
+| A brand-new workflow | `true` | Nothing recorded at this point yet — takes the new path. |
+| An in-flight instance that has not reached this point yet | `true` | Same as above: no checkpoint there yet on replay. |
+| An in-flight instance that already ran past this point under the old code | `false` | A checkpoint already sits at this point, recorded under some other name (whatever step ran here originally) — the patch is not taken, and no id is consumed, so every step after it keeps its original `function_id`. |
+| A replay of an instance that already took this same patch | `true` | The checkpoint recorded here is the patch's own marker — replay reproduces the same decision. |
+
+A patch check is the "changing how many ids a branch allocates" case flagged in the table above,
+turned into a deliberate, checkpointed design: it allocates differently across old and new
+instances on purpose, recording that difference itself so replay stays consistent.
+`mix dbos.explain` recognizes `if Dbos.patch(...) do ... end` as its own case: a conditional
+0-or-1-id allocation, reported as such.
+
+A patch consumes an id only on the `true` path (both the "new workflow" and "replaying an
+already-patched instance" rows above); the `false` path consumes none, which is what keeps an
+old instance's downstream `function_id`s aligned with what it already recorded. Calling
+`Dbos.patch/1` outside a workflow, or from inside a step, raises — there is no meaningful
+decision to make without a workflow's checkpoint history to consult.
+
+Once every pre-patch instance has drained, the `if Dbos.patch(...)` check and its `false` branch
+can be deleted — the new code becomes the only code.
 
 ## Summary: what happens to an in-flight workflow
 
@@ -159,6 +189,7 @@ that would otherwise call for a patch.
 |---|---|---|
 | Bump `application_version` | Waits for an executor still running the old version; runs to completion unchanged | Run two fleets until the old one drains |
 | New workflow name | Keeps dispatching to the untouched old body under the old name | Keep the old function/name registered until it drains |
+| Patch (`Dbos.patch/1`) | Sees `false` at the patch point and skips the new step, keeping its recorded sequence | Keep the `if Dbos.patch(...)` check in the code until every pre-patch instance drains |
 | Do nothing, change the workflow in place | `Dbos.UnexpectedStepError` on its next step, or a decode failure on a changed struct shape, the first time it replays | Broken workflow, manual recovery |
 
 ## Rolling upgrade, end to end

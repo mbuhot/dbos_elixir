@@ -347,6 +347,48 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
+  Peeks at `(workflow_id, function_id)` in `operation_outputs`: no row means this is a new
+  workflow or one that has not yet reached this point, so it inserts `function_name` there and
+  returns `true`; a row whose `function_name` already matches means a replay of an
+  already-patched run, also `true`; a row with a different `function_name` means an execution
+  that already ran past this point under the old code, returns `false` and inserts nothing.
+  """
+  def patch(%Config{} = config, workflow_id, function_id, function_name) do
+    {:ok, patched?} =
+      transaction(config, [], fn conn ->
+        tx_config = %{config | conn: conn}
+        check_or_insert_patch(tx_config, workflow_id, function_id, function_name)
+      end)
+
+    patched?
+  end
+
+  defp check_or_insert_patch(config, workflow_id, function_id, function_name) do
+    sql = """
+    SELECT function_name FROM #{table(config, "operation_outputs")}
+    WHERE workflow_uuid = $1 AND function_id = $2
+    """
+
+    case query(config, sql, [workflow_id, function_id]) do
+      {:ok, %{rows: []}} ->
+        insert_patch_marker(config, workflow_id, function_id, function_name)
+        true
+
+      {:ok, %{rows: [[recorded_name]]}} ->
+        recorded_name == function_name
+    end
+  end
+
+  defp insert_patch_marker(config, workflow_id, function_id, function_name) do
+    sql = """
+    INSERT INTO #{table(config, "operation_outputs")} (workflow_uuid, function_id, function_name)
+    VALUES ($1, $2, $3)
+    """
+
+    {:ok, _result} = query(config, sql, [workflow_id, function_id, function_name])
+  end
+
+  @doc """
   Puts a queued `PENDING` workflow back to `ENQUEUED`, clearing `started_at_epoch_ms`.
   Returns `:cleared`, or `:not_cleared` if the
   row was not `PENDING` with a `queue_name` (e.g. another executor already claimed it).

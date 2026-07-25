@@ -77,6 +77,9 @@ defmodule Dbos.Explain do
       {:branch, kind, branches} ->
         render_branch(kind, branches, id, rest, steps, wfs, mod)
 
+      {:conditional, description} ->
+        {["id #{id}: #{description}"], id, false}
+
       :unknown ->
         {["id #{id}: CANNOT BE STATICALLY DETERMINED — #{unknown_reason(expr)}"], id, false}
 
@@ -142,10 +145,41 @@ defmodule Dbos.Explain do
      Enum.map(clauses, fn {:->, _, [[cond_expr], body]} -> {Macro.to_string(cond_expr), body} end)}
   end
 
+  defp classify(
+         {:if, _,
+          [
+            {{:., _, [{:__aliases__, _, [:Dbos]}, :patch]}, _, [_name_ast]} = patch_call,
+            _branches
+          ]},
+         steps,
+         wfs,
+         mod
+       ) do
+    classify(patch_call, steps, wfs, mod)
+    |> case do
+      {:conditional, description} ->
+        {:conditional,
+         description <>
+           " — this if's branch is patch-gated, so its own ids are not counted as an " <>
+           "uneven-branch violation"}
+    end
+  end
+
   defp classify({:if, _, [_cond, branches]}, _steps, _wfs, _mod) when is_list(branches) do
     then_body = Keyword.get(branches, :do)
     else_body = Keyword.get(branches, :else, {:__block__, [], []})
     {:branch, "if", [{"true", then_body}, {"false", else_body}]}
+  end
+
+  defp classify(
+         {{:., _, [{:__aliases__, _, [:Dbos]}, :patch]}, _, [name_ast]},
+         _steps,
+         _wfs,
+         _mod
+       ) do
+    {:conditional,
+     "Dbos.patch(#{Macro.to_string(name_ast)}) consumes 0 or 1 id, CONDITIONAL on the runtime " <>
+       "patch decision — not statically countable, and everything after it is not analyzed"}
   end
 
   defp classify({{:., _, [{:__aliases__, _, [:Dbos]}, fun]}, _, args}, _steps, _wfs, _mod) do

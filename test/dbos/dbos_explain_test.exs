@@ -67,6 +67,16 @@ defmodule Mix.Tasks.Dbos.ExplainTest do
     assert output =~ "id 1: Dbos.resume (DBOS.resumeWorkflow)"
   end
 
+  test "Dbos.patch is reported as consuming 0 or 1 id, conditionally, and analysis stops there" do
+    output =
+      capture_io(fn ->
+        Mix.Tasks.Dbos.Explain.run(["Dbos.CheckoutWorkflow.uses_a_patch/1"])
+      end)
+
+    assert output =~ "id 1: Dbos.patch(\"fraud-check\") consumes 0 or 1 id, CONDITIONAL"
+    refute output =~ "CANNOT BE STATICALLY DETERMINED"
+  end
+
   test "an unrecognized target raises with a usage message" do
     assert_raise Mix.Error, ~r/could not load|does not `use Dbos`|has no defworkflow/, fn ->
       capture_io(fn ->
