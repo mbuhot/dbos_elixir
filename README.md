@@ -19,3 +19,9 @@ Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_do
 and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
 be found at <https://hexdocs.pm/dbos>.
 
+## Testing
+
+`mix test` runs the unit/acceptance suite against a local Postgres. `mix test.integration` runs
+a Docker-based suite that kills a whole node and checks a second node recovers it. See
+`docs/testing.md`.
+

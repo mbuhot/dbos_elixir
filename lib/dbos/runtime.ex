@@ -7,6 +7,7 @@ defmodule Dbos.Runtime do
   """
 
   alias Dbos.Config
+  alias Dbos.RetryPolicy
   alias Dbos.Serialization
   alias Dbos.SystemDb
 
@@ -169,63 +170,25 @@ defmodule Dbos.Runtime do
   end
 
   defp run_with_retries(workflow_id, name, opts, fun) do
-    max_retries = Keyword.get(opts, :max_retries, 0)
-    base_interval_ms = Keyword.get(opts, :base_interval_ms, 100)
-    backoff_factor = Keyword.get(opts, :backoff_factor, 2.0)
-    max_interval_ms = Keyword.get(opts, :max_interval_ms, 5000)
-
-    attempt(
-      workflow_id,
-      name,
-      fun,
-      1,
-      max_retries,
-      base_interval_ms,
-      backoff_factor,
-      max_interval_ms
-    )
+    attempt(workflow_id, name, fun, RetryPolicy.new(opts), 1)
   end
 
-  defp attempt(workflow_id, name, fun, run, max_retries, base_ms, factor, max_ms) do
+  defp attempt(workflow_id, name, fun, policy, run) do
     case run_once(fun) do
       {:ok, value} ->
         {:ok, value}
 
       {:failed, kind, value, stacktrace} ->
-        settle_attempt(
-          workflow_id,
-          name,
-          fun,
-          run,
-          max_retries,
-          base_ms,
-          factor,
-          max_ms,
-          kind,
-          value,
-          stacktrace
-        )
+        settle_attempt(workflow_id, name, fun, policy, run, kind, value, stacktrace)
     end
   end
 
-  defp settle_attempt(
-         workflow_id,
-         name,
-         fun,
-         run,
-         max_retries,
-         base_ms,
-         factor,
-         max_ms,
-         kind,
-         value,
-         stacktrace
-       ) do
-    if run > max_retries do
-      exhaust_retries(workflow_id, name, max_retries, kind, value, stacktrace)
+  defp settle_attempt(workflow_id, name, fun, policy, run, kind, value, stacktrace) do
+    if RetryPolicy.retry?(policy, run) do
+      Process.sleep(RetryPolicy.delay_ms(policy, run))
+      attempt(workflow_id, name, fun, policy, run + 1)
     else
-      Process.sleep(backoff_delay_ms(run, base_ms, factor, max_ms))
-      attempt(workflow_id, name, fun, run + 1, max_retries, base_ms, factor, max_ms)
+      exhaust_retries(workflow_id, name, policy.max_retries, kind, value, stacktrace)
     end
   end
 
@@ -244,11 +207,6 @@ defmodule Dbos.Runtime do
     rescue
       exception -> {:failed, :error, exception, __STACKTRACE__}
     end
-  end
-
-  defp backoff_delay_ms(run, base_ms, factor, max_ms) do
-    delay = base_ms * :math.pow(factor, run - 1)
-    delay |> min(max_ms) |> round()
   end
 
   defp run_once(fun) do

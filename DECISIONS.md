@@ -2,6 +2,10 @@
 
 Durable execution engine for Elixir, derived from DBOS Transact.
 
+## Standing principle
+
+Stay consistent with the reference implementation. Where the Go engine has made a choice, match it, and record any deliberate departure in the tables below with its reason. A local optimisation that forks the schema, the wire format, or the algorithm costs more than it saves.
+
 ## Scope
 
 | Decision | Choice |
@@ -43,7 +47,7 @@ Recorded in `notes/`. Corrections to the original handoff document:
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Serialization column encoding | `Dbos.Serialization.encode/1` is `:erlang.term_to_binary/1` then `Base.encode64/1`; `decode/1` reverses it. | The `inputs`/`output`/`error` columns are `TEXT`, not `BYTEA`. Raw ETF bytes are not guaranteed valid UTF-8 and cannot be stored in a `TEXT` column safely; base64 makes the column contents plain ASCII. |
+| Serialization column encoding | `Dbos.Serialization.encode/1` is `:erlang.term_to_binary/1` then `Base.encode64/1`; `decode/1` reverses it. | Mirrors the reference's own gob serializer, which base64-wraps binary output into the same TEXT column (`dbos/serialization.go:150`). The columns are an opaque, format-agnostic payload slot — the `serialization` column exists so several encodings can coexist — and upstream base64-wraps even its default JSON serializer (`serialization.go:92`). JSONB was considered and rejected: it would forfeit the pluggable-format design, the DBOS console, and schema fidelity. |
 | `nil` round-trip | No sentinel marker (unlike upstream's `"__DBOS_NIL"` string for `DBOS_JSON`). `nil` is a native ETF term and round-trips through `encode/1`/`decode/1` like any other value. | ETF, unlike JSON-over-a-string-column, has no ambiguity between "absent" and "the value nil" to work around. |
 | Decoding unsafe terms | `decode/1` uses `:erlang.binary_to_term(binary, [:safe])` and additionally walks the result rejecting any pid, port, or reference, raising `ArgumentError`. | `:safe` alone does not reject pids/ports/refs already present in the source binary (verified empirically) — only atom-table growth. Workflow inputs/outputs are not process identities and should never contain one. |
 

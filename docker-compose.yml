@@ -1,0 +1,80 @@
+name: dbos_integration
+
+x-pg-env: &pg_env
+  PGHOST: postgres
+  PGPORT: "5432"
+  PGUSER: postgres
+  PGPASSWORD: postgres
+  PGDATABASE: dbos_integration
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: dbos_integration
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dbos_integration"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    build: .
+    environment:
+      <<: *pg_env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["mix", "run", "test/integration/migrate.exs"]
+
+  node1:
+    build: .
+    hostname: node1
+    environment:
+      <<: *pg_env
+      DBOS__VMID: node1
+      RELEASE_COOKIE: dbos_integration_secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: >
+      sh -c "elixir --name node1@node1 --cookie $$RELEASE_COOKIE -S mix run --no-halt test/integration/node_runtime.exs"
+
+  node2:
+    build: .
+    hostname: node2
+    environment:
+      <<: *pg_env
+      DBOS__VMID: node2
+      RELEASE_COOKIE: dbos_integration_secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: >
+      sh -c "elixir --name node2@node2 --cookie $$RELEASE_COOKIE -S mix run --no-halt test/integration/node_runtime.exs"
+
+  test-runner:
+    build: .
+    hostname: test-runner
+    environment:
+      <<: *pg_env
+      RELEASE_COOKIE: dbos_integration_secret
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      node1:
+        condition: service_started
+      node2:
+        condition: service_started
+    command: >
+      sh -c "elixir --name test-runner@test-runner --cookie $$RELEASE_COOKIE -S mix test test/integration --include integration --seed 0"

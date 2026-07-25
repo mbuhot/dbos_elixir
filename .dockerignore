@@ -1,0 +1,5 @@
+_build
+deps
+reference
+.git
+erl_crash.dump
