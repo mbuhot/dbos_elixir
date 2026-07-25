@@ -56,6 +56,20 @@ defmodule Dbos.Runtime do
   def current_deadline_epoch_ms, do: fetch_context!().deadline_epoch_ms
 
   @doc """
+  Which frame the caller is running in: `:step`, `:transaction`, or `:workflow_body`. Raises
+  `Dbos.NotInWorkflowError` outside an active context.
+  """
+  def current_frame do
+    context = fetch_context!()
+
+    cond do
+      context.in_transaction -> :transaction
+      context.in_step -> :step
+      true -> :workflow_body
+    end
+  end
+
+  @doc """
   Allocates and returns the next step id, `0, 1, 2, ...` in call order. Raises
   `Dbos.NotInWorkflowError` outside an active context.
   """

@@ -67,6 +67,10 @@ defmodule Dbos.Supervisor do
   `3001`). `:scheduler_poll_interval_ms` (default `30_000`) controls how often `Dbos.Scheduler`
   reconciles cron schedules from `workflow_schedules`.
 
+  `:patching_enabled` (default `false`) — allows `Dbos.patch/1` and `Dbos.deprecate_patch/1`.
+  Both raise `Dbos.PatchingDisabledError` under an engine that has not opted in, since a patch
+  check makes a workflow's step-id allocation conditional.
+
   `:park_exit_threshold_ms` (default `60_000`, or `:infinity` to disable parking) — a workflow
   blocked in `sleep`/`recv_message`/`get_event` with more than this much wait remaining exits its
   process instead of staying resident, per `Dbos.Waits`. `:park_replay_ceiling` (default `500`)
@@ -112,6 +116,7 @@ defmodule Dbos.Supervisor do
       scheduler_poll_interval_ms: Keyword.get(opts, :scheduler_poll_interval_ms, 30_000),
       park_exit_threshold_ms: Keyword.get(opts, :park_exit_threshold_ms, 60_000),
       park_replay_ceiling: Keyword.get(opts, :park_replay_ceiling, 500),
+      patching_enabled: Keyword.get(opts, :patching_enabled, false),
       testing: testing,
       queues: queues
     }

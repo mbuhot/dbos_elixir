@@ -5,7 +5,13 @@ defmodule Dbos.PatchTest do
   alias Dbos.SystemDb
 
   setup %{conn: conn} do
-    config = %Dbos.Config{db: Dbos.DB.Postgrex, conn: conn, executor_id: "exec-1"}
+    config = %Dbos.Config{
+      db: Dbos.DB.Postgrex,
+      conn: conn,
+      executor_id: "exec-1",
+      patching_enabled: true
+    }
+
     {:ok, config: config}
   end
 
@@ -131,6 +137,160 @@ defmodule Dbos.PatchTest do
     assert_raise Dbos.NotInWorkflowError, fn ->
       Dbos.patch("fraud-check")
     end
+  end
+
+  test "an instance that recorded the patch marker keeps every downstream step id after the patch is deprecated",
+       %{config: config} do
+    workflow_id = start_workflow(config, "wf-deprecate-replay")
+
+    Runtime.with_context([config: config, workflow_id: workflow_id], fn ->
+      Runtime.run_step("reserve_stock/1", [], fn -> %{reserved: true} end)
+
+      if Dbos.patch("fraud-check") do
+        Runtime.run_step("fraud_check/1", [], fn -> %{fraud_checked: true} end)
+      end
+
+      Runtime.run_step("ship_order/1", [], fn -> %{shipped: true} end)
+    end)
+
+    result =
+      Runtime.with_context([config: config, workflow_id: workflow_id, replay: true], fn ->
+        Runtime.run_step("reserve_stock/1", [], fn -> raise "must not run" end)
+        Dbos.deprecate_patch("fraud-check")
+        Runtime.run_step("fraud_check/1", [], fn -> raise "must not run" end)
+        Runtime.run_step("ship_order/1", [], fn -> raise "must not run" end)
+      end)
+
+    assert result == %{shipped: true}
+
+    {:ok, steps} = SystemDb.get_workflow_steps(config, workflow_id)
+
+    assert Enum.map(steps, &{&1.function_id, &1.function_name}) == [
+             {0, "reserve_stock/1"},
+             {1, "DBOS.patch-fraud-check"},
+             {2, "fraud_check/1"},
+             {3, "ship_order/1"}
+           ]
+  end
+
+  test "a workflow starting under deprecated-patch code records no marker and numbers its steps consecutively",
+       %{config: config} do
+    workflow_id = start_workflow(config, "wf-deprecate-fresh")
+
+    Runtime.with_context([config: config, workflow_id: workflow_id], fn ->
+      Runtime.run_step("reserve_stock/1", [], fn -> %{reserved: true} end)
+      Dbos.deprecate_patch("fraud-check")
+      Runtime.run_step("fraud_check/1", [], fn -> %{fraud_checked: true} end)
+      Runtime.run_step("ship_order/1", [], fn -> %{shipped: true} end)
+    end)
+
+    {:ok, steps} = SystemDb.get_workflow_steps(config, workflow_id)
+
+    assert Enum.map(steps, &{&1.function_id, &1.function_name}) == [
+             {0, "reserve_stock/1"},
+             {1, "fraud_check/1"},
+             {2, "ship_order/1"}
+           ]
+  end
+
+  test "an instance that ran past the patch point without a marker keeps its recorded sequence when the patch is deprecated",
+       %{config: config} do
+    workflow_id = start_workflow(config, "wf-deprecate-unmarked")
+
+    Runtime.with_context([config: config, workflow_id: workflow_id], fn ->
+      Runtime.run_step("reserve_stock/1", [], fn -> %{reserved: true} end)
+      Runtime.run_step("ship_order/1", [], fn -> %{shipped: true} end)
+    end)
+
+    result =
+      Runtime.with_context([config: config, workflow_id: workflow_id, replay: true], fn ->
+        Runtime.run_step("reserve_stock/1", [], fn -> raise "must not run" end)
+        Dbos.deprecate_patch("fraud-check")
+        Runtime.run_step("ship_order/1", [], fn -> raise "must not run" end)
+      end)
+
+    assert result == %{shipped: true}
+
+    {:ok, steps} = SystemDb.get_workflow_steps(config, workflow_id)
+
+    assert Enum.map(steps, &{&1.function_id, &1.function_name}) == [
+             {0, "reserve_stock/1"},
+             {1, "ship_order/1"}
+           ]
+  end
+
+  test "a deprecated patch inside a branch that is not taken consumes no id", %{config: config} do
+    workflow_id = start_workflow(config, "wf-deprecate-branch-skip")
+
+    Runtime.with_context([config: config, workflow_id: workflow_id], fn ->
+      Runtime.run_step("reserve_stock/1", [], fn -> %{reserved: true} end)
+
+      if false do
+        Dbos.deprecate_patch("unreachable")
+      end
+
+      Runtime.run_step("ship_order/1", [], fn -> %{shipped: true} end)
+    end)
+
+    {:ok, steps} = SystemDb.get_workflow_steps(config, workflow_id)
+
+    assert Enum.map(steps, &{&1.function_id, &1.function_name}) == [
+             {0, "reserve_stock/1"},
+             {1, "ship_order/1"}
+           ]
+  end
+
+  test "outside a workflow, Dbos.deprecate_patch raises Dbos.NotInWorkflowError" do
+    assert_raise Dbos.NotInWorkflowError, fn ->
+      Dbos.deprecate_patch("fraud-check")
+    end
+  end
+
+  test "an engine that has not opted into patching refuses to check a patch", %{config: config} do
+    config = %{config | patching_enabled: false}
+    workflow_id = start_workflow(config, "wf-patch-not-opted-in")
+
+    Runtime.with_context([config: config, workflow_id: workflow_id], fn ->
+      assert_raise Dbos.PatchingDisabledError, fn -> Dbos.patch("fraud-check") end
+      assert_raise Dbos.PatchingDisabledError, fn -> Dbos.deprecate_patch("fraud-check") end
+    end)
+
+    {:ok, steps} = SystemDb.get_workflow_steps(config, workflow_id)
+    assert steps == []
+  end
+
+  test "a patch checked from inside a step is rejected and records nothing beyond the step itself",
+       %{config: config} do
+    workflow_id = start_workflow(config, "wf-patch-in-step")
+
+    Runtime.with_context([config: config, workflow_id: workflow_id], fn ->
+      assert_raise Dbos.PatchInStepError, fn ->
+        Runtime.run_step("reserve_stock/1", [], fn -> Dbos.patch("fraud-check") end)
+      end
+    end)
+
+    {:ok, steps} = SystemDb.get_workflow_steps(config, workflow_id)
+    assert Enum.map(steps, &{&1.function_id, &1.function_name}) == [{0, "reserve_stock/1"}]
+  end
+
+  test "a deprecated patch checked from inside a step is rejected", %{config: config} do
+    workflow_id = start_workflow(config, "wf-deprecate-in-step")
+
+    Runtime.with_context([config: config, workflow_id: workflow_id], fn ->
+      assert_raise Dbos.PatchInStepError, fn ->
+        Runtime.run_step("reserve_stock/1", [], fn -> Dbos.deprecate_patch("fraud-check") end)
+      end
+    end)
+  end
+
+  test "a patch checked from inside a transaction body is rejected", %{config: config} do
+    workflow_id = start_workflow(config, "wf-patch-in-transaction")
+
+    Runtime.with_context([config: config, workflow_id: workflow_id], fn ->
+      assert_raise Dbos.PatchInStepError, fn ->
+        Dbos.transaction("record_order/1", fn _conn -> Dbos.patch("fraud-check") end)
+      end
+    end)
   end
 
   test "the exact (function_id, function_name) sequence for a workflow using a patch alongside plain steps",

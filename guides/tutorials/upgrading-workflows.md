@@ -177,11 +177,39 @@ instances on purpose, recording that difference itself so replay stays consisten
 A patch consumes an id only on the `true` path (both the "new workflow" and "replaying an
 already-patched instance" rows above); the `false` path consumes none, which is what keeps an
 old instance's downstream `function_id`s aligned with what it already recorded. Calling
-`Dbos.patch/1` outside a workflow, or from inside a step, raises — there is no meaningful
-decision to make without a workflow's checkpoint history to consult.
+`Dbos.patch/1` outside a workflow, or from inside a step or a `Dbos.transaction/3` body, raises
+`Dbos.PatchInStepError` — there is no meaningful decision to make without a workflow body's own
+step-id counter and checkpoint history to consult.
 
-Once every pre-patch instance has drained, the `if Dbos.patch(...)` check and its `false` branch
-can be deleted — the new code becomes the only code.
+Patching is opt-in. Start the engine with `patching_enabled: true`; without it both
+`Dbos.patch/1` and `Dbos.deprecate_patch/1` raise `Dbos.PatchingDisabledError`.
+
+#### Retiring the patch
+
+Once every pre-patch instance has drained, the `if Dbos.patch(...)` check comes out and the new
+step runs unconditionally. Instances that *did* record the patch marker may still be in flight,
+though, and each of those has a `"DBOS.patch-fraud-check"` checkpoint sitting at an id the new
+code no longer allocates. `Dbos.deprecate_patch/1` stands in that spot and absorbs it:
+
+```elixir
+defworkflow process_order(order_id), name: "process_order" do
+  charge = charge_card(order_id)
+
+  Dbos.deprecate_patch("fraud-check")
+  fraud_check(order_id)
+
+  ship(order_id)
+end
+```
+
+| Call site | What `Dbos.deprecate_patch("fraud-check")` does | Why |
+|---|---|---|
+| A replay of an instance that took the patch | Consumes one id | The marker is recorded here — swallowing its id keeps every later step aligned with what that instance wrote. |
+| A brand-new workflow | Consumes no id, writes nothing | The marker is retired; the next step takes the id it used to hold. |
+| An in-flight instance that ran past this point without the marker | Consumes no id | Its recorded sequence is left exactly as it is. |
+
+Once every marker-carrying instance has drained too, the `Dbos.deprecate_patch/1` line can be
+deleted — the new code becomes the only code.
 
 ## Summary: what happens to an in-flight workflow
 

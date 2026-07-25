@@ -17,22 +17,6 @@ Leases narrow the window; nothing closes it. Documented in `docs/determinism.md`
 Listed here so it is not mistaken for an oversight — a step that must never repeat needs an
 idempotency key of its own.
 
-## Missing surface
-
-### `DeprecatePatch`
-`Dbos.patch/1` exists; its counterpart, which retires a patch marker once every in-flight workflow
-predating it has drained, does not. Same conditional step-id shape as `patch`.
-
-### `list_workflows` filters
-Roughly fourteen filters are unimplemented: workflow ids, id prefix, authenticated user, forked
-from, parent workflow id, deduplication id, completed before/after, dequeued before/after, has
-parent, attributes containment, schedule name, is-debounced, and the load-input/output toggles.
-Each is a new column predicate. The admin API and any console are limited by their absence.
-
-### Patch guards
-The reference gates patching behind config and rejects a patch called from inside a step. Neither
-is ported.
-
 ## Operational
 
 ### Fencing tokens

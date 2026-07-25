@@ -886,6 +886,39 @@ defmodule Dbos.SystemDbTest do
     end
   end
 
+  describe "deprecate_patch/4" do
+    test "returns true when the retired marker is recorded at that id", %{config: config} do
+      {:ok, workflow_id} =
+        SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1]})
+
+      insert_operation_output(config, workflow_id, 0, "DBOS.patch-fraud-check", nil)
+
+      assert SystemDb.deprecate_patch(config, workflow_id, 0, "DBOS.patch-fraud-check") == true
+    end
+
+    test "returns false and inserts nothing when no checkpoint exists yet", %{config: config} do
+      {:ok, workflow_id} =
+        SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1]})
+
+      assert SystemDb.deprecate_patch(config, workflow_id, 0, "DBOS.patch-fraud-check") == false
+
+      {:ok, steps} = SystemDb.get_workflow_steps(config, workflow_id)
+      assert steps == []
+    end
+
+    test "returns false when the recorded function_name is a different step", %{config: config} do
+      {:ok, workflow_id} =
+        SystemDb.insert_enqueued_workflow(config, %{name: "W", queue_name: "q", inputs: [1]})
+
+      insert_operation_output(config, workflow_id, 0, "ship_order/1", %{shipped: true})
+
+      assert SystemDb.deprecate_patch(config, workflow_id, 0, "DBOS.patch-fraud-check") == false
+
+      {:ok, steps} = SystemDb.get_workflow_steps(config, workflow_id)
+      assert Enum.map(steps, &{&1.function_id, &1.function_name}) == [{0, "ship_order/1"}]
+    end
+  end
+
   describe "update_workflow_outcome/3" do
     test "SUCCESS records the output and clears deduplication_id", %{config: config} do
       {:ok, workflow_id} =

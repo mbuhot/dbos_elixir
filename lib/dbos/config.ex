@@ -24,6 +24,7 @@ defmodule Dbos.Config do
             scheduler_poll_interval_ms: 30_000,
             park_exit_threshold_ms: 60_000,
             park_replay_ceiling: 500,
+            patching_enabled: false,
             testing: nil,
             queues: []
 
@@ -47,6 +48,7 @@ defmodule Dbos.Config do
           scheduler_poll_interval_ms: pos_integer,
           park_exit_threshold_ms: pos_integer | :infinity,
           park_replay_ceiling: pos_integer,
+          patching_enabled: boolean,
           testing: nil | :inline | :manual,
           queues: [Dbos.Queue.t()]
         }

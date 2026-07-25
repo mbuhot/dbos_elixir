@@ -174,6 +174,38 @@ defmodule Dbos.StepInTransactionError do
   end
 end
 
+defmodule Dbos.PatchingDisabledError do
+  @moduledoc "Raised when `Dbos.patch/1` or `Dbos.deprecate_patch/1` runs under an engine whose `:patching_enabled` option is off."
+
+  defexception [:patch_name]
+
+  @impl true
+  def message(%__MODULE__{patch_name: patch_name}) do
+    "patch #{inspect(patch_name)} requires patching to be enabled; start the engine with " <>
+      "patching_enabled: true"
+  end
+end
+
+defmodule Dbos.PatchInStepError do
+  @moduledoc """
+  Raised when `Dbos.patch/1` or `Dbos.deprecate_patch/1` is called from inside a step or a
+  `Dbos.transaction/3` body. A patch check decides whether to consume a step id, which only the
+  workflow body allocates.
+  """
+
+  defexception [:workflow_id, :patch_name, :enclosing]
+
+  @impl true
+  def message(%__MODULE__{
+        workflow_id: workflow_id,
+        patch_name: patch_name,
+        enclosing: enclosing
+      }) do
+    "workflow #{workflow_id}: cannot check patch #{inspect(patch_name)} from within a " <>
+      "#{enclosing} body; call it from the workflow body"
+  end
+end
+
 defmodule Dbos.NotSupportedError do
   @moduledoc "Raised when a call requires functionality the engine does not implement."
 

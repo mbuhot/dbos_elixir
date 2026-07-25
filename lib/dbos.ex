@@ -295,9 +295,10 @@ defmodule Dbos do
   end
 
   @doc """
-  Checks whether `patch_name`'s new code path should run. Must be called from inside a workflow
-  context, and never from inside a step. Peeks (non-consuming) at the next step id and checks
-  `operation_outputs` for a checkpoint there:
+  Checks whether `patch_name`'s new code path should run. Requires the engine's
+  `:patching_enabled` option. Must be called from inside a workflow context, and never from
+  inside a step. Peeks (non-consuming) at the next step id and checks `operation_outputs` for a
+  checkpoint there:
 
   - No row → a brand-new workflow, or an old workflow that has not yet reached this point.
     Writes `"DBOS.patch-<patch_name>"` at that id and returns `true`, consuming the id.
@@ -308,7 +309,7 @@ defmodule Dbos do
     sequence stays intact and the new code this patch guards is skipped on replay.
   """
   def patch(patch_name) do
-    config = Runtime.current_config()
+    config = check_patch_allowed!(patch_name)
     workflow_id = Runtime.current_workflow_id()
     peeked_id = Runtime.peek_next_function_id()
     function_name = StepNames.patch(patch_name)
@@ -320,6 +321,56 @@ defmodule Dbos do
 
       false ->
         false
+    end
+  end
+
+  @doc """
+  Retires `patch_name` at the call site `patch/1` occupied, once every execution that predates
+  the patch has drained and the code it guarded runs unconditionally. Requires the engine's
+  `:patching_enabled` option. Must be called from inside a workflow context, and never from
+  inside a step. Peeks (non-consuming) at the next step id and checks `operation_outputs` for a
+  checkpoint there:
+
+  - A row already recorded with `"DBOS.patch-<patch_name>"` → a replay of an execution that took
+    the patched path while the marker was still being written. Consumes the id, so the steps
+    after it line up with the ids that execution recorded.
+  - No row → a brand-new workflow, or an old workflow that has not yet reached this point.
+    Writes nothing and consumes no id, so the marker is absent from this execution's sequence
+    and the following step takes the id the marker used to hold.
+  - A row recorded with a different `function_name` → an execution that ran past this point
+    without the marker. Consumes no id, so its original step-id sequence stays intact.
+
+  Returns `:ok`.
+  """
+  def deprecate_patch(patch_name) do
+    config = check_patch_allowed!(patch_name)
+    workflow_id = Runtime.current_workflow_id()
+    peeked_id = Runtime.peek_next_function_id()
+    function_name = StepNames.patch(patch_name)
+
+    if SystemDb.deprecate_patch(config, workflow_id, peeked_id, function_name) do
+      Runtime.next_function_id()
+    end
+
+    :ok
+  end
+
+  defp check_patch_allowed!(patch_name) do
+    config = Runtime.current_config()
+
+    unless config.patching_enabled do
+      raise Dbos.PatchingDisabledError, patch_name: patch_name
+    end
+
+    case Runtime.current_frame() do
+      :workflow_body ->
+        config
+
+      enclosing ->
+        raise Dbos.PatchInStepError,
+          workflow_id: Runtime.current_workflow_id(),
+          patch_name: patch_name,
+          enclosing: enclosing
     end
   end
 

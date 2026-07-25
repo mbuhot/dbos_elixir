@@ -412,6 +412,23 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
+  Peeks at `(workflow_id, function_id)` in `operation_outputs` and returns whether a retired
+  patch marker sits there: `true` only for a row whose `function_name` matches, `false` for no
+  row at all and for a row recording anything else. Writes nothing.
+  """
+  def deprecate_patch(%Config{} = config, workflow_id, function_id, function_name) do
+    sql = """
+    SELECT function_name FROM #{table(config, "operation_outputs")}
+    WHERE workflow_uuid = $1 AND function_id = $2
+    """
+
+    case query(config, sql, [workflow_id, function_id]) do
+      {:ok, %{rows: []}} -> false
+      {:ok, %{rows: [[recorded_name]]}} -> recorded_name == function_name
+    end
+  end
+
+  @doc """
   Puts a queued `PENDING` workflow back to `ENQUEUED`, clearing `started_at_epoch_ms`.
   Returns `:cleared`, or `:not_cleared` if the
   row was not `PENDING` with a `queue_name` (e.g. another executor already claimed it).

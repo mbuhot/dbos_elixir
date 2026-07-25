@@ -172,13 +172,14 @@ defmodule Dbos.Explain do
   end
 
   defp classify(
-         {{:., _, [{:__aliases__, _, [:Dbos]}, :patch]}, _, [name_ast]},
+         {{:., _, [{:__aliases__, _, [:Dbos]}, fun]}, _, [name_ast]},
          _steps,
          _wfs,
          _mod
-       ) do
+       )
+       when fun in [:patch, :deprecate_patch] do
     {:conditional,
-     "Dbos.patch(#{Macro.to_string(name_ast)}) consumes 0 or 1 id, CONDITIONAL on the runtime " <>
+     "Dbos.#{fun}(#{Macro.to_string(name_ast)}) consumes 0 or 1 id, CONDITIONAL on the runtime " <>
        "patch decision — not statically countable, and everything after it is not analyzed"}
   end
 

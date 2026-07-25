@@ -203,6 +203,7 @@ no error at all.
 | Starting/enqueueing a child workflow | 1 (parent side) | Consumed very early, before any error path — the child's own workflow ID is derived from this number, so it must be stable |
 | Fork | 1 | |
 | Patch check | 0 or 1 | Only consumes an ID if the patch actually applies on this run (see below) |
+| Patch retirement | 0 or 1 | Only consumes an ID if this run recorded the patch marker (see below) |
 
 The receive/getEvent "reserve 2 up front, even if the second is never used" rule exists
 specifically so that both the "message was already there" path and the "had to wait"
