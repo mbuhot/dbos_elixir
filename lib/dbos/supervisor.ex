@@ -34,6 +34,10 @@ defmodule Dbos.Supervisor do
   many-to-one); `:orphan_sweep` — a further `[:enabled, :interval_ms (default 300_000),
   :threshold_ms (default 300_000)]` for the periodic scan that catches executors no live node
   ever saw depart.
+
+  `:admin_server` opts, off by default: `:enabled` — starts `Dbos.AdminServer`; `:port` (default
+  `3001`, matching upstream). `:scheduler_poll_interval_ms` (default `30_000`, matching upstream)
+  controls how often `Dbos.Scheduler` reconciles cron schedules from `workflow_schedules`.
   """
   def start_link(opts) do
     name = Keyword.get(opts, :name, Dbos)
@@ -44,7 +48,9 @@ defmodule Dbos.Supervisor do
   def init(opts) do
     name = Keyword.get(opts, :name, Dbos)
     {db_module, conn} = Keyword.fetch!(opts, :db)
-    workflows = opts |> Keyword.get(:workflows, []) |> Enum.flat_map(&normalize_workflow_entry/1)
+    workflow_entries = Keyword.get(opts, :workflows, [])
+    workflows = Enum.flat_map(workflow_entries, &normalize_workflow_entry/1)
+    schedules = Enum.flat_map(workflow_entries, &collect_schedules/1)
 
     cluster_opts = Keyword.get(opts, :cluster, [])
     orphan_sweep_opts = Keyword.get(cluster_opts, :orphan_sweep, [])
@@ -64,7 +70,8 @@ defmodule Dbos.Supervisor do
       orphan_sweep_interval_ms: Keyword.get(orphan_sweep_opts, :interval_ms, 300_000),
       orphan_sweep_threshold_ms: Keyword.get(orphan_sweep_opts, :threshold_ms, 300_000),
       notifications: Keyword.get(opts, :notifications, :listen),
-      notifications_conn_opts: Keyword.get(opts, :notifications_conn_opts)
+      notifications_conn_opts: Keyword.get(opts, :notifications_conn_opts),
+      scheduler_poll_interval_ms: Keyword.get(opts, :scheduler_poll_interval_ms, 30_000)
     }
 
     Dbos.put_config(config)
@@ -82,10 +89,24 @@ defmodule Dbos.Supervisor do
         {Dbos.Notifications, name: name},
         {WorkflowSup, name: name},
         {Dbos.Recovery, name: name},
-        {Dbos.Queue.Sup, name: name, queues: queues}
-      ] ++ cluster_children(config)
+        {Dbos.Queue.Sup, name: name, queues: queues},
+        {Dbos.Scheduler,
+         name: name, schedules: schedules, poll_interval_ms: config.scheduler_poll_interval_ms}
+      ] ++
+        cluster_children(config) ++
+        admin_server_children(name, Keyword.get(opts, :admin_server, []))
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  defp admin_server_children(_name, opts) when opts in [nil, false], do: []
+
+  defp admin_server_children(name, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      [{Dbos.AdminServer, name: name, port: Keyword.get(opts, :port, 3001)}]
+    else
+      []
+    end
   end
 
   defp cluster_children(%Config{cluster_enabled: false}), do: []
@@ -131,4 +152,12 @@ defmodule Dbos.Supervisor do
   defp normalize_workflow_entry(module) when is_atom(module) do
     Enum.map(module.__dbos_workflows__(), fn {name, mfa, _ast} -> {name, mfa} end)
   end
+
+  defp collect_schedules(module) when is_atom(module) do
+    if function_exported?(module, :__dbos_schedules__, 0),
+      do: module.__dbos_schedules__(),
+      else: []
+  end
+
+  defp collect_schedules(_entry), do: []
 end

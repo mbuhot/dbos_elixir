@@ -13,6 +13,7 @@ defmodule Dbos.Recovery do
 
   alias Dbos.Registry
   alias Dbos.SystemDb
+  alias Dbos.Telemetry
   alias Dbos.WorkflowSup
 
   @doc "Starts recovery for the engine named `opts[:name]`, scanning once in a `handle_continue` so `start_link` returns promptly."
@@ -42,17 +43,23 @@ defmodule Dbos.Recovery do
   one call claims; the default is unbounded, matching `recover_pending/1`'s historical behaviour.
   Callers driven by cluster membership (`Dbos.Cluster.NodeWatcher`, `Dbos.Cluster.OrphanSweep`)
   pass an explicit `config.reclaim_batch_size` instead.
+
+  Returns every workflow id this call actually acted on (queue-cleared or reclaimed-and-redispatched),
+  matching upstream's `POST /dbos-workflow-recovery` response shape.
   """
   def reclaim(engine_name, dead_executor_ids, opts \\ []) do
     config = Dbos.config(engine_name)
+    metadata = %{engine: engine_name, executor_ids: dead_executor_ids}
 
-    config
-    |> SystemDb.list_queued_pending_workflow_ids(dead_executor_ids)
-    |> Enum.each(&SystemDb.clear_queue_assignment(config, &1))
+    Telemetry.span_recovery(metadata, fn ->
+      queued_ids = SystemDb.list_queued_pending_workflow_ids(config, dead_executor_ids)
+      Enum.each(queued_ids, &SystemDb.clear_queue_assignment(config, &1))
 
-    config
-    |> SystemDb.reclaim_pending_workflows(dead_executor_ids, opts)
-    |> Enum.each(&recover_one(engine_name, config, &1))
+      reclaimed = SystemDb.reclaim_pending_workflows(config, dead_executor_ids, opts)
+      Enum.each(reclaimed, &recover_one(engine_name, config, &1))
+
+      queued_ids ++ Enum.map(reclaimed, & &1.workflow_uuid)
+    end)
   end
 
   @doc """

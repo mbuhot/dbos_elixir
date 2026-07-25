@@ -67,6 +67,14 @@ defmodule Dbos.Runtime do
   end
 
   @doc """
+  Returns the id that the next `next_function_id/0` call would allocate, without consuming it.
+  Used by operations that must peek at a step's checkpoint before deciding whether to consume its
+  id — currently `DBOS.getResult`, per `notes/step-ids.md`. Raises `Dbos.NotInWorkflowError`
+  outside an active context.
+  """
+  def peek_next_function_id, do: fetch_context!().step_id + 1
+
+  @doc """
   Establishes a workflow context around `fun`, restoring whatever context (if any) was active
   before this call once `fun` returns, raises, throws, or exits. `opts` is `:config`,
   `:workflow_id`, and optionally `:replay` (default `false`).

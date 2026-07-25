@@ -184,7 +184,7 @@ defmodule Dbos.Explain do
             wf_mod == mod and wf_fun == fun and wf_arity == arity
           end) ->
         {_key, name} = match
-        {:step, 1, "child workflow #{fun}/#{arity} (#{inspect(name)})"}
+        {:step, 2, "child workflow #{fun}/#{arity} (#{inspect(name)}) (start + DBOS.getResult)"}
 
       true ->
         :unknown
@@ -204,6 +204,7 @@ defmodule Dbos.Explain do
   defp dbos_op(:send_message, _arity), do: {:step, 1, "Dbos.send_message"}
   defp dbos_op(:transaction, _arity), do: {:step, 1, "Dbos.transaction"}
   defp dbos_op(:start, _arity), do: {:step, 1, "Dbos.start (child workflow)"}
+  defp dbos_op(:await, _arity), do: {:step, 1, "Dbos.await (DBOS.getResult)"}
   defp dbos_op(:enqueue, _arity), do: {:step, 1, "Dbos.enqueue"}
   defp dbos_op(_fun, _arity), do: :unknown
 

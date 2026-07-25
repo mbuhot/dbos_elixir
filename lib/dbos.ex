@@ -13,6 +13,8 @@ defmodule Dbos do
   alias Dbos.Queue
   alias Dbos.Registry
   alias Dbos.Runtime
+  alias Dbos.Serialization
+  alias Dbos.StepNames
   alias Dbos.SystemDb
   alias Dbos.Uuid
   alias Dbos.WorkflowHandle
@@ -97,14 +99,93 @@ defmodule Dbos do
   transport available for a workflow finished by a different engine instance, since upstream has
   no `pg_notify` channel for workflow completion. `opts[:timeout_ms]`, if given, bounds how long
   this call waits.
+
+  Called from inside a workflow, this consumes a step id and checkpoints a `"DBOS.getResult"`
+  step — but only *after* the wait completes, unlike every other durable operation, per
+  `notes/step-ids.md`: a non-consuming peek at the next id is taken first, and replaying a
+  completed await replays the checkpointed outcome without waiting again. A `{:error, :timeout}`
+  outcome is never checkpointed, matching upstream (`workflow.go:209-316`). Outside a workflow,
+  no id is allocated and nothing is checkpointed.
   """
   def await(%WorkflowHandle{} = handle, opts \\ []) do
+    if Runtime.in_workflow?() do
+      await_within_workflow(handle, opts)
+    else
+      poll_handle_outcome(handle, opts)
+    end
+  end
+
+  defp poll_handle_outcome(handle, opts) do
     poll_interval_ms = Keyword.get(opts, :poll_interval_ms, 100)
     timeout_ms = Keyword.get(opts, :timeout_ms)
     config = config(handle.engine)
     deadline = timeout_ms && System.monotonic_time(:millisecond) + timeout_ms
 
     poll_for_outcome(config, handle.engine, handle.workflow_id, poll_interval_ms, deadline)
+  end
+
+  defp await_within_workflow(handle, opts) do
+    config = Runtime.current_config()
+    workflow_id = Runtime.current_workflow_id()
+    peeked_id = Runtime.peek_next_function_id()
+
+    case SystemDb.check_operation_execution(
+           config,
+           workflow_id,
+           peeked_id,
+           StepNames.get_result()
+         ) do
+      {:replay, output} ->
+        Runtime.next_function_id()
+        {:ok, output}
+
+      {:replay_failure, %{value: exception}} ->
+        Runtime.next_function_id()
+        {:error, exception}
+
+      :none ->
+        started_at = System.os_time(:millisecond)
+        outcome = poll_handle_outcome(handle, opts)
+        checkpoint_get_result(config, workflow_id, handle.workflow_id, started_at, outcome)
+    end
+  end
+
+  defp checkpoint_get_result(
+         _config,
+         _workflow_id,
+         _child_workflow_id,
+         _started_at,
+         {:error, :timeout} = outcome
+       ) do
+    outcome
+  end
+
+  defp checkpoint_get_result(config, workflow_id, child_workflow_id, started_at, outcome) do
+    function_id = Runtime.next_function_id()
+    completed_at = System.os_time(:millisecond)
+
+    attrs =
+      case outcome do
+        {:ok, output} -> %{output: Serialization.encode(output)}
+        {:error, exception} -> %{error: Serialization.encode_failure(:error, exception, [])}
+      end
+
+    SystemDb.record_operation_result(
+      config,
+      Map.merge(
+        %{
+          workflow_id: workflow_id,
+          function_id: function_id,
+          function_name: StepNames.get_result(),
+          child_workflow_id: child_workflow_id,
+          started_at: started_at,
+          completed_at: completed_at
+        },
+        attrs
+      )
+    )
+
+    outcome
   end
 
   @doc """

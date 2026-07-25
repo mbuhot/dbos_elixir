@@ -840,6 +840,220 @@ defmodule Dbos.SystemDb do
     num_rows
   end
 
+  @debounce_columns ~w(
+    workflow_uuid status inputs name queue_name deduplication_id application_version
+    created_at updated_at recovery_attempts delay_until_epoch_ms debounce_deadline_epoch_ms
+    is_debounced serialization
+  )
+
+  @doc """
+  Inserts a fresh debounced workflow: always `DELAYED` (even for a zero-length bounce window),
+  `is_debounced = TRUE`, `deduplication_id = params[:debounce_key]`, per `notes/queues.md` §8.
+  """
+  def insert_debounced_workflow(%Config{} = config, params) do
+    workflow_id = Map.get(params, :workflow_id) || Uuid.v4()
+    now = System.os_time(:millisecond)
+
+    values = [
+      workflow_id,
+      Status.to_string(:delayed),
+      Serialization.encode(Map.fetch!(params, :inputs)),
+      Map.fetch!(params, :name),
+      Map.fetch!(params, :queue_name),
+      Map.fetch!(params, :debounce_key),
+      Map.get(params, :application_version, config.application_version),
+      now,
+      now,
+      0,
+      Map.fetch!(params, :delay_until_epoch_ms),
+      Map.get(params, :debounce_deadline_epoch_ms),
+      true,
+      Serialization.format_name()
+    ]
+
+    placeholders = 1..length(@debounce_columns) |> Enum.map_join(", ", &"$#{&1}")
+
+    sql = """
+    INSERT INTO #{table(config, "workflow_status")} (#{Enum.join(@debounce_columns, ", ")})
+    VALUES (#{placeholders})
+    """
+
+    case config.db.query(config.conn, sql, values) do
+      {:ok, _result} ->
+        {:ok, workflow_id}
+
+      {:error, error} ->
+        handle_enqueue_error(
+          error,
+          workflow_id,
+          %{
+            queue_name: Map.fetch!(params, :queue_name),
+            deduplication_id: Map.fetch!(params, :debounce_key)
+          }
+        )
+    end
+  end
+
+  @doc """
+  Bounces an existing debounced, still-`DELAYED` workflow held at `(name, queue_name,
+  debounce_key)`: extends `delay_until_epoch_ms` (capped at `debounce_deadline_epoch_ms` if one
+  is set) and replaces `inputs`, per `notes/queues.md` §8 (`debounceDelayedWorkflowInternal`).
+  Returns `{:bounced, workflow_id}` if a row matched, or `:not_found` if none did (the caller
+  must then fall back to `get_debounce_holder/3`).
+  """
+  def bounce_debounced_workflow(
+        %Config{} = config,
+        name,
+        queue_name,
+        debounce_key,
+        inputs,
+        requested_delay_until_epoch_ms
+      ) do
+    now = System.os_time(:millisecond)
+
+    sql = """
+    UPDATE #{table(config, "workflow_status")}
+        SET delay_until_epoch_ms = CASE
+              WHEN debounce_deadline_epoch_ms IS NOT NULL AND debounce_deadline_epoch_ms < $1
+              THEN debounce_deadline_epoch_ms
+              ELSE $1
+            END,
+            inputs = $2, serialization = $3, updated_at = $4
+        WHERE name = $5 AND queue_name = $6 AND deduplication_id = $7
+          AND status = $8 AND is_debounced = TRUE
+        RETURNING workflow_uuid
+    """
+
+    params = [
+      requested_delay_until_epoch_ms,
+      Serialization.encode(inputs),
+      Serialization.format_name(),
+      now,
+      name,
+      queue_name,
+      debounce_key,
+      Status.to_string(:delayed)
+    ]
+
+    case config.db.query(config.conn, sql, params) do
+      {:ok, %{rows: [[workflow_id]]}} -> {:bounced, workflow_id}
+      {:ok, %{rows: []}} -> :not_found
+    end
+  end
+
+  @doc """
+  Looks up whoever currently holds `(queue_name, debounce_key)`'s deduplication slot, per
+  `notes/queues.md` §8's bounce-miss follow-up query. Returns `:none` if the slot is free, or
+  `{:holder, workflow_id, is_debounced, name}`.
+  """
+  def get_debounce_holder(%Config{} = config, queue_name, debounce_key) do
+    sql = """
+    SELECT workflow_uuid, is_debounced, name FROM #{table(config, "workflow_status")}
+    WHERE queue_name = $1 AND deduplication_id = $2
+    """
+
+    case config.db.query(config.conn, sql, [queue_name, debounce_key]) do
+      {:ok, %{rows: [[workflow_id, is_debounced, name]]}} ->
+        {:holder, workflow_id, is_debounced, name}
+
+      {:ok, %{rows: []}} ->
+        :none
+    end
+  end
+
+  @doc """
+  Registers/updates a schedule's static definition in `workflow_schedules`, per `notes/schema.md`.
+  Idempotent on `schedule_name`: an existing row's `last_fired_at`/`status` are left untouched
+  (an operator-paused schedule, or one already mid-catch-up, survives a redeploy unchanged) —
+  every other column is overwritten from the caller's declared definition. Returns
+  `{last_fired_at_epoch_ms | nil, status}`.
+  """
+  def register_schedule(%Config{} = config, attrs) do
+    sql = """
+    INSERT INTO #{table(config, "workflow_schedules")}
+        (schedule_id, schedule_name, workflow_name, workflow_class_name, schedule, context,
+         automatic_backfill, cron_timezone, queue_name)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    ON CONFLICT (schedule_name) DO UPDATE SET
+        workflow_name = EXCLUDED.workflow_name,
+        workflow_class_name = EXCLUDED.workflow_class_name,
+        schedule = EXCLUDED.schedule,
+        context = EXCLUDED.context,
+        automatic_backfill = EXCLUDED.automatic_backfill,
+        cron_timezone = EXCLUDED.cron_timezone,
+        queue_name = EXCLUDED.queue_name
+    RETURNING last_fired_at, status
+    """
+
+    params = [
+      Map.get_lazy(attrs, :schedule_id, &Uuid.v4/0),
+      Map.fetch!(attrs, :schedule_name),
+      Map.fetch!(attrs, :workflow_name),
+      Map.get(attrs, :workflow_class_name),
+      Map.fetch!(attrs, :schedule),
+      Map.fetch!(attrs, :context),
+      Map.get(attrs, :automatic_backfill, false),
+      Map.get(attrs, :cron_timezone),
+      Map.get(attrs, :queue_name)
+    ]
+
+    {:ok, %{rows: [[last_fired_at, status]]}} = config.db.query(config.conn, sql, params)
+    {parse_epoch_ms_text(last_fired_at), status}
+  end
+
+  @doc "Every `ACTIVE` schedule's definition, per `Dbos.Scheduler`'s reconcile loop."
+  def list_active_schedules(%Config{} = config) do
+    sql = """
+    SELECT schedule_name, workflow_name, schedule, context, automatic_backfill, cron_timezone,
+           queue_name, last_fired_at
+    FROM #{table(config, "workflow_schedules")} WHERE status = 'ACTIVE'
+    """
+
+    {:ok, result} = config.db.query(config.conn, sql, [])
+    Enum.map(result.rows, &schedule_from_row/1)
+  end
+
+  defp schedule_from_row([
+         name,
+         workflow_name,
+         cron,
+         context,
+         automatic_backfill,
+         cron_timezone,
+         queue_name,
+         last_fired_at
+       ]) do
+    %{
+      schedule_name: name,
+      workflow_name: workflow_name,
+      cron: cron,
+      context: Serialization.decode(context),
+      automatic_backfill: automatic_backfill,
+      cron_timezone: cron_timezone,
+      queue_name: queue_name,
+      last_fired_at: parse_epoch_ms_text(last_fired_at)
+    }
+  end
+
+  @doc """
+  Records the most recent fire time for a schedule. Informational/for-recovery only — the
+  running scheduler's own in-memory floor is what actually drives due-occurrence computation
+  tick to tick; this is what a fresh process reads back as its catch-up floor when
+  `automatic_backfill` is set.
+  """
+  def update_schedule_last_fired_at(%Config{} = config, schedule_name, epoch_ms) do
+    sql =
+      "UPDATE #{table(config, "workflow_schedules")} SET last_fired_at = $1 WHERE schedule_name = $2"
+
+    {:ok, _result} =
+      config.db.query(config.conn, sql, [Integer.to_string(epoch_ms), schedule_name])
+
+    :ok
+  end
+
+  defp parse_epoch_ms_text(nil), do: nil
+  defp parse_epoch_ms_text(text), do: String.to_integer(text)
+
   @doc "Registers `version_name` as a known application version, if not already present. Idempotent."
   def create_application_version(%Config{} = config, version_name) do
     sql = """
@@ -1816,21 +2030,26 @@ defmodule Dbos.SystemDb do
       {:created_before, "created_at <=", & &1}
     ]
 
-    Enum.reduce(filters, {[], []}, fn {key, condition, cast}, {clauses, params} ->
-      case Keyword.fetch(opts, key) do
-        {:ok, value} ->
-          param_index = length(params) + 1
-          column_clause = build_clause(condition, param_index)
-          {clauses ++ [column_clause], params ++ [cast.(value)]}
+    {clauses, params} =
+      Enum.reduce(filters, {[], []}, fn {key, condition, cast}, {clauses, params} ->
+        case Keyword.fetch(opts, key) do
+          {:ok, value} ->
+            param_index = length(params) + 1
+            column_clause = build_clause(condition, param_index)
+            {clauses ++ [column_clause], params ++ [cast.(value)]}
 
-        :error ->
-          {clauses, params}
-      end
-    end)
-    |> then(fn {clauses, params} ->
-      where_sql = if clauses == [], do: "", else: "WHERE " <> Enum.join(clauses, " AND ")
-      {where_sql, params}
-    end)
+          :error ->
+            {clauses, params}
+        end
+      end)
+
+    clauses =
+      if Keyword.get(opts, :queues_only, false),
+        do: clauses ++ ["queue_name IS NOT NULL"],
+        else: clauses
+
+    where_sql = if clauses == [], do: "", else: "WHERE " <> Enum.join(clauses, " AND ")
+    {where_sql, params}
   end
 
   defp build_clause(condition, param_index) do

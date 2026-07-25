@@ -56,16 +56,19 @@ defmodule Dbos.Macros do
 
     reject_duplicate_workflows!(workflow_defs, env)
 
-    {workflow_asts, workflows_meta} =
-      workflow_defs
-      |> Enum.map(&build_workflow(&1, env, repo, warn_cross_module_calls))
-      |> Enum.unzip()
+    built = Enum.map(workflow_defs, &build_workflow(&1, env, repo, warn_cross_module_calls))
+    workflow_asts = Enum.map(built, &elem(&1, 0))
+    workflows_meta = Enum.map(built, &elem(&1, 1))
+    schedules_meta = built |> Enum.map(&elem(&1, 2)) |> Enum.reject(&is_nil/1)
 
     quote do
       unquote_splicing(workflow_asts)
 
       @doc "This module's registered workflows: `[{name, {module, function, arity}}]`."
       def __dbos_workflows__, do: unquote(Macro.escape(workflows_meta))
+
+      @doc "This module's registered cron schedules: `[%{schedule_name:, workflow_name:, cron:, ...}]`."
+      def __dbos_schedules__, do: unquote(Macro.escape(schedules_meta))
 
       @doc false
       def __dbos_steps__, do: unquote(Macro.escape(steps))
@@ -100,6 +103,16 @@ defmodule Dbos.Macros do
   Runs `Dbos.Determinism.check!/2` over the body at compile time. Does not support a `when` guard
   on the head (a workflow's name must map to exactly one deterministic body — see
   `docs/determinism.md`); does support default arguments.
+
+  `schedule:` declares this workflow as cron-scheduled (`Dbos.Scheduler`, `notes/schema.md`'s
+  `workflow_schedules`), consistent with `defstep`/`deftransaction`'s existing `name:`-as-option
+  style rather than a separate `defscheduled` macro. Either a bare cron string (`"0 * * * * *"`,
+  six fields: second minute hour day-of-month month day-of-week — see `Dbos.Cron`), or a keyword
+  list: `cron:` (required), `name:` (the schedule's own name, default this workflow's name),
+  `automatic_backfill:` (default `false`), `timezone:`, `queue_name:`, `context:` (a compile-time
+  literal passed as this workflow's second argument on every fire; the first is always the fired
+  occurrence's scheduled epoch-ms, so a missed window can be backfilled deterministically). The
+  workflow function itself must therefore take exactly `(scheduled_time_ms, context)`.
   """
   defmacro defworkflow(call, do_block), do: capture_workflow(call, do_block, __CALLER__)
 
@@ -147,13 +160,30 @@ defmodule Dbos.Macros do
 
   defp wrap_run_step(step_name, run_opts, block) do
     quote do
-      Dbos.Runtime.run_step(unquote(step_name), unquote(run_opts), fn -> unquote(block) end)
+      Dbos.Runtime.run_step(unquote(step_name), unquote(run_opts), fn ->
+        Dbos.Telemetry.span_step(unquote(step_telemetry_metadata(step_name)), fn ->
+          unquote(block)
+        end)
+      end)
     end
   end
 
   defp wrap_transaction(step_name, run_opts, block) do
     quote do
-      Dbos.transaction(unquote(step_name), unquote(run_opts), fn _conn -> unquote(block) end)
+      Dbos.transaction(unquote(step_name), unquote(run_opts), fn _conn ->
+        Dbos.Telemetry.span_step(unquote(step_telemetry_metadata(step_name)), fn ->
+          unquote(block)
+        end)
+      end)
+    end
+  end
+
+  defp step_telemetry_metadata(step_name) do
+    quote do
+      %{
+        function_name: unquote(step_name),
+        workflow_id: if(Dbos.Runtime.in_workflow?(), do: Dbos.Runtime.current_workflow_id())
+      }
     end
   end
 
@@ -193,7 +223,35 @@ defmodule Dbos.Macros do
         end
       end
 
-    {ast, {name, {env.module, body_fun, arity}, block}}
+    schedule_meta = build_schedule_meta(Keyword.get(extra_opts, :schedule), name)
+
+    {ast, {name, {env.module, body_fun, arity}, block}, schedule_meta}
+  end
+
+  defp build_schedule_meta(nil, _workflow_name), do: nil
+
+  defp build_schedule_meta(cron, workflow_name) when is_binary(cron) do
+    %{
+      schedule_name: workflow_name,
+      workflow_name: workflow_name,
+      cron: cron,
+      automatic_backfill: false,
+      cron_timezone: nil,
+      queue_name: nil,
+      context: nil
+    }
+  end
+
+  defp build_schedule_meta(opts, workflow_name) when is_list(opts) do
+    %{
+      schedule_name: Keyword.get(opts, :name, workflow_name),
+      workflow_name: workflow_name,
+      cron: Keyword.fetch!(opts, :cron),
+      automatic_backfill: Keyword.get(opts, :automatic_backfill, false),
+      cron_timezone: Keyword.get(opts, :timezone),
+      queue_name: Keyword.get(opts, :queue_name),
+      context: Keyword.get(opts, :context)
+    }
   end
 
   defp reject_duplicate_workflows!(workflow_defs, env) do

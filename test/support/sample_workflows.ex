@@ -41,6 +41,27 @@ defmodule Dbos.SampleWorkflows do
     result
   end
 
+  def spawn_child_then_step(_arg) do
+    {:ok, handle} = Dbos.start("add/2", [1, 2])
+    {:ok, result} = Dbos.await(handle)
+    extra = Dbos.Runtime.run_step("plain_step/0", [], fn -> :ok end)
+    {result, extra}
+  end
+
+  def spawn_child_then_gated_step(table) do
+    {:ok, handle} = Dbos.start("add/2", [1, 2])
+    {:ok, result} = Dbos.await(handle)
+    :ets.insert(table, {:got_result, result})
+
+    Dbos.Runtime.run_step("wait_for_gate/0", [], fn ->
+      receive do
+        :go -> :ok
+      end
+    end)
+
+    result
+  end
+
   def receiver(topic, timeout_ms), do: Dbos.recv_message(topic, timeout_ms)
 
   def sleeper(ms) do

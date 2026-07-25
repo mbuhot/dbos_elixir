@@ -184,9 +184,14 @@ defmodule Dbos.AcceptanceTest do
 
     expected_child_id = "#{handle.workflow_id}-0"
 
-    {:ok, [step]} = SystemDb.get_workflow_steps(config, handle.workflow_id)
-    assert step.child_workflow_id == expected_child_id
-    assert step.function_name == "add/2"
+    {:ok, [start_step, get_result_step]} = SystemDb.get_workflow_steps(config, handle.workflow_id)
+    assert start_step.function_id == 0
+    assert start_step.child_workflow_id == expected_child_id
+    assert start_step.function_name == "add/2"
+
+    assert get_result_step.function_id == 1
+    assert get_result_step.function_name == "DBOS.getResult"
+    assert get_result_step.child_workflow_id == expected_child_id
 
     {:ok, child_status} = SystemDb.get_workflow_status(config, expected_child_id)
     assert child_status.status == :success
@@ -194,5 +199,71 @@ defmodule Dbos.AcceptanceTest do
 
     assert SystemDb.check_child_workflow(config, handle.workflow_id, 0, "add/2") ==
              {:existing, expected_child_id}
+  end
+
+  test "8. Dbos.await from within a workflow allocates and checkpoints a DBOS.getResult step" do
+    engine =
+      start_engine([
+        {"spawn_child_then_step/1", {SampleWorkflows, :spawn_child_then_step, 1}},
+        {"add/2", {SampleWorkflows, :add, 2}}
+      ])
+
+    config = Dbos.config(engine)
+
+    {:ok, handle} = Dbos.start("spawn_child_then_step/1", [:ignored], engine: engine)
+    assert {:ok, {3, :ok}} = Dbos.await(handle)
+
+    {:ok, steps} = SystemDb.get_workflow_steps(config, handle.workflow_id)
+
+    assert Enum.map(steps, &{&1.function_id, &1.function_name}) == [
+             {0, "add/2"},
+             {1, "DBOS.getResult"},
+             {2, "plain_step/0"}
+           ]
+  end
+
+  test "9. crash after DBOS.getResult is checkpointed: replay returns the cached result without re-awaiting the child" do
+    engine =
+      start_engine([
+        {"spawn_child_then_gated_step/1", {SampleWorkflows, :spawn_child_then_gated_step, 1}},
+        {"add/2", {SampleWorkflows, :add, 2}}
+      ])
+
+    config = Dbos.config(engine)
+    table = :"gate_#{System.unique_integer([:positive])}"
+    :ets.new(table, [:named_table, :public, :set])
+
+    {:ok, handle} =
+      Dbos.start("spawn_child_then_gated_step/1", [table], engine: engine)
+
+    wait_until(fn ->
+      {:ok, steps} = SystemDb.get_workflow_steps(config, handle.workflow_id)
+      length(steps) == 2
+    end)
+
+    {:ok, steps_before_crash} = SystemDb.get_workflow_steps(config, handle.workflow_id)
+
+    assert Enum.map(steps_before_crash, &{&1.function_id, &1.function_name}) == [
+             {0, "add/2"},
+             {1, "DBOS.getResult"}
+           ]
+
+    {:ok, pid} = WorkflowSup.whereis(engine, handle.workflow_id)
+    Process.exit(pid, :kill)
+
+    Dbos.Recovery.recover_pending(engine)
+
+    {:ok, new_pid} = WorkflowSup.whereis(engine, handle.workflow_id)
+    send(new_pid, :go)
+
+    assert {:ok, 3} = Dbos.await(handle)
+
+    {:ok, steps_after_recovery} = SystemDb.get_workflow_steps(config, handle.workflow_id)
+
+    assert Enum.map(steps_after_recovery, &{&1.function_id, &1.function_name}) == [
+             {0, "add/2"},
+             {1, "DBOS.getResult"},
+             {2, "wait_for_gate/0"}
+           ]
   end
 end

@@ -65,9 +65,12 @@ defmodule Dbos.MacrosTest do
     assert {:ok, "ord_4"} = Dbos.await(handle)
 
     expected_child_id = "#{handle.workflow_id}-0"
-    {:ok, [step]} = SystemDb.get_workflow_steps(config, handle.workflow_id)
-    assert step.child_workflow_id == expected_child_id
-    assert step.function_name == "child_flow"
+    {:ok, [start_step, get_result_step]} = SystemDb.get_workflow_steps(config, handle.workflow_id)
+    assert start_step.child_workflow_id == expected_child_id
+    assert start_step.function_name == "child_flow"
+
+    assert get_result_step.function_name == "DBOS.getResult"
+    assert get_result_step.child_workflow_id == expected_child_id
 
     {:ok, child_status} = SystemDb.get_workflow_status(config, expected_child_id)
     assert child_status.status == :success

@@ -14,6 +14,7 @@ defmodule Dbos.Queue.Runner do
   alias Dbos.Queue
   alias Dbos.Registry, as: WorkflowRegistry
   alias Dbos.SystemDb
+  alias Dbos.Telemetry
   alias Dbos.WorkflowSup
 
   @backoff_factor 2.0
@@ -76,12 +77,15 @@ defmodule Dbos.Queue.Runner do
 
   defp dequeue_and_dispatch(engine, config, queue, partition_key) do
     local_running_count = WorkflowSup.count_running(engine, queue.name, partition_key)
+    metadata = %{engine: engine, queue_name: queue.name, partition_key: partition_key}
 
     claimed =
-      SystemDb.dequeue_workflows(config, queue,
-        partition_key: partition_key,
-        local_running_count: local_running_count
-      )
+      Telemetry.span_dequeue(metadata, fn ->
+        SystemDb.dequeue_workflows(config, queue,
+          partition_key: partition_key,
+          local_running_count: local_running_count
+        )
+      end)
 
     Enum.each(claimed, &dispatch(engine, &1, queue.name, partition_key))
     :ok

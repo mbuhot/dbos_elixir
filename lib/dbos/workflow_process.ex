@@ -12,6 +12,7 @@ defmodule Dbos.WorkflowProcess do
   alias Dbos.Runtime
   alias Dbos.Serialization
   alias Dbos.SystemDb
+  alias Dbos.Telemetry
   alias Dbos.WorkflowSup
 
   @doc "Starts the process for `process_args` (see `Dbos.WorkflowSup.start_workflow/5`)."
@@ -23,7 +24,7 @@ defmodule Dbos.WorkflowProcess do
           config: config,
           engine: engine,
           workflow_id: workflow_id,
-          mfa: {module, function, _arity},
+          mfa: {module, function, arity},
           args: args,
           replay: replay
         } = process_args
@@ -31,12 +32,19 @@ defmodule Dbos.WorkflowProcess do
     register_in_process_registry(engine, workflow_id, process_args)
     ack_registration(process_args)
 
+    metadata = %{
+      workflow_id: workflow_id,
+      name: workflow_name(engine, module, function, arity),
+      engine: engine,
+      replay: replay
+    }
+
     outcome =
       try do
         value =
           Runtime.with_context([config: config, workflow_id: workflow_id, replay: replay], fn ->
             Runtime.arm_deadline(config, workflow_id)
-            apply(module, function, args)
+            Telemetry.span_workflow(metadata, fn -> apply(module, function, args) end)
           end)
 
         {:success, value}
@@ -81,7 +89,7 @@ defmodule Dbos.WorkflowProcess do
          queue_name: queue_name,
          partition_key: partition_key
        }) do
-    Registry.register(
+    Elixir.Registry.register(
       WorkflowSup.process_registry_name(engine),
       workflow_id,
       {queue_name, partition_key}
@@ -90,4 +98,13 @@ defmodule Dbos.WorkflowProcess do
 
   defp ack_registration(%{caller: caller}), do: send(caller, {:dbos_workflow_registered, self()})
   defp ack_registration(_process_args), do: :ok
+
+  defp workflow_name(engine, module, function, arity) do
+    case Dbos.Registry.name_for_mfa(engine, {module, function, arity}) do
+      {:ok, name} -> name
+      :error -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
 end
