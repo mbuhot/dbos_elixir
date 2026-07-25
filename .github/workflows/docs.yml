@@ -40,7 +40,7 @@ jobs:
       PGPASSWORD: postgres
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: erlef/setup-beam@v1
         with:
@@ -50,7 +50,7 @@ jobs:
       - name: Install postgresql-client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             deps
@@ -77,14 +77,14 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             deps
@@ -96,11 +96,11 @@ jobs:
 
       - run: mix docs
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: doc
 
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
