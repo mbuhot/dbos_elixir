@@ -16,6 +16,7 @@ defmodule Dbos.DeterminismTest do
       #{use_line}
 
       defworkflow run(x), name: "run" do
+        _ = x
         #{body}
       end
     end
@@ -37,6 +38,7 @@ defmodule Dbos.DeterminismTest do
       #{use_line}
 
       #{macro} run(x) do
+        _ = x
         #{body}
       end
     end

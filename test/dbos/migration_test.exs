@@ -6,11 +6,13 @@ defmodule Dbos.MigrationTest do
   alias Dbos.Migrator
 
   setup_all do
-    {_output, 0} = System.cmd("dropdb", ["--if-exists", "dbos_migration_test"])
-    {_output, 0} = System.cmd("createdb", ["dbos_migration_test"])
+    database = Application.fetch_env!(:dbos, :test_database) <> "_migration"
+
+    {_output, 0} = System.cmd("dropdb", ["--if-exists", database])
+    {_output, 0} = System.cmd("createdb", [database])
 
     Application.put_env(:dbos, Repo,
-      database: "dbos_migration_test",
+      database: database,
       pool_size: 2,
       log: false
     )

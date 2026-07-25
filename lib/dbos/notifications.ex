@@ -67,7 +67,7 @@ defmodule Dbos.Notifications do
 
   @doc "Releases a `subscribe_recv/3` registration."
   def unsubscribe_recv(engine, workflow_id, topic) do
-    Registry.unregister(recv_registry_name(engine), payload(workflow_id, topic))
+    release(recv_registry_name(engine), payload(workflow_id, topic))
   end
 
   @doc "Registers the caller as a waiter for `workflow_events` on `(workflow_id, key)`. Non-exclusive."
@@ -80,7 +80,7 @@ defmodule Dbos.Notifications do
 
   @doc "Releases a `subscribe_event/3` registration."
   def unsubscribe_event(engine, workflow_id, key) do
-    Registry.unregister(wait_registry_name(engine), {:event, payload(workflow_id, key)})
+    release(wait_registry_name(engine), {:event, payload(workflow_id, key)})
   end
 
   @doc "Registers the caller as a waiter for stream `(workflow_id, key)`. Non-exclusive."
@@ -93,7 +93,7 @@ defmodule Dbos.Notifications do
 
   @doc "Releases a `subscribe_stream/3` registration."
   def unsubscribe_stream(engine, workflow_id, key) do
-    Registry.unregister(wait_registry_name(engine), {:stream, payload(workflow_id, key)})
+    release(wait_registry_name(engine), {:stream, payload(workflow_id, key)})
   end
 
   defp payload(id, topic_or_key), do: id <> "::" <> topic_or_key
@@ -111,7 +111,7 @@ defmodule Dbos.Notifications do
 
   @doc "Releases a `subscribe_status/2` registration."
   def unsubscribe_status(engine, workflow_id) do
-    Registry.unregister(wait_registry_name(engine), {:status, workflow_id})
+    release(wait_registry_name(engine), {:status, workflow_id})
   end
 
   @doc "Wakes every waiter registered via `subscribe_status/2` for `workflow_id`."
@@ -284,12 +284,19 @@ defmodule Dbos.Notifications do
   end
 
   defp broadcast(registry, key, keyspace, payload) do
-    if Process.whereis(registry) do
-      Registry.dispatch(registry, key, fn entries ->
-        for {pid, _owner} <- entries, do: send(pid, {:dbos_notify, keyspace, payload})
-      end)
-    end
+    Registry.dispatch(registry, key, fn entries ->
+      for {pid, _owner} <- entries, do: send(pid, {:dbos_notify, keyspace, payload})
+    end)
 
     :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp release(registry, key) do
+    Registry.unregister(registry, key)
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 end
