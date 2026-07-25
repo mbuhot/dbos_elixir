@@ -119,6 +119,45 @@ defmodule Dbos.ConcurrentCheckpointConflictError do
   end
 end
 
+defmodule Dbos.RecvConflictError do
+  @moduledoc """
+  Raised when a `recv` registers as the receiver for a `(workflow_id, topic)` pair already held
+  by another in-progress `recv`, per `notes/notifications.md` §2 (`subscribeExclusive`).
+  """
+
+  defexception [:workflow_id, :topic]
+
+  @impl true
+  def message(%__MODULE__{workflow_id: workflow_id, topic: topic}) do
+    "workflow #{workflow_id} is already receiving on topic #{inspect(topic)}"
+  end
+end
+
+defmodule Dbos.RecvTimeoutError do
+  @moduledoc """
+  Raised when `recv`'s durable timeout elapses with no message consumed, per
+  `notes/notifications.md` §4.
+  """
+
+  defexception [:workflow_id, :topic]
+
+  @impl true
+  def message(%__MODULE__{workflow_id: workflow_id, topic: topic}) do
+    "workflow #{workflow_id} timed out waiting for a message on topic #{inspect(topic)}"
+  end
+end
+
+defmodule Dbos.StreamClosedError do
+  @moduledoc "Raised when `write_stream` is called against a stream that already recorded its close sentinel."
+
+  defexception [:workflow_id, :key]
+
+  @impl true
+  def message(%__MODULE__{workflow_id: workflow_id, key: key}) do
+    "stream #{inspect(key)} on workflow #{workflow_id} is already closed"
+  end
+end
+
 defmodule Dbos.MaxStepRetriesExceededError do
   @moduledoc """
   Raised when a step exhausts its configured retry budget. Mirrors upstream's

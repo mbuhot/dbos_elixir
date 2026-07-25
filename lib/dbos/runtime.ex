@@ -85,15 +85,22 @@ defmodule Dbos.Runtime do
 
   def run_step(name, opts, fun) do
     if in_workflow?() do
-      run_checkpointed_step(name, opts, fun)
+      function_id = next_function_id()
+      run_step_at(function_id, name, opts, fun)
     else
       fun.()
     end
   end
 
-  defp run_checkpointed_step(name, opts, fun) do
+  @doc """
+  Like `run_step/3`, but against a `function_id` the caller has already allocated (via
+  `next_function_id/0`) rather than allocating its own. Used by operations that must reserve
+  more than one id up front regardless of which branch they end up taking — `recv` and
+  `getEvent`'s internal timeout-sleep step, per `notes/step-ids.md`. Must be called from within a
+  workflow context.
+  """
+  def run_step_at(function_id, name, opts \\ [], fun) do
     context = fetch_context!()
-    function_id = next_function_id()
 
     case SystemDb.check_operation_execution(
            context.config,

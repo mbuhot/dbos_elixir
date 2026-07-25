@@ -1186,6 +1186,205 @@ defmodule Dbos.SystemDb do
   defp decode_or_nil(nil), do: nil
   defp decode_or_nil(binary), do: Serialization.decode(binary)
 
+  @null_topic "__null__topic__"
+  @stream_closed_marker :__dbos_stream_closed__
+
+  @doc "The sentinel topic `send`/`recv` substitute for `nil`, per `notes/notifications.md` §3 (`NullTopic`)."
+  def null_topic, do: @null_topic
+
+  @doc """
+  Writes a message into `notifications`, per `notes/notifications.md` §3 (`Send`). Raises
+  `Dbos.NonExistentWorkflowError` if `destination_id` has no `workflow_status` row (the
+  `destination_uuid` foreign key violation). Sending to a terminal workflow is not rejected —
+  only existence is checked, matching upstream.
+  """
+  def send_notification(%Config{} = config, destination_id, topic, message) do
+    sql = """
+    INSERT INTO #{table(config, "notifications")}
+        (destination_uuid, topic, message, serialization, message_uuid, created_at_epoch_ms)
+    VALUES ($1, $2, $3, $4, $5, $6)
+    ON CONFLICT (message_uuid) DO NOTHING
+    """
+
+    values = [
+      destination_id,
+      topic,
+      Serialization.encode(message),
+      Serialization.format_name(),
+      Uuid.v4(),
+      System.os_time(:millisecond)
+    ]
+
+    case config.db.query(config.conn, sql, values) do
+      {:ok, _result} ->
+        :ok
+
+      {:error, %{postgres: %{code: :foreign_key_violation}}} ->
+        raise Dbos.NonExistentWorkflowError, workflow_id: destination_id
+    end
+  end
+
+  @doc "Whether an unconsumed message is waiting for `(destination_id, topic)`. The `recv` recheck query."
+  def notification_pending?(%Config{} = config, destination_id, topic) do
+    sql = """
+    SELECT EXISTS (
+      SELECT 1 FROM #{table(config, "notifications")}
+      WHERE destination_uuid = $1 AND topic = $2 AND consumed = false
+    )
+    """
+
+    {:ok, %{rows: [[exists]]}} = config.db.query(config.conn, sql, [destination_id, topic])
+    exists
+  end
+
+  @doc """
+  Consumes the oldest unconsumed message for `(destination_id, topic)`, per
+  `notes/notifications.md` §4 (`ConsumeMessage`): selects the oldest by `created_at_epoch_ms`,
+  updates by `message_uuid` (never a `DELETE`, never keyed by timestamp). Returns `{:ok, term}`
+  or `:none`.
+  """
+  def consume_notification(%Config{} = config, destination_id, topic) do
+    sql = """
+    WITH oldest_entry AS (
+      SELECT message_uuid
+      FROM #{table(config, "notifications")}
+      WHERE destination_uuid = $1 AND topic = $2 AND consumed = false
+      ORDER BY created_at_epoch_ms ASC
+      LIMIT 1
+    )
+    UPDATE #{table(config, "notifications")}
+    SET consumed = true
+    WHERE message_uuid = (SELECT message_uuid FROM oldest_entry)
+    RETURNING message
+    """
+
+    case config.db.query(config.conn, sql, [destination_id, topic]) do
+      {:ok, %{rows: [[message]]}} -> {:ok, Serialization.decode(message)}
+      {:ok, %{rows: []}} -> :none
+    end
+  end
+
+  @doc """
+  Upserts `workflow_events` (per-key, last write wins) and inserts into
+  `workflow_events_history` (per-step, keyed by `function_id`), per `notes/notifications.md` §5
+  (`SetEvent`). Returns `value` unchanged.
+  """
+  def set_event_value(%Config{} = config, workflow_id, function_id, key, value) do
+    encoded = Serialization.encode(value)
+    serialization = Serialization.format_name()
+
+    upsert_sql = """
+    INSERT INTO #{table(config, "workflow_events")} (workflow_uuid, key, value, serialization)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (workflow_uuid, key)
+        DO UPDATE SET value = EXCLUDED.value, serialization = EXCLUDED.serialization
+    """
+
+    {:ok, _result} =
+      config.db.query(config.conn, upsert_sql, [workflow_id, key, encoded, serialization])
+
+    history_sql = """
+    INSERT INTO #{table(config, "workflow_events_history")} (workflow_uuid, function_id, key, value, serialization)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (workflow_uuid, function_id, key)
+        DO UPDATE SET value = EXCLUDED.value, serialization = EXCLUDED.serialization
+    """
+
+    {:ok, _result} =
+      config.db.query(config.conn, history_sql, [
+        workflow_id,
+        function_id,
+        key,
+        encoded,
+        serialization
+      ])
+
+    value
+  end
+
+  @doc "Reads `workflow_events`'s current value for `(workflow_id, key)`, per `notes/notifications.md` §5 (`GetEventValue`)."
+  def get_event_value(%Config{} = config, workflow_id, key) do
+    sql =
+      "SELECT value FROM #{table(config, "workflow_events")} WHERE workflow_uuid = $1 AND key = $2"
+
+    case config.db.query(config.conn, sql, [workflow_id, key]) do
+      {:ok, %{rows: [[value]]}} -> {:ok, Serialization.decode(value)}
+      {:ok, %{rows: []}} -> :none
+    end
+  end
+
+  @doc "The encoded stream-closed sentinel, per `notes/notifications.md` §6 (`StreamClosedSentinel`), an atom rather than upstream's literal string since ETF is not cross-language."
+  def stream_closed_marker, do: @stream_closed_marker
+
+  @doc """
+  Appends `value` to stream `key` at the next sequential offset (`MAX(offset)+1`, or `0` if
+  none, computed in the same statement as the insert), per `notes/notifications.md` §6
+  (`WriteStream`). Returns `{:error, :stream_closed}` without inserting if the close sentinel was
+  already written for this `(workflow_id, key)`.
+  """
+  def write_stream(%Config{} = config, workflow_id, function_id, key, value) do
+    check_sql = """
+    SELECT 1 FROM #{table(config, "streams")}
+    WHERE workflow_uuid = $1 AND key = $2 AND value = $3 LIMIT 1
+    """
+
+    sentinel = Serialization.encode(@stream_closed_marker)
+
+    case config.db.query(config.conn, check_sql, [workflow_id, key, sentinel]) do
+      {:ok, %{rows: [_ | _]}} ->
+        {:error, :stream_closed}
+
+      {:ok, %{rows: []}} ->
+        insert_sql = """
+        INSERT INTO #{table(config, "streams")} (workflow_uuid, key, value, "offset", function_id, serialization)
+        SELECT $1, $2, $3, COALESCE(
+            (SELECT MAX("offset") FROM #{table(config, "streams")} WHERE workflow_uuid = $1 AND key = $2), -1
+        ) + 1, $4, $5
+        """
+
+        {:ok, _result} =
+          config.db.query(config.conn, insert_sql, [
+            workflow_id,
+            key,
+            Serialization.encode(value),
+            function_id,
+            Serialization.format_name()
+          ])
+
+        :ok
+    end
+  end
+
+  @doc "Writes the close sentinel for stream `key`, per `notes/notifications.md` §6 (`CloseStream`)."
+  def close_stream(%Config{} = config, workflow_id, function_id, key) do
+    write_stream(config, workflow_id, function_id, key, @stream_closed_marker)
+  end
+
+  @doc """
+  Reads stream `key` from `from_offset` (inclusive), per `notes/notifications.md` §6
+  (`ReadStream`): stops at the close sentinel without including it. Returns
+  `{values, next_offset, closed?}`.
+  """
+  def read_stream_page(%Config{} = config, workflow_id, key, from_offset) do
+    sql = """
+    SELECT value, "offset" FROM #{table(config, "streams")}
+    WHERE workflow_uuid = $1 AND key = $2 AND "offset" >= $3
+    ORDER BY "offset" ASC
+    """
+
+    {:ok, result} = config.db.query(config.conn, sql, [workflow_id, key, from_offset])
+    collect_stream_rows(result.rows, from_offset, [])
+  end
+
+  defp collect_stream_rows([], next_offset, acc), do: {Enum.reverse(acc), next_offset, false}
+
+  defp collect_stream_rows([[value, offset] | rest], _next_offset, acc) do
+    case Serialization.decode(value) do
+      @stream_closed_marker -> {Enum.reverse(acc), offset + 1, true}
+      decoded -> collect_stream_rows(rest, offset + 1, [decoded | acc])
+    end
+  end
+
   defp select_list(struct_module) do
     struct_module.columns() |> Enum.join(", ")
   end

@@ -41,6 +41,22 @@ defmodule Dbos.SampleWorkflows do
     result
   end
 
+  def receiver(topic, timeout_ms), do: Dbos.recv_message(topic, timeout_ms)
+
+  def sleeper(ms) do
+    Dbos.sleep(ms)
+    :woke
+  end
+
+  def step_id_layout_workflow(target_workflow_id) do
+    msg = Dbos.recv_message("topic", 5_000)
+    event_value = Dbos.get_event(target_workflow_id, "key", 5_000)
+    Dbos.set_event("status", :done)
+    Dbos.write_stream("log", :entry)
+    plain = Dbos.Runtime.run_step("plain_step/0", [], fn -> :ok end)
+    {msg, event_value, plain}
+  end
+
   @doc """
   Runs holding a concurrency slot on `table` (a pre-created public named ETS table with a
   `{:hold_ms, integer}` entry): bumps `:running`, records the high-water mark into `:max`,

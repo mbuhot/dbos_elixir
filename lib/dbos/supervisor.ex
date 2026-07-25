@@ -20,6 +20,12 @@ defmodule Dbos.Supervisor do
   `:migrations` (`:verify` (default), `:create_if_absent`, or `:skip`), `:max_recovery_attempts`
   (default `3`), `:cluster` (see below).
 
+  `:notifications` (default `:listen`) — `:listen` starts a dedicated `LISTEN` connection
+  (`Dbos.Notifications`) for `recv`/`getEvent`/streams to wake on, falling back to `:poll` and
+  logging a warning if one can't be established; `:poll` skips the listener entirely.
+  `:notifications_conn_opts` overrides the Postgrex connection options used for that dedicated
+  connection (otherwise derived from the Ecto repo's own config, when `:db` is `Dbos.DB.Ecto`).
+
   `:cluster` opts, all off by default (see `docs/clustering.md`): `:enabled` — joins a `:pg`
   group and reclaims a departed node's `PENDING` workflows on `:nodedown`; `:batch_size` (default
   `50`) — how many rows one reclaim pass claims; `:group` (default `Dbos.Cluster.Group`) — the
@@ -56,7 +62,9 @@ defmodule Dbos.Supervisor do
       reclaim_batch_size: Keyword.get(cluster_opts, :batch_size, 50),
       orphan_sweep_enabled: Keyword.get(orphan_sweep_opts, :enabled, false),
       orphan_sweep_interval_ms: Keyword.get(orphan_sweep_opts, :interval_ms, 300_000),
-      orphan_sweep_threshold_ms: Keyword.get(orphan_sweep_opts, :threshold_ms, 300_000)
+      orphan_sweep_threshold_ms: Keyword.get(orphan_sweep_opts, :threshold_ms, 300_000),
+      notifications: Keyword.get(opts, :notifications, :listen),
+      notifications_conn_opts: Keyword.get(opts, :notifications_conn_opts)
     }
 
     Dbos.put_config(config)
@@ -69,6 +77,9 @@ defmodule Dbos.Supervisor do
       [
         {Dbos.Registry, name: name, workflows: workflows},
         {Registry, keys: :unique, name: WorkflowSup.process_registry_name(name)},
+        {Registry, keys: :unique, name: Dbos.Notifications.recv_registry_name(name)},
+        {Registry, keys: :duplicate, name: Dbos.Notifications.wait_registry_name(name)},
+        {Dbos.Notifications, name: name},
         {WorkflowSup, name: name},
         {Dbos.Recovery, name: name},
         {Dbos.Queue.Sup, name: name, queues: queues}

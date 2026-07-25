@@ -8,6 +8,8 @@ defmodule Dbos do
 
   alias Dbos.Client
   alias Dbos.Config
+  alias Dbos.Messaging
+  alias Dbos.Notifications
   alias Dbos.Registry
   alias Dbos.Runtime
   alias Dbos.SystemDb
@@ -76,9 +78,13 @@ defmodule Dbos do
   end
 
   @doc """
-  Polls `workflow_status` until `handle`'s workflow reaches a terminal status, returning
-  `{:ok, output}`, `{:error, exception}`, or `{:error, :timeout}`. `opts[:poll_interval_ms]`
-  defaults to `100`; `opts[:timeout_ms]`, if given, bounds how long this call waits.
+  Waits until `handle`'s workflow reaches a terminal status, returning `{:ok, output}`,
+  `{:error, exception}`, or `{:error, :timeout}`. Wakes on `Dbos.Notifications.notify_status/2`
+  (fired in-process by `Dbos.WorkflowProcess` right after it durably records an outcome) when
+  possible, falling back to polling every `opts[:poll_interval_ms]` (default `100`) — the only
+  transport available for a workflow finished by a different engine instance, since upstream has
+  no `pg_notify` channel for workflow completion. `opts[:timeout_ms]`, if given, bounds how long
+  this call waits.
   """
   def await(%WorkflowHandle{} = handle, opts \\ []) do
     poll_interval_ms = Keyword.get(opts, :poll_interval_ms, 100)
@@ -86,7 +92,72 @@ defmodule Dbos do
     config = config(handle.engine)
     deadline = timeout_ms && System.monotonic_time(:millisecond) + timeout_ms
 
-    poll_for_outcome(config, handle.workflow_id, poll_interval_ms, deadline)
+    poll_for_outcome(config, handle.engine, handle.workflow_id, poll_interval_ms, deadline)
+  end
+
+  @doc """
+  Sends `message` to `destination_id` on `topic` (`nil` normalizes to the null-topic sentinel).
+  A durable, checkpointed step inside a workflow; a direct write outside one. Named
+  `send_message` (not `send`) to avoid reading like a call to `Kernel.send/2` at the call site.
+  `opts[:engine]` (default `Dbos`) is only consulted outside a workflow.
+  """
+  def send_message(destination_id, topic, message, opts \\ []) do
+    config = workflow_or_engine_config(opts)
+    Messaging.send_message(config, destination_id, topic, message)
+  end
+
+  @doc """
+  Receives a message on `topic`, blocking up to `timeout_ms`. Must be called from inside a
+  workflow. Named `recv_message` to read unambiguously alongside `send_message/4`.
+  """
+  def recv_message(topic, timeout_ms, _opts \\ []) do
+    Messaging.recv_message(Runtime.current_config(), topic, timeout_ms)
+  end
+
+  @doc "Sets `key` to `value` in this workflow's event store. Must be called from inside a workflow."
+  def set_event(key, value, _opts \\ []) do
+    Messaging.set_event(Runtime.current_config(), key, value)
+  end
+
+  @doc """
+  Reads `key` from `target_workflow_id`'s event store, blocking up to `timeout_ms` (`nil` for no
+  timeout), returning `nil` if it's never set. Works both inside and outside a workflow;
+  `opts[:engine]` (default `Dbos`) is only consulted outside one.
+  """
+  def get_event(target_workflow_id, key, timeout_ms \\ nil, opts \\ []) do
+    config = workflow_or_engine_config(opts)
+    Messaging.get_event(config, target_workflow_id, key, timeout_ms)
+  end
+
+  @doc "Appends `value` to this workflow's stream `key`. Must be called from inside a workflow."
+  def write_stream(key, value, _opts \\ []) do
+    Messaging.write_stream(Runtime.current_config(), key, value)
+  end
+
+  @doc "Writes the close sentinel for this workflow's stream `key`. Must be called from inside a workflow."
+  def close_stream(key, _opts \\ []) do
+    Messaging.close_stream(Runtime.current_config(), key)
+  end
+
+  @doc """
+  An Elixir `Stream` over `workflow_id`'s stream `key`, from the beginning, terminating once the
+  close sentinel is read. `opts[:engine]` defaults to `Dbos`.
+  """
+  def read_stream(workflow_id, key, opts \\ []) do
+    Messaging.read_stream(config(engine(opts)), workflow_id, key)
+  end
+
+  @doc """
+  Durably sleeps for `ms`: checkpoints the absolute wake time under one step, then waits only
+  the remaining interval, so a recovered workflow does not wait the full duration again. Must be
+  called from inside a workflow.
+  """
+  def sleep(ms) do
+    Messaging.sleep(Runtime.current_config(), ms)
+  end
+
+  defp workflow_or_engine_config(opts) do
+    if Runtime.in_workflow?(), do: Runtime.current_config(), else: config(engine(opts))
   end
 
   @doc "The resolved config for the default engine (`Dbos`). Raises `Dbos.NotStartedError` if it has not started."
@@ -191,7 +262,7 @@ defmodule Dbos do
     end
   end
 
-  defp poll_for_outcome(config, workflow_id, poll_interval_ms, deadline) do
+  defp poll_for_outcome(config, engine, workflow_id, poll_interval_ms, deadline) do
     case SystemDb.get_workflow_status(config, workflow_id) do
       {:ok, %WorkflowStatus{status: :success, output: output}} ->
         {:ok, output}
@@ -207,19 +278,34 @@ defmodule Dbos do
          %Dbos.MaxRecoveryAttemptsExceededError{workflow_id: workflow_id, attempts: attempts}}
 
       {:ok, %WorkflowStatus{status: status}} when status in [:pending, :enqueued, :delayed] ->
-        wait_or_timeout(config, workflow_id, poll_interval_ms, deadline)
+        wait_or_timeout(config, engine, workflow_id, poll_interval_ms, deadline)
 
       {:error, :not_found} ->
-        wait_or_timeout(config, workflow_id, poll_interval_ms, deadline)
+        wait_or_timeout(config, engine, workflow_id, poll_interval_ms, deadline)
     end
   end
 
-  defp wait_or_timeout(config, workflow_id, poll_interval_ms, deadline) do
+  defp wait_or_timeout(config, engine, workflow_id, poll_interval_ms, deadline) do
     if deadline && System.monotonic_time(:millisecond) >= deadline do
       {:error, :timeout}
     else
-      Process.sleep(poll_interval_ms)
-      poll_for_outcome(config, workflow_id, poll_interval_ms, deadline)
+      :ok = Notifications.subscribe_status(engine, workflow_id)
+
+      receive do
+        {:dbos_notify, :status, ^workflow_id} -> :ok
+      after
+        wait_bound(poll_interval_ms, deadline) -> :ok
+      end
+
+      Notifications.unsubscribe_status(engine, workflow_id)
+      poll_for_outcome(config, engine, workflow_id, poll_interval_ms, deadline)
     end
+  end
+
+  defp wait_bound(poll_interval_ms, nil), do: poll_interval_ms
+
+  defp wait_bound(poll_interval_ms, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+    max(min(remaining, poll_interval_ms), 0)
   end
 end

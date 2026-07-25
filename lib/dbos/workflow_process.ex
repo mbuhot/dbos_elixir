@@ -8,6 +8,7 @@ defmodule Dbos.WorkflowProcess do
 
   use Task, restart: :temporary
 
+  alias Dbos.Notifications
   alias Dbos.Runtime
   alias Dbos.Serialization
   alias Dbos.SystemDb
@@ -43,7 +44,7 @@ defmodule Dbos.WorkflowProcess do
         kind, value -> classify_failure(kind, value, __STACKTRACE__)
       end
 
-    record_outcome(config, workflow_id, outcome)
+    record_outcome(config, engine, workflow_id, outcome)
   end
 
   defp classify_failure(:error, %Dbos.WorkflowCancelledError{}, _stacktrace),
@@ -51,26 +52,27 @@ defmodule Dbos.WorkflowProcess do
 
   defp classify_failure(kind, value, stacktrace), do: {:failure, kind, value, stacktrace}
 
-  defp record_outcome(_config, _workflow_id, :already_cancelled), do: :ok
+  defp record_outcome(_config, _engine, _workflow_id, :already_cancelled), do: :ok
 
-  defp record_outcome(config, workflow_id, {:success, value}) do
-    write_outcome(config, workflow_id, %{
+  defp record_outcome(config, engine, workflow_id, {:success, value}) do
+    write_outcome(config, engine, workflow_id, %{
       status: :success,
       output: Serialization.encode(value)
     })
   end
 
-  defp record_outcome(config, workflow_id, {:failure, kind, value, stacktrace}) do
-    write_outcome(config, workflow_id, %{
+  defp record_outcome(config, engine, workflow_id, {:failure, kind, value, stacktrace}) do
+    write_outcome(config, engine, workflow_id, %{
       status: :error,
       error: Serialization.encode_failure(kind, value, stacktrace)
     })
   end
 
-  defp write_outcome(config, workflow_id, attrs) do
+  defp write_outcome(config, engine, workflow_id, attrs) do
     SystemDb.update_workflow_outcome(config, workflow_id, attrs)
+    Notifications.notify_status(engine, workflow_id)
   rescue
-    Dbos.WorkflowCancelledError -> :ok
+    Dbos.WorkflowCancelledError -> Notifications.notify_status(engine, workflow_id)
   end
 
   defp register_in_process_registry(engine, workflow_id, %{
