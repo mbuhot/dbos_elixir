@@ -17,6 +17,7 @@ defmodule Dbos.Case do
     application_versions
     workflow_schedules
     queues
+    executor_leases
   )
 
   using do

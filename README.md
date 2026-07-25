@@ -168,6 +168,36 @@ Note the atoms in that payload. Values round-trip as Erlang terms, so what you s
 
 A message that arrives before the workflow reaches its `recv_message` is still delivered.
 
+## Extensions
+
+Capabilities this engine adds on top of the design it derives from, mostly by taking advantage of the BEAM.
+
+### Automatic recovery after a node dies
+
+Each executor holds a lease in Postgres, renewed on an interval. A workflow left `PENDING` by an executor whose lease has expired is reclaimed by a live executor and resumed from its last checkpoint. No operator action, no control plane, no external orchestrator.
+
+The lease is the sole authority for an automatic reclaim, and it is held in the same database the executor needs in order to checkpoint. An executor that cannot renew its lease also cannot write conflicting checkpoints, so a false verdict is self-limiting. When distributed Erlang is enabled, a `:nodedown` triggers an immediate lease check, which shortens detection while leaving the decision with the lease.
+
+A reclaim only takes workflows whose names the claiming executor has registered, so a fleet where different nodes carry different workflow modules recovers correctly.
+
+Recovery is bounded by the guarantee the engine actually provides: **exactly-once checkpoints, at-least-once side effects.** A step that performs an external effect and crashes before its checkpoint commits runs that effect again on recovery. A step that must never repeat needs an idempotency key at its own boundary.
+
+### Long waits cost no process
+
+A workflow waiting longer than a minute releases its process and is rebuilt when it wakes, on a deadline or on a message. Measured at 163 bytes per parked wait, so a hundred thousand workflows parked for a fortnight cost about 16MB and no processes.
+
+### Determinism checked at compile time
+
+`defworkflow` holds its body's AST, so nondeterministic constructs are rejected by the compiler with the call, the line, and the fix. Step arguments are never persisted, which makes argument drift silent at runtime — the compile-time check is the defence against it.
+
+### Other additions
+
+| Addition | Why |
+|---|---|
+| A step inside a transaction raises | The design this derives from relies on Go's type system to prevent it, which has no Elixir equivalent |
+| Garbage collection works | The equivalent admin route upstream is a stub |
+| Transient database errors retry | Every system-database statement, with non-idempotent writes opted out individually |
+
 ## Getting Started
 
 ```elixir

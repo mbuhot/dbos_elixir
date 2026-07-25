@@ -1,28 +1,21 @@
 defmodule Dbos.Cluster.NodeWatcher do
   @moduledoc """
-  Watches for departed nodes via `:net_kernel.monitor_nodes/1` and reclaims a departed node's
-  `PENDING` workflows through `Dbos.Cluster`'s cached roster and `Dbos.Recovery.reclaim/3`.
-  Started only when the owning `Dbos.Supervisor` is given `cluster: [enabled: true]`.
+  Watches for departed nodes via `:net_kernel.monitor_nodes/1` and triggers an immediate
+  `Dbos.Cluster.OrphanSweep` pass on `:nodedown` — a latency optimisation, nothing more. The
+  sweep itself is the sole authority: it still requires the departed node's executors to have an
+  expired lease before reclaiming anything, so a BEAM netsplit (both sides see the other as
+  `:nodedown` while Postgres is reachable to both) degrades to waiting out the lease TTL instead
+  of reclaiming, and possibly double-executing, a node that is merely unreachable, not dead.
 
-  Reclaim runs in an unsupervised `Task` so a slow or failing reclaim pass never blocks this
-  process (and so `:nodedown` messages keep being handled promptly). A reclaim that raises is
-  caught there and retried on a bounded exponential backoff (`@max_reclaim_attempts` attempts,
-  capped at `@reclaim_max_backoff_ms`) rather than dropped: a single `:nodedown` is the only
-  signal this departed node ever gets, unlike `Dbos.Cluster.OrphanSweep`'s recurring pass, so a
-  failure here needs its own retry rather than a later sweep to fall back on. Attempts exhausted,
-  it gives up and logs, leaving the node's workflows to `Dbos.Cluster.OrphanSweep` (if enabled) or
-  a future engine restart's boot recovery scan.
+  Started only when the owning `Dbos.Supervisor` is given `cluster: [enabled: true]`. Runs the
+  triggered sweep in an unsupervised `Task` so a slow sweep pass never blocks `:nodedown` handling;
+  a failure there is logged and left to the sweep's own recurring timer to retry.
   """
 
   use GenServer
   require Logger
 
-  alias Dbos.Cluster
-  alias Dbos.Recovery
-
-  @max_reclaim_attempts 5
-  @reclaim_base_backoff_ms 500
-  @reclaim_max_backoff_ms 30_000
+  alias Dbos.Cluster.OrphanSweep
 
   @doc "Starts the node watcher for the engine named `opts[:name]`."
   def start_link(opts) do
@@ -41,57 +34,33 @@ defmodule Dbos.Cluster.NodeWatcher do
 
   @impl true
   def handle_info({:nodedown, node}, engine_name) do
-    reclaim_node(engine_name, node, 1)
+    trigger_sweep(engine_name, node)
     {:noreply, engine_name}
   end
 
   def handle_info({:nodeup, _node}, engine_name), do: {:noreply, engine_name}
 
-  def handle_info({:retry_reclaim, node, attempt}, engine_name) do
-    reclaim_node(engine_name, node, attempt)
-    {:noreply, engine_name}
+  defp trigger_sweep(engine_name, node) do
+    Task.start(fn -> safe_sweep(engine_name, node) end)
   end
 
-  defp reclaim_node(engine_name, node, attempt) do
-    case Cluster.executor_ids_for_node(engine_name, node) do
-      [] ->
-        :ok
-
-      executor_ids ->
-        config = Dbos.config(engine_name)
-        batch_size = config.reclaim_batch_size
-        watcher = self()
-
-        Task.start(fn ->
-          reclaim_or_retry(engine_name, executor_ids, batch_size, watcher, node, attempt)
-        end)
+  defp safe_sweep(engine_name, node) do
+    case Process.whereis(OrphanSweep.process_name(engine_name)) do
+      nil -> :ok
+      _pid -> OrphanSweep.sweep_now(engine_name)
     end
-  end
-
-  defp reclaim_or_retry(engine_name, executor_ids, batch_size, watcher, node, attempt) do
-    Recovery.reclaim(engine_name, executor_ids, batch_size: batch_size)
   rescue
     error ->
       Logger.error(
-        "dbos: reclaim for departed node #{inspect(node)} failed (attempt #{attempt}): " <>
-          Exception.format_banner(:error, error, __STACKTRACE__)
+        "dbos: the sweep pass triggered by :nodedown from #{inspect(node)} failed; the " <>
+          "periodic sweep will retry: " <> Exception.format_banner(:error, error, __STACKTRACE__)
       )
-
-      schedule_retry(watcher, node, attempt)
-  end
-
-  defp schedule_retry(watcher, node, attempt) when attempt < @max_reclaim_attempts do
-    delay =
-      min(@reclaim_base_backoff_ms * Integer.pow(2, attempt - 1), @reclaim_max_backoff_ms)
-
-    Process.send_after(watcher, {:retry_reclaim, node, attempt + 1}, delay)
-  end
-
-  defp schedule_retry(_watcher, node, _attempt) do
-    Logger.error(
-      "dbos: giving up reclaiming departed node #{inspect(node)} after " <>
-        "#{@max_reclaim_attempts} attempts; its workflows are left PENDING for the orphan " <>
-        "sweep or a future boot recovery scan to pick up"
-    )
+  catch
+    kind, reason ->
+      Logger.error(
+        "dbos: the sweep pass triggered by :nodedown from #{inspect(node)} failed; the " <>
+          "periodic sweep will retry: " <>
+          Exception.format_banner(kind, reason, __STACKTRACE__)
+      )
   end
 end

@@ -26,14 +26,21 @@ defmodule Dbos.Supervisor do
   `:notifications_conn_opts` overrides the Postgrex connection options used for that dedicated
   connection (otherwise derived from the Ecto repo's own config, when `:db` is `Dbos.DB.Ecto`).
 
-  `:cluster` opts, all off by default (see `docs/clustering.md`): `:enabled` — joins a `:pg`
-  group and reclaims a departed node's `PENDING` workflows on `:nodedown`; `:batch_size` (default
-  `50`) — how many rows one reclaim pass claims; `:group` (default `Dbos.Cluster.Group`) — the
-  shared `:pg` group name every engine that should see each other's roster must agree on (several
-  engines in one deployment sharing the default is what makes the node-to-executor-ids mapping
-  many-to-one); `:orphan_sweep` — a further `[:enabled, :interval_ms (default 300_000),
-  :threshold_ms (default 300_000)]` for the periodic scan that catches executors no live node
-  ever saw depart.
+  `:lease` opts (see `docs/clustering.md`): `:ttl_ms` (default `60_000`) — how long this
+  executor's lease stays valid without a renewal; `:renew_interval_ms` (default `10_000`) — how
+  often it renews. The lease is written at boot, before recovery runs, and is the sole authority
+  `Dbos.Cluster.OrphanSweep` consults to decide an executor is dead.
+
+  `:orphan_sweep` opts, on by default: `:enabled` (default `true`) — periodically reclaims
+  `PENDING` rows whose executor's lease has expired or is entirely absent; `:interval_ms` (default
+  `300_000`) — how often it scans. Runs with no dependency on `:cluster` or distributed Erlang.
+
+  `:cluster` opts, off by default (see `docs/clustering.md`): `:enabled` — joins a `:pg` group and
+  triggers an immediate orphan sweep pass on `:nodedown`, a latency optimisation only (the sweep
+  still requires an expired lease before reclaiming anything); `:batch_size` (default `50`) — how
+  many rows one reclaim pass claims; `:group` (default `Dbos.Cluster.Group`) — the shared `:pg`
+  group name every engine that should see each other's roster must agree on (several engines in
+  one deployment sharing the default is what makes the node-to-executor-ids mapping many-to-one).
 
   `:admin_server` opts, off by default: `:enabled` — starts `Dbos.AdminServer`; `:port` (default
   `3001`). `:scheduler_poll_interval_ms` (default `30_000`) controls how often `Dbos.Scheduler`
@@ -59,7 +66,8 @@ defmodule Dbos.Supervisor do
     schedules = Enum.flat_map(workflow_entries, &collect_schedules/1)
 
     cluster_opts = Keyword.get(opts, :cluster, [])
-    orphan_sweep_opts = Keyword.get(cluster_opts, :orphan_sweep, [])
+    orphan_sweep_opts = Keyword.get(opts, :orphan_sweep, [])
+    lease_opts = Keyword.get(opts, :lease, [])
 
     config = %Config{
       name: name,
@@ -69,11 +77,13 @@ defmodule Dbos.Supervisor do
       executor_id: resolve_executor_id(opts),
       application_version: resolve_application_version(opts, workflows),
       max_recovery_attempts: Keyword.get(opts, :max_recovery_attempts, 3),
-      cluster_mode: resolve_cluster_mode(cluster_opts, orphan_sweep_opts),
+      cluster_enabled: Keyword.get(cluster_opts, :enabled, false),
       cluster_group: Keyword.get(cluster_opts, :group, Dbos.Cluster.Group),
       reclaim_batch_size: Keyword.get(cluster_opts, :batch_size, 50),
+      orphan_sweep_enabled: Keyword.get(orphan_sweep_opts, :enabled, true),
       orphan_sweep_interval_ms: Keyword.get(orphan_sweep_opts, :interval_ms, 300_000),
-      orphan_sweep_threshold_ms: Keyword.get(orphan_sweep_opts, :threshold_ms, 300_000),
+      lease_ttl_ms: Keyword.get(lease_opts, :ttl_ms, 60_000),
+      lease_renew_interval_ms: Keyword.get(lease_opts, :renew_interval_ms, 10_000),
       notifications: Keyword.get(opts, :notifications, :listen),
       notifications_conn_opts: Keyword.get(opts, :notifications_conn_opts),
       scheduler_poll_interval_ms: Keyword.get(opts, :scheduler_poll_interval_ms, 30_000),
@@ -97,12 +107,14 @@ defmodule Dbos.Supervisor do
         {Dbos.Waits.Table, name: name},
         {Dbos.Waits, name: name},
         {WorkflowSup, name: name},
+        {Dbos.Lease, name: name},
         {Dbos.Recovery, name: name},
         {Dbos.Queue.Sup, name: name, queues: queues},
         {Dbos.Scheduler,
          name: name, schedules: schedules, poll_interval_ms: config.scheduler_poll_interval_ms}
       ] ++
         cluster_children(config) ++
+        orphan_sweep_children(config) ++
         admin_server_children(name, Keyword.get(opts, :admin_server, []))
 
     Supervisor.init(children, strategy: :one_for_one)
@@ -118,27 +130,19 @@ defmodule Dbos.Supervisor do
     end
   end
 
-  defp cluster_children(%Config{cluster_mode: :disabled}), do: []
+  defp cluster_children(%Config{cluster_enabled: false}), do: []
 
-  defp cluster_children(%Config{name: name} = config) do
+  defp cluster_children(%Config{cluster_enabled: true, name: name}) do
     [
       {Dbos.Cluster, name: name},
       {Dbos.Cluster.NodeWatcher, name: name}
-    ] ++ orphan_sweep_children(config)
+    ]
   end
 
-  defp orphan_sweep_children(%Config{cluster_mode: :cluster_and_orphan_sweep, name: name}),
+  defp orphan_sweep_children(%Config{orphan_sweep_enabled: false}), do: []
+
+  defp orphan_sweep_children(%Config{orphan_sweep_enabled: true, name: name}),
     do: [{Dbos.Cluster.OrphanSweep, name: name}]
-
-  defp orphan_sweep_children(%Config{}), do: []
-
-  defp resolve_cluster_mode(cluster_opts, orphan_sweep_opts) do
-    cond do
-      not Keyword.get(cluster_opts, :enabled, false) -> :disabled
-      Keyword.get(orphan_sweep_opts, :enabled, false) -> :cluster_and_orphan_sweep
-      true -> :cluster_only
-    end
-  end
 
   defp resolve_executor_id(opts) do
     Keyword.get(opts, :executor_id) || System.get_env("DBOS__VMID") || node_executor_id()

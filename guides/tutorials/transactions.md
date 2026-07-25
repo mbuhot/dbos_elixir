@@ -85,16 +85,21 @@ failure and re-raised, exactly like a plain step's failure. This covers a body t
 raised, distinct from the process simply crashing mid-transaction. Replaying that workflow fails
 the same way again — it never silently retries past that failure.
 
-## Which path this port implements
+## Why one transaction is enough
 
-The reference DBOS implementation uses a three-layer protocol for a transactional step: a
-system-database checkpoint table, a *separate* completion table living in the user's own
-database, and a two-transaction commit order between them — built to close a crash window that
-can only exist when the system database and the user's database are two different databases.
+The engine keeps its own tables in the same database your application already uses, configured
+as `db: {Dbos.DB.Ecto, MyApp.Repo}`.
 
-This port keeps its system database on the exact same `Repo`/connection the application already
-uses (`db: {Dbos.DB.Ecto, MyApp.Repo}` in `Dbos.Supervisor`'s config) — there is only ever one
-database, so `deftransaction` opens exactly one `Repo.transaction/2` call that holds both the
-user's write and the system checkpoint's `record_operation_result` write. That single commit is
-what makes them atomic. There is no separate completion table, no second commit, and no window
-between two commits to close, because there is only one.
+One database means one transaction. `deftransaction` opens a single `Repo.transaction/2` holding
+both writes:
+
+| Write | What it is |
+|---|---|
+| Your `Repo` calls in the body | The business data |
+| The step's checkpoint | The record that this step completed |
+
+They commit together or roll back together. That single commit is the whole atomicity guarantee —
+there is no second commit and no window between commits.
+
+A deployment that put the engine's tables in a separate database would need a completion table
+and a two-phase commit order to get the same property. Sharing one database removes the need.

@@ -12,6 +12,14 @@ defmodule Dbos.Recovery do
   executor, or by a backend that has not finished being torn down after its client was killed —
   is passed over. A pass that skipped a row it has not already handled re-scans, on a short
   bounded backoff, so a lock released milliseconds later still gets the workflow recovered.
+
+  Every reclaim is capability-aware: only rows whose `name` this engine has registered are ever
+  reassigned, from `recover_pending/1`'s own-id reclaim through an operator's `reclaim/2,3`
+  override. A deployment is normally heterogeneous — different nodes run different workflow
+  modules — so a name this engine doesn't implement is routine, not a fault; reassigning it here
+  would strand it permanently, since its new owner's lease is healthy and no future sweep would
+  ever move it again. A row this engine can't run is left exactly where it is, for whichever peer
+  does implement it to claim instead.
   """
 
   use GenServer
@@ -57,6 +65,7 @@ defmodule Dbos.Recovery do
   """
   def reclaim(engine_name, dead_executor_ids, opts \\ []) do
     config = Dbos.config(engine_name)
+    registered_names = Registry.registered_names(engine_name)
     metadata = %{engine: engine_name, executor_ids: dead_executor_ids}
 
     Telemetry.span_recovery(metadata, fn ->
@@ -64,7 +73,15 @@ defmodule Dbos.Recovery do
       Enum.each(queued_ids, &clear_one(config, &1))
 
       queued_ids ++
-        reclaim_passes(engine_name, config, dead_executor_ids, opts, MapSet.new(), 1)
+        reclaim_passes(
+          engine_name,
+          config,
+          dead_executor_ids,
+          registered_names,
+          opts,
+          MapSet.new(),
+          1
+        )
     end)
   end
 
@@ -87,25 +104,49 @@ defmodule Dbos.Recovery do
     {:noreply, engine_name}
   end
 
-  defp reclaim_passes(engine_name, config, dead_executor_ids, opts, handled, pass) do
-    reclaimed = SystemDb.reclaim_pending_workflows(config, dead_executor_ids, opts)
+  defp reclaim_passes(
+         engine_name,
+         config,
+         dead_executor_ids,
+         registered_names,
+         opts,
+         handled,
+         pass
+       ) do
+    reclaimed =
+      SystemDb.reclaim_pending_workflows(config, dead_executor_ids, registered_names, opts)
+
     Enum.each(reclaimed, &recover_one(engine_name, config, &1))
 
     ids = Enum.map(reclaimed, & &1.workflow_uuid)
     handled = Enum.into(ids, handled)
 
-    if rescan?(config, dead_executor_ids, opts, handled, reclaimed, pass) do
+    if rescan?(config, dead_executor_ids, registered_names, opts, handled, reclaimed, pass) do
       Process.sleep(@rescan_base_delay_ms * Integer.pow(2, pass - 1))
-      ids ++ reclaim_passes(engine_name, config, dead_executor_ids, opts, handled, pass + 1)
+
+      ids ++
+        reclaim_passes(
+          engine_name,
+          config,
+          dead_executor_ids,
+          registered_names,
+          opts,
+          handled,
+          pass + 1
+        )
     else
       ids
     end
   end
 
-  defp rescan?(config, dead_executor_ids, opts, handled, reclaimed, pass) do
+  defp rescan?(config, dead_executor_ids, registered_names, opts, handled, reclaimed, pass) do
     pass < @rescan_passes and not batch_exhausted?(opts, reclaimed) and
       Enum.any?(
-        SystemDb.list_reclaimable_pending_workflow_ids(config, dead_executor_ids),
+        SystemDb.list_reclaimable_pending_workflow_ids(
+          config,
+          dead_executor_ids,
+          registered_names
+        ),
         &(not MapSet.member?(handled, &1))
       )
   end

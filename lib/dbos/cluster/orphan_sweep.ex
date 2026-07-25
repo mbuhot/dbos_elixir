@@ -1,17 +1,20 @@
 defmodule Dbos.Cluster.OrphanSweep do
   @moduledoc """
-  Periodically reclaims `PENDING` workflows whose `executor_id` is absent from `Dbos.Cluster`'s
-  live roster and whose `updated_at` is at least `config.orphan_sweep_threshold_ms` old. Covers
-  executors no live node ever saw depart — a whole-cluster restart, or a pod that is permanently
-  gone — which `Dbos.Cluster.NodeWatcher`'s `:nodedown` detection cannot see.
+  Periodically reclaims `PENDING` workflows whose executor's lease (`dbos.executor_leases`) has
+  expired, or who never renewed one at all. A lease is the sole authority consulted: it is
+  renewed over the same connection an executor needs to checkpoint, so an executor that cannot
+  renew also cannot write conflicting checkpoints, making a false positive self-limiting. This is
+  why `updated_at` staleness plays no part — a workflow legitimately parked for days in
+  `Dbos.sleep/1` or `recv_message/2` says nothing about whether its executor is alive.
 
-  Off by default. Started only when the owning `Dbos.Supervisor` is given `cluster: [enabled:
-  true, orphan_sweep: [enabled: true]]`.
+  Independent of `:pg`, distributed Erlang, and `Dbos.Cluster`: it needs only the system
+  database, so it covers single-node-per-deployment setups (a Kubernetes pod whose identity
+  changes every deploy) exactly as well as a clustered one. On by default
+  (`orphan_sweep: [enabled: true]`).
   """
 
   use GenServer
 
-  alias Dbos.Cluster
   alias Dbos.Recovery
   alias Dbos.SystemDb
 
@@ -47,11 +50,9 @@ defmodule Dbos.Cluster.OrphanSweep do
 
   defp sweep(engine_name) do
     config = Dbos.config(engine_name)
-    live_executor_ids = live_executor_ids(engine_name)
 
     config
-    |> SystemDb.list_stale_pending_executor_ids(config.orphan_sweep_threshold_ms)
-    |> Enum.reject(&(&1 in live_executor_ids))
+    |> SystemDb.list_expired_lease_pending_executor_ids()
     |> reclaim_orphans(engine_name, config.reclaim_batch_size)
   end
 
@@ -59,10 +60,4 @@ defmodule Dbos.Cluster.OrphanSweep do
 
   defp reclaim_orphans(orphaned_executor_ids, engine_name, batch_size),
     do: Recovery.reclaim(engine_name, orphaned_executor_ids, batch_size: batch_size)
-
-  defp live_executor_ids(engine_name) do
-    engine_name
-    |> Cluster.roster()
-    |> Enum.map(fn {_node, executor_id} -> executor_id end)
-  end
 end

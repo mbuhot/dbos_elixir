@@ -1,5 +1,18 @@
 # The determinism contract
 
+## The guarantee: at-least-once side effects, exactly-once checkpoints
+
+A checkpoint (a step's recorded output, a workflow's recorded outcome) is written exactly once —
+once committed, replay always returns the same recorded value. A **side effect** is not: a crash
+between a step performing its real-world effect (charging a card, sending an email, calling
+another service) and that step's checkpoint committing means replay re-runs the step, performing
+the effect again. Leases (`docs/clustering.md`) and `owner_xid` narrow the window a double
+execution can occur in; nothing closes it to zero.
+
+A step whose side effect must not repeat needs its own idempotency key at that boundary — a
+payment gateway's idempotency-key parameter, an email provider's message-id, a `deduplication_id`
+on the receiving system. See `guides/tutorials/steps.md` for where that key belongs.
+
 ## The core idea
 
 A workflow body re-executes from the top after a crash or restart. Steps that already

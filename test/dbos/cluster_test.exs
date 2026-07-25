@@ -56,14 +56,10 @@ defmodule Dbos.ClusterTest do
     end
   end
 
-  describe "Dbos.Cluster.OrphanSweep" do
+  describe "Dbos.Cluster.OrphanSweep, lease-based, with clustering disabled" do
     setup %{conn: conn} do
       name = unique_engine_name()
-
-      config =
-        put_config(name, conn, %{orphan_sweep_threshold_ms: 1_000})
-
-      start_supervised!({Cluster, name: name})
+      config = put_config(name, conn)
 
       start_supervised!(
         {Dbos.Registry, name: name, workflows: [{"add/2", {SampleWorkflows, :add, 2}}]}
@@ -78,35 +74,67 @@ defmodule Dbos.ClusterTest do
       {:ok, config: config, name: name}
     end
 
-    test "reclaims a PENDING row whose executor is absent from the roster and older than the threshold, leaving a fresh one alone",
+    test "works with no Dbos.Cluster process running at all: reclaims a PENDING row whose executor has no lease row",
          %{config: config, name: name} do
-      stale_at = System.os_time(:millisecond) - 10_000
+      assert Process.whereis(Cluster.process_name(name)) == nil
 
-      SystemDb.insert_workflow_status(%{config | executor_id: "exec-stale-dead"}, %{
-        workflow_id: "wf-orphan-stale",
+      SystemDb.insert_workflow_status(%{config | executor_id: "exec-no-lease"}, %{
+        workflow_id: "wf-orphan-no-lease",
         status: :pending,
         name: "add/2",
-        inputs: [1, 2],
-        updated_at: stale_at
-      })
-
-      SystemDb.insert_workflow_status(%{config | executor_id: "exec-fresh-dead"}, %{
-        workflow_id: "wf-orphan-fresh",
-        status: :pending,
-        name: "add/2",
-        inputs: [3, 4]
+        inputs: [1, 2]
       })
 
       OrphanSweep.sweep_now(name)
 
       wait_until(fn ->
-        {:ok, status} = SystemDb.get_workflow_status(config, "wf-orphan-stale")
+        {:ok, status} = SystemDb.get_workflow_status(config, "wf-orphan-no-lease")
         status.status == :success
       end)
+    end
 
-      {:ok, fresh_status} = SystemDb.get_workflow_status(config, "wf-orphan-fresh")
-      assert fresh_status.status == :pending
-      assert fresh_status.executor_id == "exec-fresh-dead"
+    test "reclaims a PENDING row whose executor's lease has expired", %{
+      config: config,
+      name: name
+    } do
+      SystemDb.renew_lease(%{config | executor_id: "exec-expired"}, 60_000)
+      SystemDb.expire_lease(%{config | executor_id: "exec-expired"})
+
+      SystemDb.insert_workflow_status(%{config | executor_id: "exec-expired"}, %{
+        workflow_id: "wf-orphan-expired",
+        status: :pending,
+        name: "add/2",
+        inputs: [1, 2]
+      })
+
+      OrphanSweep.sweep_now(name)
+
+      wait_until(fn ->
+        {:ok, status} = SystemDb.get_workflow_status(config, "wf-orphan-expired")
+        status.status == :success
+      end)
+    end
+
+    test "a live lease makes a row immune even when it is hours stale by updated_at — the regression test for the old staleness signal",
+         %{config: config, name: name} do
+      hours_stale = System.os_time(:millisecond) - :timer.hours(6)
+
+      SystemDb.renew_lease(%{config | executor_id: "exec-alive"}, 60_000)
+
+      SystemDb.insert_workflow_status(%{config | executor_id: "exec-alive"}, %{
+        workflow_id: "wf-alive-but-stale",
+        status: :pending,
+        name: "add/2",
+        inputs: [3, 4],
+        updated_at: hours_stale
+      })
+
+      OrphanSweep.sweep_now(name)
+      Process.sleep(50)
+
+      {:ok, status} = SystemDb.get_workflow_status(config, "wf-alive-but-stale")
+      assert status.status == :pending
+      assert status.executor_id == "exec-alive"
     end
   end
 

@@ -81,7 +81,7 @@ useful in an environment with a hard connection-count ceiling.
 ## Migration verification at launch
 
 `Dbos.Migrator.verify!/1` checks `<schema>.dbos_migrations.version` is exactly `42` — the
-version this port targets — and **raises**, refusing to start, if it's anything else or the
+version the engine targets — and **raises**, refusing to start, if it's anything else or the
 table doesn't exist at all. This is deliberate: an engine running against the wrong schema
 version would checkpoint into tables whose shape it doesn't actually match.
 

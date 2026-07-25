@@ -11,14 +11,19 @@ defmodule Dbos.Waits do
   Node affinity falls out of `workflow_status.executor_id`, unchanged by parking: a parked wait's
   row is `PENDING` under this engine's own executor id, so a node that dies with parked waits
   outstanding leaves behind ordinary `PENDING` rows that `Dbos.Recovery`'s boot scan and
-  `Dbos.Cluster`'s dead-executor reclaim already know how to pick up — parking invents no new
-  recovery path. That path only runs on a full engine restart or a live dead-executor reclaim,
-  though; it does not fire when only this GenServer crashes and its supervisor restarts it in
-  place, so the table itself is owned by `Dbos.Waits.Table`, a separate, sibling process that
-  outlives a crash here. `init/1` re-adopts whatever is already in that table — re-arming a fresh
-  timer for each entry and re-subscribing it with `Dbos.Notifications` (a restarted process is a
-  new pid, so the crashed process's own timers and subscriptions are unreachable) — rather than
-  starting from an empty table.
+  `Dbos.Cluster.OrphanSweep`'s lease-expiry reclaim already know how to pick up — parking invents
+  no new recovery path. That path only runs on a full engine restart or a live dead-executor
+  reclaim, though; it does not fire when only this GenServer crashes and its supervisor restarts
+  it in place, so the table itself is owned by `Dbos.Waits.Table`, a separate, sibling process
+  that outlives a crash here. `init/1` re-adopts whatever is already in that table — re-arming a
+  fresh timer for each entry and re-subscribing it with `Dbos.Notifications` (a restarted process
+  is a new pid, so the crashed process's own timers and subscriptions are unreachable) — rather
+  than starting from an empty table.
+
+  A stale local timer can fire after a peer has already reclaimed the row (its executor's lease
+  expired, or a live executor's lease simply outlasted this node's own crash-and-restart cycle):
+  `redispatch/2` only ever redispatches a row whose `executor_id` still matches this engine's own,
+  so a wake that loses that race is a no-op instead of a second, concurrent execution.
 
   A single wait's wake or redispatch failing is isolated to that wait: `wake/2` runs under rescue
   so one workflow's database error cannot take this process, and every other parked wait, down
@@ -240,7 +245,8 @@ defmodule Dbos.Waits do
     config = Dbos.config(engine)
 
     case SystemDb.get_workflow_status(config, workflow_id) do
-      {:ok, %WorkflowStatus{status: :pending} = workflow} ->
+      {:ok, %WorkflowStatus{status: :pending, executor_id: executor_id} = workflow}
+      when executor_id == config.executor_id ->
         redispatch_pending(engine, workflow)
 
       {:ok, %WorkflowStatus{}} ->

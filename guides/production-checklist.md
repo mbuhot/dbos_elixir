@@ -58,15 +58,29 @@ established, `Dbos` logs a warning and falls back to 1-second polling. Startup c
 Size the pool for your expected concurrent workflow count. Web request concurrency is
 additional, if workflows and web requests share the same pool.
 
-## Clustering and dead-node recovery
+## Executor leases and dead-executor recovery
 
-Off by default. If you run more than one node and want a node's death to trigger reclaiming its
-`PENDING` workflows automatically, without waiting for that node to come back, enable
-`cluster.enabled` (and `cluster.orphan_sweep` for the case `:nodedown` itself never fires — a
-whole-cluster restart, a pod that's gone for good).
+On by default (`orphan_sweep.enabled: true`) — flagged for review if you're carrying over an
+existing configuration, since it changes behaviour: any `PENDING` workflow whose executor's lease
+has expired, or who never renewed one at all, is now automatically reclaimed and redispatched,
+where previously nothing happened without `cluster.enabled` set.
 
-Full detail, including the exact reclaim query, what it costs, and the partition-risk tradeoff
-this design deliberately makes: `docs/clustering.md`.
+- `lease.ttl_ms` (default `60_000`) and `lease.renew_interval_ms` (default `10_000`) control how
+  long an executor's lease survives without a renewal, and how often it renews. The lease is
+  written at boot, before recovery runs, and renewed over the same connection this executor
+  checkpoints through — a node that cannot renew also cannot write conflicting checkpoints.
+- `cluster.enabled` additionally joins a `:pg` group and triggers an immediate sweep pass on
+  `:nodedown` — purely a latency optimisation. The sweep itself still requires an expired lease,
+  so this changes nothing about correctness, only how quickly a genuinely dead node's workflows
+  get picked back up.
+- **A `DBOS__VMID` that changes every deploy** (a Kubernetes pod name, say) is exactly the case
+  the lease-based sweep exists for: the old pod's lease simply expires once it stops renewing, and
+  its `PENDING` rows become reclaimable by whichever executor picks up next — no `cluster:` option
+  needed. Before this, that deployment shape left every workflow the old pod held stranded.
+
+Full detail, including the exact reclaim query, capability-aware filtering (a node only claims
+work whose name it has registered), what it costs, and the partition-risk tradeoff this design
+deliberately makes: `docs/clustering.md`.
 
 ## Queue concurrency and rate limits
 
@@ -130,10 +144,14 @@ beyond a manual one-off.
 
 ## Known operational risks
 
-- **Split-brain double execution under a network partition.** Both sides of a partition reclaim
-  the same `PENDING` rows independently if clustering is enabled; `owner_xid` detects this after
-  the fact but does not prevent it. Detail and the deliberate availability-over-consistency
-  tradeoff: `docs/clustering.md`, "Partition risk".
+- **A node that hangs but keeps renewing its lease.** The lease-based sweep protects against a
+  node that is genuinely unreachable or stopped; it does not protect against one that is alive
+  enough to renew a lease but too wedged to make progress. `owner_xid` detects a double execution
+  after the fact but does not prevent it. Detail: `docs/clustering.md`, "Partition risk".
+- **At-least-once side effects, exactly-once checkpoints.** A crash between a step performing a
+  real side effect and its checkpoint committing re-runs that side effect on replay. See
+  `docs/determinism.md` and `guides/tutorials/steps.md` for what needs an idempotency key at that
+  boundary.
 - **No in-place patch for an in-flight workflow.** Changing a workflow's step layout while
   instances of it are still running requires a version bump or a new workflow name — there is no
   lighter-weight patch mechanism yet. See `guides/tutorials/upgrading-workflows.md`.

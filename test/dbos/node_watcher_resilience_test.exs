@@ -4,6 +4,7 @@ defmodule Dbos.NodeWatcherResilienceTest do
   import ExUnit.CaptureLog
 
   alias Dbos.Cluster.NodeWatcher
+  alias Dbos.Cluster.OrphanSweep
   alias Dbos.SampleWorkflows
   alias Dbos.SystemDb
   alias Dbos.Test.FaultyDB
@@ -59,16 +60,41 @@ defmodule Dbos.NodeWatcherResilienceTest do
     status
   end
 
-  test "a :nodedown whose reclaim raises does not permanently strand the dead node's workflows" do
-    fast_retries(1)
-
-    engine =
-      start_engine([{"add/2", {SampleWorkflows, :add, 2}}], cluster: [enabled: true])
-
+  test "a :nodedown triggers a sweep pass, but reclaims nothing while the departed node's lease is still valid" do
+    engine = start_engine([{"add/2", {SampleWorkflows, :add, 2}}], cluster: [enabled: true])
     config = Dbos.config(engine)
 
-    SystemDb.insert_workflow_status(config, %{
-      workflow_id: "wf-nodedown-stranded",
+    SystemDb.renew_lease(%{config | executor_id: "exec-departed"}, 60_000)
+
+    SystemDb.insert_workflow_status(%{config | executor_id: "exec-departed"}, %{
+      workflow_id: "wf-nodedown-live-lease",
+      status: :pending,
+      name: "add/2",
+      inputs: [1, 2]
+    })
+
+    send(NodeWatcher.process_name(engine), {:nodedown, :departed@nowhere})
+    Process.sleep(50)
+
+    assert status_of(config, "wf-nodedown-live-lease").status == :pending
+    assert status_of(config, "wf-nodedown-live-lease").executor_id == "exec-departed"
+
+    SystemDb.expire_lease(%{config | executor_id: "exec-departed"})
+    send(NodeWatcher.process_name(engine), {:nodedown, :departed@nowhere})
+
+    wait_until(fn -> status_of(config, "wf-nodedown-live-lease").status == :success end)
+  end
+
+  test "a :nodedown whose triggered sweep fails does not crash the node watcher, and a later sweep pass still succeeds" do
+    fast_retries(1)
+
+    engine = start_engine([{"add/2", {SampleWorkflows, :add, 2}}], cluster: [enabled: true])
+    config = Dbos.config(engine)
+
+    SystemDb.expire_lease(%{config | executor_id: "exec-gone"})
+
+    SystemDb.insert_workflow_status(%{config | executor_id: "exec-gone"}, %{
+      workflow_id: "wf-nodedown-sweep-failure",
       status: :pending,
       name: "add/2",
       inputs: [1, 2]
@@ -78,15 +104,17 @@ defmodule Dbos.NodeWatcherResilienceTest do
 
     log =
       capture_log(fn ->
-        send(NodeWatcher.process_name(engine), {:nodedown, node()})
+        send(NodeWatcher.process_name(engine), {:nodedown, :departed@nowhere})
         Process.sleep(50)
       end)
 
-    assert log =~ "reclaim for departed node"
-    assert status_of(config, "wf-nodedown-stranded").status == :pending
+    assert log =~ "sweep pass triggered by :nodedown"
+    assert status_of(config, "wf-nodedown-sweep-failure").status == :pending
+    assert Process.alive?(Process.whereis(NodeWatcher.process_name(engine)))
 
     FaultyDB.clear_injection()
+    OrphanSweep.sweep_now(engine)
 
-    wait_until(fn -> status_of(config, "wf-nodedown-stranded").status == :success end)
+    wait_until(fn -> status_of(config, "wf-nodedown-sweep-failure").status == :success end)
   end
 end

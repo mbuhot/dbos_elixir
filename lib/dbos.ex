@@ -309,24 +309,11 @@ defmodule Dbos do
   end
 
   @doc """
-  Cancels `workflow_id`: durably marks it `CANCELLED` (a no-op if it is already
-  `SUCCESS`/`ERROR`/`CANCELLED`). If the workflow has a live process
-  on this engine, wakes it immediately so a blocked `recv`/`get_event`/`sleep` is interrupted
-  promptly rather than waiting out its timeout; a workflow actively running plain steps instead
-  stops cooperatively at its next step boundary, where `check_operation_execution` observes the
-  cancellation. `opts[:engine]` defaults to `Dbos`; `opts[:cancel_children]` (default `false`)
-  additionally walks `workflow_id`'s descendant tree — breadth-first over `parent_workflow_id`,
-  cycle- and depth-guarded — and cancels every descendant alongside it, in the same database
-  transaction as the walk that discovered them, so the final `CANCELLED` update is one atomic
-  statement over the whole collected set. A descendant started after the walk already read its
-  parent's children is not included, the same scope the upstream reference itself accepts (its
-  own child lookup is also a plain query, not a recursive CTE); two concurrent cancellations of
-  overlapping trees are both safe, since the underlying `UPDATE ... WHERE status NOT IN (...)`
-  makes cancelling an already-cancelled row an idempotent no-op.
+  Marks `workflow_id` `CANCELLED`, waking a live process so a blocked wait ends promptly.
 
-  Called from inside a workflow, this consumes a step id and checkpoints a
-  `"DBOS.cancelWorkflow"` step, so replaying the caller does not attempt to cancel a second time.
-  Outside a workflow, no id is allocated and nothing is checkpointed.
+  `opts[:cancel_children]` (default `false`) cancels its descendant tree in the same
+  transaction. Cancelling a terminal workflow is a no-op. Inside a workflow this consumes a
+  step id and checkpoints; outside one it consumes none.
   """
   def cancel(workflow_id, opts \\ []) do
     {engine, config} = engine_and_config(opts)

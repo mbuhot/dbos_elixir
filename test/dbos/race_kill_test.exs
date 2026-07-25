@@ -2,7 +2,6 @@ defmodule Dbos.RaceKillTest do
   use Dbos.Case, async: false
 
   alias Dbos.SampleWorkflows
-  alias Dbos.SystemDb
 
   defp start_engine(workflows, extra_opts \\ []) do
     name = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
@@ -49,7 +48,7 @@ defmodule Dbos.RaceKillTest do
         {"transactional_insert_blocking/4", {SampleWorkflows, :transactional_insert_blocking, 4}}
       ])
 
-    config = Dbos.config(engine)
+    _config = Dbos.config(engine)
     table = new_users_table()
 
     for i <- 1..30 do
@@ -59,7 +58,9 @@ defmodule Dbos.RaceKillTest do
       {:ok, handle} =
         Dbos.start(
           "transactional_insert_blocking/4",
-          [table, ets_table, Postgrex, "user-race-#{i}"], engine: engine)
+          [table, ets_table, Postgrex, "user-race-#{i}"],
+          engine: engine
+        )
 
       wait_loop(fn -> :ets.lookup(ets_table, :reached_gate) != [] end)
 

@@ -673,3 +673,21 @@ ALTER TABLE "dbos"."workflow_status" ADD COLUMN IF NOT EXISTS "debounce_deadline
 ALTER TABLE "dbos"."workflow_status" ADD COLUMN IF NOT EXISTS "is_debounced" BOOLEAN NOT NULL DEFAULT FALSE;
 
 UPDATE "dbos".dbos_migrations SET version = 42;
+
+-- Extension tables: additional tables this engine adds on top of the base schema, tracked under
+-- their own version marker (extension_migrations.version) so dbos_migrations.version — the base
+-- schema's own version — stays pinned at 42.
+
+CREATE TABLE "dbos".extension_migrations (version BIGINT NOT NULL PRIMARY KEY);
+
+-- extension migration 1: executor leases
+
+CREATE TABLE "dbos".executor_leases (
+    executor_id TEXT PRIMARY KEY,
+    application_version TEXT,
+    node TEXT NOT NULL,
+    lease_expires_epoch_ms BIGINT NOT NULL,
+    renewed_at_epoch_ms BIGINT NOT NULL
+);
+
+INSERT INTO "dbos".extension_migrations (version) VALUES (1);

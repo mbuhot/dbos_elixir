@@ -257,7 +257,7 @@ defmodule Dbos.RecoveryTest do
     assert status.started_at_epoch_ms == nil
   end
 
-  test "reclaim/2 of a workflow whose name is not registered logs a warning and skips it, and the pass continues",
+  test "reclaim/2 leaves a workflow whose name isn't registered on this executor untouched, letting a peer that has it claim it instead",
        %{config: config, name: name} do
     insert_owned_by(config, "exec-dead", %{
       workflow_id: "wf-dead-unregistered",
@@ -282,7 +282,74 @@ defmodule Dbos.RecoveryTest do
 
     {:ok, unregistered_status} = SystemDb.get_workflow_status(config, "wf-dead-unregistered")
     assert unregistered_status.status == :pending
-    assert unregistered_status.executor_id == "exec-1"
+    assert unregistered_status.executor_id == "exec-dead"
+  end
+
+  test "reclaim/2 is capability-aware: a peer registering a different workflow claims only what it can run, leaving the rest for a third engine that implements it",
+       %{config: config} do
+    beta_name = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
+    beta_config = %{config | name: beta_name, executor_id: "exec-beta"}
+    Dbos.put_config(beta_config)
+
+    start_supervised!(
+      {Dbos.Registry, name: beta_name, workflows: [{"beta/1", {SampleWorkflows, :sleeper, 1}}]},
+      id: :beta_registry
+    )
+
+    start_supervised!(
+      {Registry, keys: :unique, name: WorkflowSup.process_registry_name(beta_name)},
+      id: :beta_process_registry
+    )
+
+    start_supervised!({WorkflowSup, name: beta_name}, id: :beta_workflow_sup)
+
+    insert_owned_by(config, "exec-dead", %{
+      workflow_id: "wf-alpha-owned",
+      status: :pending,
+      name: "add/2",
+      inputs: [1, 2]
+    })
+
+    insert_owned_by(config, "exec-dead", %{
+      workflow_id: "wf-beta-owned",
+      status: :pending,
+      name: "beta/1",
+      inputs: [10]
+    })
+
+    Recovery.reclaim(beta_name, ["exec-dead"])
+
+    {:ok, alpha_status} = SystemDb.get_workflow_status(config, "wf-alpha-owned")
+    assert alpha_status.executor_id == "exec-dead"
+
+    {:ok, beta_status} = SystemDb.get_workflow_status(config, "wf-beta-owned")
+    assert beta_status.executor_id == "exec-beta"
+
+    gamma_name = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
+    gamma_config = %{config | name: gamma_name, executor_id: "exec-gamma"}
+    Dbos.put_config(gamma_config)
+
+    start_supervised!(
+      {Dbos.Registry, name: gamma_name, workflows: [{"add/2", {SampleWorkflows, :add, 2}}]},
+      id: :gamma_registry
+    )
+
+    start_supervised!(
+      {Registry, keys: :unique, name: WorkflowSup.process_registry_name(gamma_name)},
+      id: :gamma_process_registry
+    )
+
+    start_supervised!({WorkflowSup, name: gamma_name}, id: :gamma_workflow_sup)
+
+    Recovery.reclaim(gamma_name, ["exec-dead"])
+
+    wait_until(fn ->
+      {:ok, status} = SystemDb.get_workflow_status(config, "wf-alpha-owned")
+      status.status == :success
+    end)
+
+    {:ok, final_alpha_status} = SystemDb.get_workflow_status(config, "wf-alpha-owned")
+    assert final_alpha_status.executor_id == "exec-gamma"
   end
 
   test "reclaimed workflows keep climbing recovery_attempts and eventually hit MAX_RECOVERY_ATTEMPTS_EXCEEDED",

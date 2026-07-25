@@ -24,6 +24,35 @@ defmodule Dbos.MigratorTest do
     assert error.message =~ "42"
   end
 
+  test "verify! checks the extension migration version independently of dbos_migrations.version",
+       %{
+         conn: conn,
+         config: config
+       } do
+    assert Migrator.verify!(config) == :ok
+
+    Postgrex.query!(conn, ~s(UPDATE "dbos".extension_migrations SET version = 999), [])
+
+    error =
+      assert_raise RuntimeError, fn ->
+        Migrator.verify!(config)
+      end
+
+    assert error.message =~ "extension_migrations"
+    assert error.message =~ "999"
+    assert error.message =~ inspect(Migrator.expected_extension_version())
+
+    Postgrex.query!(conn, ~s(UPDATE "dbos".extension_migrations SET version = 1), [])
+    assert Migrator.verify!(config) == :ok
+  end
+
+  test "dbos_migrations.version is untouched by the extension migration", %{conn: conn} do
+    {:ok, %{rows: [[version]]}} =
+      Postgrex.query(conn, ~s(SELECT version FROM "dbos".dbos_migrations), [])
+
+    assert version == 42
+  end
+
   test "create! applies the schema fixture to an empty database" do
     {_output, 0} = System.cmd("dropdb", ["--if-exists", "dbos_migrator_test"])
     {_output, 0} = System.cmd("createdb", ["dbos_migrator_test"])

@@ -24,6 +24,19 @@ Everything nondeterministic, and every side effect: an HTTP call, a call to anot
 read of the current time, a random number, a file read, a database write (through
 `deftransaction` — see `guides/tutorials/transactions.md`).
 
+## Side effects are at-least-once, checkpoints are exactly-once
+
+A step's recorded output is exactly-once: once its checkpoint commits, replay always returns that
+same value without calling the step body again. The step body's own side effect is not covered by
+that guarantee — a crash between the side effect happening and the checkpoint commit means the
+next replay calls the body again, performing the side effect a second time.
+
+A step whose side effect must never repeat (charging a card, sending a notification, calling a
+non-idempotent downstream API) needs an idempotency key at that boundary: pass the step's own
+`function_id`/workflow id, or a value derived from the workflow's input, as the idempotency key the
+downstream system itself deduplicates on. The engine's checkpointing does not substitute for this
+— it protects the *recorded result*, not the *external call*.
+
 ## What does not belong in a step
 
 Pure computation that only touches the workflow's own inputs and prior steps' outputs — it can

@@ -1,31 +1,31 @@
 defmodule Dbos.Migrator do
   @moduledoc """
-  Verifies the system database is at the schema version this port targets, and applies the
-  vendored schema fixture for dev and tests.
+  Verifies the system database is at the schema versions this engine targets: `dbos_migrations`
+  tracks the base schema, `extension_migrations` tracks the additional tables this engine adds on
+  top, and the two are versioned independently so one changing never shifts the other. Also
+  applies the vendored schema fixture for dev and tests.
   """
 
   alias Dbos.Config
 
   @expected_version 42
+  @expected_extension_version 1
 
-  @doc "The `dbos_migrations.version` this port targets."
+  @doc "The base schema's `dbos_migrations.version` this engine targets."
   def expected_version, do: @expected_version
 
-  @doc "Raises unless `<schema>.dbos_migrations.version` is exactly `expected_version/0`."
+  @doc "This engine's own `extension_migrations.version` it targets."
+  def expected_extension_version, do: @expected_extension_version
+
+  @doc """
+  Raises unless both `<schema>.dbos_migrations.version` and
+  `<schema>.extension_migrations.version` are exactly at the versions this engine targets, naming
+  which one is wrong.
+  """
   def verify!(%Config{} = config) do
-    case current_version(config) do
-      {:ok, @expected_version} ->
-        :ok
-
-      {:ok, other} ->
-        raise "dbos schema #{inspect(config.schema)} is at migration version #{other}, " <>
-                "expected #{@expected_version}; apply the reference migrations up to that version"
-
-      {:error, :not_found} ->
-        raise "dbos schema #{inspect(config.schema)} has no dbos_migrations table (expected " <>
-                "version #{@expected_version}); run Dbos.Migrator.create!/1 or apply the " <>
-                "reference migrations before starting the engine"
-    end
+    verify_table_version!(config, "dbos_migrations", @expected_version)
+    verify_table_version!(config, "extension_migrations", @expected_extension_version)
+    :ok
   end
 
   @doc "Applies `priv/schema/dbos_schema.sql` verbatim, statement by statement. For dev and tests."
@@ -40,8 +40,24 @@ defmodule Dbos.Migrator do
     :ok
   end
 
-  defp current_version(config) do
-    sql = ~s(SELECT version FROM "#{config.schema}".dbos_migrations)
+  defp verify_table_version!(config, table, expected_version) do
+    case current_version(config, table) do
+      {:ok, ^expected_version} ->
+        :ok
+
+      {:ok, other} ->
+        raise "dbos schema #{inspect(config.schema)}'s #{table}.version is #{other}, " <>
+                "expected #{expected_version}; apply the reference migrations up to that version"
+
+      {:error, :not_found} ->
+        raise "dbos schema #{inspect(config.schema)} has no #{table} table (expected " <>
+                "version #{expected_version}); run Dbos.Migrator.create!/1 or apply the " <>
+                "reference migrations before starting the engine"
+    end
+  end
+
+  defp current_version(config, table) do
+    sql = ~s(SELECT version FROM "#{config.schema}".#{table})
 
     case config.db.query(config.conn, sql, []) do
       {:ok, %{rows: [[version]]}} -> {:ok, version}

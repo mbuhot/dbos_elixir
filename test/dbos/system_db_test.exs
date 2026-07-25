@@ -701,4 +701,137 @@ defmodule Dbos.SystemDbTest do
       end
     end
   end
+
+  describe "executor leases" do
+    test "renew_lease/2 writes a lease readable via get_executor_lease/2", %{config: config} do
+      assert SystemDb.get_executor_lease(config, config.executor_id) == nil
+
+      before_renew = System.os_time(:millisecond)
+      assert SystemDb.renew_lease(config, 60_000) == :ok
+
+      lease = SystemDb.get_executor_lease(config, config.executor_id)
+      assert lease.executor_id == config.executor_id
+      assert lease.lease_expires_epoch_ms >= before_renew + 60_000
+      assert lease.renewed_at_epoch_ms >= before_renew
+    end
+
+    test "renew_lease/2 called again updates the same row rather than duplicating it", %{
+      config: config
+    } do
+      SystemDb.renew_lease(config, 60_000)
+      first = SystemDb.get_executor_lease(config, config.executor_id)
+
+      Process.sleep(5)
+      SystemDb.renew_lease(config, 60_000)
+      second = SystemDb.get_executor_lease(config, config.executor_id)
+
+      assert second.renewed_at_epoch_ms > first.renewed_at_epoch_ms
+    end
+
+    test "expire_lease/1 sets the lease expiry into the past", %{config: config} do
+      SystemDb.renew_lease(config, 60_000)
+      assert SystemDb.expire_lease(config) == :ok
+
+      lease = SystemDb.get_executor_lease(config, config.executor_id)
+      assert lease.lease_expires_epoch_ms <= System.os_time(:millisecond)
+    end
+
+    test "list_expired_lease_pending_executor_ids/1 includes an executor with no lease row at all",
+         %{config: config} do
+      SystemDb.insert_workflow_status(%{config | executor_id: "exec-no-lease"}, %{
+        workflow_id: "wf-no-lease",
+        status: :pending,
+        name: "add/2",
+        inputs: [1, 2]
+      })
+
+      assert "exec-no-lease" in SystemDb.list_expired_lease_pending_executor_ids(config)
+    end
+
+    test "list_expired_lease_pending_executor_ids/1 excludes an executor whose lease has not expired, even with a stale row",
+         %{config: config} do
+      stale_at = System.os_time(:millisecond) - 3_600_000
+
+      SystemDb.insert_workflow_status(%{config | executor_id: "exec-alive"}, %{
+        workflow_id: "wf-stale-but-alive",
+        status: :pending,
+        name: "add/2",
+        inputs: [1, 2],
+        updated_at: stale_at
+      })
+
+      SystemDb.renew_lease(%{config | executor_id: "exec-alive"}, 60_000)
+
+      refute "exec-alive" in SystemDb.list_expired_lease_pending_executor_ids(config)
+    end
+
+    test "list_expired_lease_pending_executor_ids/1 includes an executor whose lease has expired",
+         %{config: config} do
+      SystemDb.insert_workflow_status(%{config | executor_id: "exec-expired"}, %{
+        workflow_id: "wf-expired-lease",
+        status: :pending,
+        name: "add/2",
+        inputs: [1, 2]
+      })
+
+      SystemDb.renew_lease(%{config | executor_id: "exec-expired"}, 60_000)
+      SystemDb.expire_lease(%{config | executor_id: "exec-expired"})
+
+      assert "exec-expired" in SystemDb.list_expired_lease_pending_executor_ids(config)
+    end
+  end
+
+  describe "reclaim_pending_workflows/4 is capability-aware" do
+    test "reassigns only rows whose name is in registered_names", %{config: config} do
+      insert_pending(config, "exec-dead", "wf-alpha", "alpha/1")
+      insert_pending(config, "exec-dead", "wf-beta", "beta/1")
+
+      reclaimed =
+        SystemDb.reclaim_pending_workflows(config, ["exec-dead"], ["beta/1"])
+
+      assert Enum.map(reclaimed, & &1.workflow_uuid) == ["wf-beta"]
+
+      {:ok, alpha_status} = SystemDb.get_workflow_status(config, "wf-alpha")
+      assert alpha_status.executor_id == "exec-dead"
+
+      {:ok, beta_status} = SystemDb.get_workflow_status(config, "wf-beta")
+      assert beta_status.executor_id == config.executor_id
+    end
+
+    test "an empty registered_names list reclaims nothing rather than matching everything", %{
+      config: config
+    } do
+      insert_pending(config, "exec-dead", "wf-anything", "anything/1")
+
+      assert SystemDb.reclaim_pending_workflows(config, ["exec-dead"], []) == []
+
+      {:ok, status} = SystemDb.get_workflow_status(config, "wf-anything")
+      assert status.executor_id == "exec-dead"
+    end
+  end
+
+  describe "list_reclaimable_pending_workflow_ids/3 is capability-aware" do
+    test "only lists ids whose name is in registered_names", %{config: config} do
+      insert_pending(config, "exec-dead", "wf-alpha-2", "alpha/1")
+      insert_pending(config, "exec-dead", "wf-beta-2", "beta/1")
+
+      assert SystemDb.list_reclaimable_pending_workflow_ids(config, ["exec-dead"], ["beta/1"]) ==
+               ["wf-beta-2"]
+    end
+
+    test "an empty registered_names list returns no ids", %{config: config} do
+      insert_pending(config, "exec-dead", "wf-anything-2", "anything/1")
+
+      assert SystemDb.list_reclaimable_pending_workflow_ids(config, ["exec-dead"], []) == []
+    end
+  end
+
+  defp insert_pending(config, executor_id, workflow_id, name) do
+    SystemDb.insert_workflow_status(%{config | executor_id: executor_id}, %{
+      workflow_id: workflow_id,
+      status: :pending,
+      name: name,
+      inputs: [1]
+    })
+  end
 end

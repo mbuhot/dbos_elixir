@@ -1,8 +1,9 @@
 defmodule Dbos.ClusterSupervisorTest do
   @moduledoc """
-  Tests that `Dbos.Supervisor`'s `cluster:` option is genuinely opt-in: no `Dbos.Cluster`,
-  `Dbos.Cluster.NodeWatcher`, or `Dbos.Cluster.OrphanSweep` child, and no `:pg` group, unless
-  explicitly enabled.
+  Tests that `Dbos.Supervisor`'s `cluster:` option is genuinely opt-in for `Dbos.Cluster` and
+  `Dbos.Cluster.NodeWatcher` (no `:pg` group unless explicitly enabled), while
+  `Dbos.Cluster.OrphanSweep` starts by default, independent of `cluster:` entirely, since it needs
+  only the system database.
   """
 
   use Dbos.Case, async: false
@@ -25,25 +26,25 @@ defmodule Dbos.ClusterSupervisorTest do
     name
   end
 
-  test "with cluster disabled (the default), no Dbos.Cluster process starts" do
+  test "with cluster disabled (the default), no Dbos.Cluster process starts, but the orphan sweep does" do
     name = start_engine()
 
     assert Process.whereis(Cluster.process_name(name)) == nil
     assert Process.whereis(Dbos.Cluster.NodeWatcher.process_name(name)) == nil
-    assert Process.whereis(Dbos.Cluster.OrphanSweep.process_name(name)) == nil
+    assert Process.whereis(Dbos.Cluster.OrphanSweep.process_name(name)) != nil
   end
 
-  test "with cluster enabled, Dbos.Cluster and Dbos.Cluster.NodeWatcher start, but not the orphan sweep by default" do
+  test "with cluster enabled, Dbos.Cluster and Dbos.Cluster.NodeWatcher also start" do
     name = start_engine(cluster: [enabled: true])
 
     assert Process.whereis(Cluster.process_name(name)) != nil
     assert Process.whereis(Dbos.Cluster.NodeWatcher.process_name(name)) != nil
-    assert Process.whereis(Dbos.Cluster.OrphanSweep.process_name(name)) == nil
+    assert Process.whereis(Dbos.Cluster.OrphanSweep.process_name(name)) != nil
   end
 
-  test "with cluster and orphan sweep both enabled, the orphan sweep starts too" do
-    name = start_engine(cluster: [enabled: true, orphan_sweep: [enabled: true]])
+  test "the orphan sweep can be disabled independently of cluster" do
+    name = start_engine(orphan_sweep: [enabled: false])
 
-    assert Process.whereis(Dbos.Cluster.OrphanSweep.process_name(name)) != nil
+    assert Process.whereis(Dbos.Cluster.OrphanSweep.process_name(name)) == nil
   end
 end

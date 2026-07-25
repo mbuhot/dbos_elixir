@@ -2,7 +2,6 @@ defmodule Dbos.EctoKillTest do
   use Dbos.Case, async: false
 
   alias Dbos.SampleWorkflows
-  alias Dbos.SystemDb
 
   defp start_engine(workflows, extra_opts \\ []) do
     name = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
@@ -61,7 +60,7 @@ defmodule Dbos.EctoKillTest do
         {"transactional_insert_blocking/4", {SampleWorkflows, :transactional_insert_blocking, 4}}
       ])
 
-    config = Dbos.config(engine)
+    _config = Dbos.config(engine)
     table = new_users_table()
     ets_table = :"tx_kill_gate_ecto_#{System.unique_integer([:positive])}"
     :ets.new(ets_table, [:named_table, :public, :set])

@@ -175,7 +175,7 @@ defmodule Dbos.StepInTransactionError do
 end
 
 defmodule Dbos.NotSupportedError do
-  @moduledoc "Raised when a call requires functionality this port has not implemented."
+  @moduledoc "Raised when a call requires functionality the engine does not implement."
 
   defexception [:reason]
 

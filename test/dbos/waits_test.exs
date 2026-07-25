@@ -223,4 +223,27 @@ defmodule Dbos.WaitsTest do
 
     Enum.each(handles, &Dbos.cancel(&1.workflow_id, engine: engine))
   end
+
+  test "9. a parked wait whose row was reclaimed by another executor is not redispatched locally" do
+    engine =
+      start_engine([{"sleeper/1", {SampleWorkflows, :sleeper, 1}}], park_exit_threshold_ms: 50)
+
+    {:ok, handle} = Dbos.start("sleeper/1", [200], engine: engine)
+
+    wait_until(fn -> Waits.count(engine) == 1 end)
+
+    Postgrex.query!(
+      Dbos.TestConn,
+      "UPDATE dbos.workflow_status SET executor_id = $1 WHERE workflow_uuid = $2",
+      ["exec-other-node", handle.workflow_id]
+    )
+
+    wait_until(fn -> Waits.count(engine) == 0 end)
+    Process.sleep(300)
+
+    config = Dbos.config(engine)
+    {:ok, status} = SystemDb.get_workflow_status(config, handle.workflow_id)
+    assert status.status == :pending
+    assert status.executor_id == "exec-other-node"
+  end
 end

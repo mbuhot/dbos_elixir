@@ -1,9 +1,10 @@
 defmodule Dbos.ClusterPeerTest do
   @moduledoc """
-  Exercises `Dbos.Cluster`/`Dbos.Cluster.NodeWatcher` against a genuinely separate, connected
-  BEAM node started via `:peer.start_link/1`, per the task's acceptance tests for the
-  many-to-one roster and real `:nodedown` reclaim. Tagged `:integration` (excluded by default,
-  `test/test_helper.exs`) since it starts distributed Erlang for the whole test run: run with
+  Exercises `Dbos.Cluster`/`Dbos.Cluster.NodeWatcher`/`Dbos.Cluster.OrphanSweep` against a
+  genuinely separate, connected BEAM node started via `:peer.start_link/1`: the many-to-one
+  roster, and a real `:nodedown` triggering a sweep pass that reclaims the departed peer's
+  never-leased workflow. Tagged `:integration` (excluded by default, `test/test_helper.exs`)
+  since it starts distributed Erlang for the whole test run: run with
   `mix test --include integration test/dbos/cluster_peer_test.exs` in isolation.
   """
 
@@ -46,7 +47,7 @@ defmodule Dbos.ClusterPeerTest do
     Module.concat(__MODULE__, :"Engine#{suffix}#{System.unique_integer([:positive])}")
   end
 
-  test "a peer node's departure resolves to its executor id via the roster, and triggers reclaim",
+  test "a peer node's departure resolves to its executor id via the roster, and its :nodedown triggers a sweep pass that reclaims its never-leased workflow",
        %{conn: conn} do
     group = Module.concat(__MODULE__, :"Group#{System.unique_integer([:positive])}")
     local_engine = unique_engine_name("Local")
@@ -79,6 +80,7 @@ defmodule Dbos.ClusterPeerTest do
 
     start_supervised!({Cluster, name: local_engine})
     start_supervised!({NodeWatcher, name: local_engine})
+    start_supervised!({Dbos.Cluster.OrphanSweep, name: local_engine})
 
     start_supervised!(
       {Dbos.Registry, name: local_engine, workflows: [{"add/2", {SampleWorkflows, :add, 2}}]}

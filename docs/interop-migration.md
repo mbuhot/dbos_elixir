@@ -34,7 +34,7 @@ recording the exact format used to write that row:
 | `workflow_events_history` | `value` | `workflow_events_history.serialization` |
 | `streams` | `value` | `streams.serialization` |
 
-This port writes exactly one format today: `"erl_etf"` — `:erlang.term_to_binary/1`,
+The engine writes exactly one format today: `"erl_etf"` — `:erlang.term_to_binary/1`,
 then base64-encoded so the bytes are safe to store in a `TEXT` column. `error` columns
 are stored as plain serialized error text and are not themselves subject to the
 `serialization` column's format.
