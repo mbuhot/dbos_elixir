@@ -28,7 +28,7 @@ defmodule Dbos.DB.Postgrex do
   end
 
   @impl Dbos.DB
-  def in_transaction?(conn), do: DBConnection.status(conn) == :transaction
+  def in_transaction?(conn), do: DBConnection.status(conn) in [:transaction, :error]
 
   @impl Dbos.DB
   def rollback(conn, reason), do: Postgrex.rollback(conn, reason)

@@ -2,7 +2,7 @@ defmodule Dbos.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/mbuhot/dbos"
+  @source_url "https://github.com/mbuhot/dbos_elixir"
 
   def project do
     [
@@ -48,14 +48,19 @@ defmodule Dbos.MixProject do
   defp docs do
     [
       main: "readme",
-      source_ref: "v#{@version}",
+      source_ref: source_ref(),
       extras: extras(),
       groups_for_extras: groups_for_extras(),
       groups_for_modules: groups_for_modules(),
       extra_section: "GUIDES",
       formatters: ["html"],
+      assets: %{"assets" => "."},
       before_closing_body_tag: &before_closing_body_tag/1
     ]
+  end
+
+  defp source_ref do
+    System.get_env("GITHUB_SHA") || "main"
   end
 
   defp before_closing_body_tag(:html) do
@@ -64,6 +69,8 @@ defmodule Dbos.MixProject do
     <script>
       (() => {
         const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+        let sequence = 0;
+        let scheduled = false;
 
         const isDark = () => {
           const stored = document.body.getAttribute("data-theme") || localStorage.getItem("ex_doc:settings:night_mode");
@@ -72,36 +79,78 @@ defmodule Dbos.MixProject do
           return darkQuery.matches;
         };
 
-        const sources = [];
-
-        const render = () => {
-          mermaid.initialize({ startOnLoad: false, theme: isDark() ? "dark" : "default" });
-          sources.forEach(({ container, definition }, index) => {
-            mermaid.render(`mermaid-graph-${index}-${Date.now()}`, definition).then(({ svg, bindFunctions }) => {
+        const draw = (container, definition) => {
+          sequence += 1;
+          mermaid
+            .render("mermaid-graph-" + sequence, definition)
+            .then(({ svg, bindFunctions }) => {
               container.innerHTML = svg;
               if (bindFunctions) bindFunctions(container);
+            })
+            .catch(() => {
+              container.textContent = definition;
             });
+        };
+
+        const renderPending = () => {
+          const pending = document.querySelectorAll("pre > code.mermaid");
+          if (pending.length === 0) return;
+
+          mermaid.initialize({ startOnLoad: false, theme: isDark() ? "dark" : "default" });
+
+          pending.forEach((code) => {
+            const definition = code.textContent;
+            const container = document.createElement("div");
+            container.className = "mermaid-diagram";
+            container.dataset.mermaidSource = definition;
+            code.parentElement.replaceWith(container);
+            draw(container, definition);
           });
         };
 
-        document.addEventListener("DOMContentLoaded", () => {
-          document.querySelectorAll("pre > code.mermaid").forEach((code) => {
-            const pre = code.parentElement;
-            const container = document.createElement("div");
-            container.className = "mermaid-diagram";
-            sources.push({ container, definition: code.textContent });
-            pre.replaceWith(container);
+        const schedule = () => {
+          if (scheduled) return;
+          scheduled = true;
+          window.requestAnimationFrame(() => {
+            scheduled = false;
+            renderPending();
+          });
+        };
+
+        let lastTheme = null;
+
+        const redrawForTheme = () => {
+          const theme = isDark() ? "dark" : "default";
+          if (theme === lastTheme) return;
+          lastTheme = theme;
+
+          mermaid.initialize({ startOnLoad: false, theme: theme });
+          document.querySelectorAll(".mermaid-diagram[data-mermaid-source]").forEach((container) => {
+            draw(container, container.dataset.mermaidSource);
+          });
+        };
+
+        const start = () => {
+          renderPending();
+
+          new MutationObserver(schedule).observe(document.body, {
+            childList: true,
+            subtree: true
           });
 
-          if (sources.length === 0) return;
-
-          render();
-          darkQuery.addEventListener("change", render);
-          new MutationObserver(render).observe(document.body, {
+          new MutationObserver(redrawForTheme).observe(document.body, {
             attributes: true,
             attributeFilter: ["data-theme", "class"]
           });
-        });
+
+          darkQuery.addEventListener("change", redrawForTheme);
+        };
+
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", start);
+        } else {
+          start();
+        }
       })();
     </script>
     """

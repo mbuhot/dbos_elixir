@@ -160,6 +160,22 @@ defmodule Dbos.SampleWorkflows do
     end)
   end
 
+  @doc """
+  Inserts `user_id` into `table`, signals `ets_table`'s `:reached_gate` entry, then blocks on
+  `:go` before returning, all from inside the transaction body — so a test can deterministically
+  kill the process while it is still inside the transaction, mid-write, uncommitted.
+  """
+  def transactional_insert_blocking(table, ets_table, workflow_conn_mod, user_id) do
+    Dbos.transaction("insert_user_blocking/4", [], fn conn ->
+      workflow_conn_mod.query!(conn, "INSERT INTO #{table} (id) VALUES ($1)", [user_id])
+      :ets.insert(ets_table, {:reached_gate, true})
+
+      receive do
+        :go -> user_id
+      end
+    end)
+  end
+
   def transactional_insert_then_raise(table, workflow_conn_mod, user_id) do
     Dbos.transaction("insert_user_then_raise/2", [], fn conn ->
       workflow_conn_mod.query!(conn, "INSERT INTO #{table} (id) VALUES ($1)", [user_id])

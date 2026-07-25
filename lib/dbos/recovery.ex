@@ -3,7 +3,15 @@ defmodule Dbos.Recovery do
   Re-dispatches `PENDING` workflows on engine start, and reclaims a dead executor's `PENDING`
   workflows on demand. A queued `PENDING` workflow is handed back to its queue rather than
   re-invoked directly. An unregistered workflow name is logged and skipped; the pass continues
-  with the rest of the batch.
+  with the rest of the batch. A workflow whose redispatch itself fails is isolated the same way:
+  reclaiming moves the whole batch to this executor in one statement, so a failure that escaped
+  would leave every workflow behind it owned by a live executor and invisible to any later
+  recovery pass.
+
+  Reclaiming takes `FOR UPDATE SKIP LOCKED`, so a row whose lock is still held — by a peer
+  executor, or by a backend that has not finished being torn down after its client was killed —
+  is passed over. A pass that skipped a row it has not already handled re-scans, on a short
+  bounded backoff, so a lock released milliseconds later still gets the workflow recovered.
   """
 
   use GenServer
@@ -14,6 +22,9 @@ defmodule Dbos.Recovery do
   alias Dbos.SystemDb
   alias Dbos.Telemetry
   alias Dbos.WorkflowSup
+
+  @rescan_passes 5
+  @rescan_base_delay_ms 50
 
   @doc "Starts recovery for the engine named `opts[:name]`, scanning once in a `handle_continue` so `start_link` returns promptly."
   def start_link(opts) do
@@ -50,12 +61,10 @@ defmodule Dbos.Recovery do
 
     Telemetry.span_recovery(metadata, fn ->
       queued_ids = SystemDb.list_queued_pending_workflow_ids(config, dead_executor_ids)
-      Enum.each(queued_ids, &SystemDb.clear_queue_assignment(config, &1))
+      Enum.each(queued_ids, &clear_one(config, &1))
 
-      reclaimed = SystemDb.reclaim_pending_workflows(config, dead_executor_ids, opts)
-      Enum.each(reclaimed, &recover_one(engine_name, config, &1))
-
-      queued_ids ++ Enum.map(reclaimed, & &1.workflow_uuid)
+      queued_ids ++
+        reclaim_passes(engine_name, config, dead_executor_ids, opts, MapSet.new(), 1)
     end)
   end
 
@@ -78,6 +87,46 @@ defmodule Dbos.Recovery do
     {:noreply, engine_name}
   end
 
+  defp reclaim_passes(engine_name, config, dead_executor_ids, opts, handled, pass) do
+    reclaimed = SystemDb.reclaim_pending_workflows(config, dead_executor_ids, opts)
+    Enum.each(reclaimed, &recover_one(engine_name, config, &1))
+
+    ids = Enum.map(reclaimed, & &1.workflow_uuid)
+    handled = Enum.into(ids, handled)
+
+    if rescan?(config, dead_executor_ids, opts, handled, reclaimed, pass) do
+      Process.sleep(@rescan_base_delay_ms * Integer.pow(2, pass - 1))
+      ids ++ reclaim_passes(engine_name, config, dead_executor_ids, opts, handled, pass + 1)
+    else
+      ids
+    end
+  end
+
+  defp rescan?(config, dead_executor_ids, opts, handled, reclaimed, pass) do
+    pass < @rescan_passes and not batch_exhausted?(opts, reclaimed) and
+      Enum.any?(
+        SystemDb.list_reclaimable_pending_workflow_ids(config, dead_executor_ids),
+        &(not MapSet.member?(handled, &1))
+      )
+  end
+
+  defp batch_exhausted?(opts, reclaimed) do
+    case Keyword.get(opts, :batch_size) do
+      nil -> false
+      batch_size -> length(reclaimed) >= batch_size
+    end
+  end
+
+  defp clear_one(config, workflow_id) do
+    SystemDb.clear_queue_assignment(config, workflow_id)
+  rescue
+    error ->
+      Logger.error(
+        "dbos: could not return queued workflow #{workflow_id} to its queue: " <>
+          Exception.format_banner(:error, error, __STACKTRACE__)
+      )
+  end
+
   defp recover_one(engine_name, config, workflow) do
     case Registry.lookup(engine_name, workflow.name) do
       :error ->
@@ -89,6 +138,12 @@ defmodule Dbos.Recovery do
       {:ok, mfa} ->
         redispatch(engine_name, config, workflow, mfa)
     end
+  rescue
+    error ->
+      Logger.error(
+        "dbos: recovery failed for workflow #{workflow.workflow_uuid}; the rest of the batch " <>
+          "continues: " <> Exception.format_banner(:error, error, __STACKTRACE__)
+      )
   end
 
   defp redispatch(engine_name, config, workflow, mfa) do

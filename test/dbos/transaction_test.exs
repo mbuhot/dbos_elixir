@@ -123,6 +123,62 @@ defmodule Dbos.TransactionTest do
     assert {:ok, "serializable"} = Dbos.await(handle)
   end
 
+  defp wait_until(fun, attempts \\ 100)
+  defp wait_until(_fun, 0), do: flunk("condition never became true")
+
+  defp wait_until(fun, attempts) do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(20)
+      wait_until(fun, attempts - 1)
+    end
+  end
+
+  test "killing the workflow process mid-transaction still lets recovery complete it" do
+    engine =
+      start_engine([
+        {"transactional_insert_blocking/4", {SampleWorkflows, :transactional_insert_blocking, 4}}
+      ])
+
+    config = Dbos.config(engine)
+    table = new_users_table()
+    ets_table = :"tx_kill_gate_#{System.unique_integer([:positive])}"
+    :ets.new(ets_table, [:named_table, :public, :set])
+
+    {:ok, handle} =
+      Dbos.start("transactional_insert_blocking/4", [table, ets_table, Postgrex, "user-kill"],
+        engine: engine
+      )
+
+    wait_until(fn -> :ets.lookup(ets_table, :reached_gate) != [] end)
+
+    {:ok, pid} = Dbos.WorkflowSup.whereis(engine, handle.workflow_id)
+    Process.exit(pid, :kill)
+
+    {:ok, status} = SystemDb.get_workflow_status(config, handle.workflow_id)
+    assert status.status == :pending
+    refute user_exists?(table, "user-kill")
+
+    Dbos.Recovery.recover_pending(engine)
+
+    wait_until(fn ->
+      case Dbos.WorkflowSup.whereis(engine, handle.workflow_id) do
+        {:ok, _new_pid} -> true
+        _ -> false
+      end
+    end)
+
+    {:ok, new_pid} = Dbos.WorkflowSup.whereis(engine, handle.workflow_id)
+    send(new_pid, :go)
+
+    assert {:ok, "user-kill"} = Dbos.await(handle, timeout_ms: 10_000)
+    assert user_exists?(table, "user-kill")
+
+    {:ok, [step]} = SystemDb.get_workflow_steps(config, handle.workflow_id)
+    assert step.function_name == "insert_user_blocking/4"
+  end
+
   test "an Ecto Repo.query inside a transactional step commits on the same connection as the checkpoint" do
     engine =
       start_engine(

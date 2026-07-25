@@ -12,6 +12,7 @@ defmodule Dbos.DB do
 
   @callback transaction(conn, opts :: keyword, (conn -> term)) :: {:ok, term} | {:error, term}
 
+  @doc "Whether `conn` is inside an open transaction, including one already aborted."
   @callback in_transaction?(conn) :: boolean
 
   @callback rollback(conn, reason :: term) :: no_return

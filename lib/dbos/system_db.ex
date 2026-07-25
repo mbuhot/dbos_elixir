@@ -3,11 +3,20 @@ defmodule Dbos.SystemDb do
   Reads and writes against the `dbos` system database tables. Every function takes a
   `Dbos.Config` first, so a call site never has to know which adapter or schema it's running
   against.
+
+  Every statement goes through `Dbos.DB.Retry`, which retries transient connection-level failures
+  on a bounded exponential backoff and never retries a statement issued on a connection already
+  inside a transaction. Two statements opt out because a re-execution would duplicate their
+  effect: the plain `INSERT` behind `insert_debounced_workflow/2`, and the offset-appending
+  `INSERT` behind `write_stream/5`. `fork_workflow/4`'s transaction opts out for the same reason.
+  A statement that still fails raises `Dbos.SystemDbError` carrying the statement and the
+  underlying driver error.
   """
 
   require Logger
 
   alias Dbos.Config
+  alias Dbos.DB.Retry
   alias Dbos.InsertWorkflowResult
   alias Dbos.Serialization
   alias Dbos.Status
@@ -77,7 +86,7 @@ defmodule Dbos.SystemDb do
     ON CONFLICT (workflow_uuid) DO UPDATE SET updated_at = EXCLUDED.updated_at
     """
 
-    case config.db.query(config.conn, sql, values) do
+    case query_result(config, sql, values) do
       {:ok, _result} ->
         {:ok, workflow_id}
 
@@ -112,7 +121,7 @@ defmodule Dbos.SystemDb do
     WHERE queue_name = $1 AND deduplication_id = $2
     """
 
-    case config.db.query(config.conn, sql, [queue_name, deduplication_id]) do
+    case query(config, sql, [queue_name, deduplication_id]) do
       {:ok, %{rows: [[workflow_id]]}} -> workflow_id
       {:ok, %{rows: []}} -> nil
     end
@@ -123,7 +132,7 @@ defmodule Dbos.SystemDb do
     sql =
       "SELECT #{select_list(WorkflowStatus)} FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1"
 
-    case config.db.query(config.conn, sql, [workflow_id]) do
+    case query(config, sql, [workflow_id]) do
       {:ok, %{rows: [row]}} -> {:ok, WorkflowStatus.from_row(row)}
       {:ok, %{rows: []}} -> {:error, :not_found}
     end
@@ -142,7 +151,7 @@ defmodule Dbos.SystemDb do
     #{limit_offset_sql}
     """
 
-    {:ok, result} = config.db.query(config.conn, sql, all_params)
+    {:ok, result} = query(config, sql, all_params)
     {:ok, Enum.map(result.rows, &WorkflowStatus.from_row/1)}
   end
 
@@ -154,7 +163,7 @@ defmodule Dbos.SystemDb do
     ORDER BY function_id ASC
     """
 
-    {:ok, result} = config.db.query(config.conn, sql, [workflow_id])
+    {:ok, result} = query(config, sql, [workflow_id])
     {:ok, Enum.map(result.rows, &StepInfo.from_row/1)}
   end
 
@@ -206,7 +215,7 @@ defmodule Dbos.SystemDb do
     owner_xid = Map.get_lazy(attrs, :owner_xid, &Uuid.v4/0)
 
     {:ok, outcome} =
-      config.db.transaction(config.conn, [], fn conn ->
+      transaction(config, [], fn conn ->
         tx_config = %{config | conn: conn}
 
         insert_result =
@@ -238,7 +247,7 @@ defmodule Dbos.SystemDb do
   """
   def check_operation_execution(%Config{} = config, workflow_id, function_id, function_name) do
     {:ok, result} =
-      config.db.transaction(config.conn, [], fn conn ->
+      transaction(config, [], fn conn ->
         tx_config = %{config | conn: conn}
         status = fetch_workflow_status_for_check!(tx_config, workflow_id)
         ensure_not_cancelled!(status, workflow_id)
@@ -298,7 +307,7 @@ defmodule Dbos.SystemDb do
       Status.to_string(:error)
     ]
 
-    {:ok, %{num_rows: num_rows}} = config.db.query(config.conn, sql, values)
+    {:ok, %{num_rows: num_rows}} = query(config, sql, values)
 
     if num_rows == 0 do
       handle_update_outcome_conflict(config, workflow_id)
@@ -321,7 +330,7 @@ defmodule Dbos.SystemDb do
     WHERE workflow_uuid = $1 AND function_id = $2
     """
 
-    case config.db.query(config.conn, sql, [parent_workflow_id, parent_step_id]) do
+    case query(config, sql, [parent_workflow_id, parent_step_id]) do
       {:ok, %{rows: []}} ->
         :none
 
@@ -350,7 +359,7 @@ defmodule Dbos.SystemDb do
     """
 
     {:ok, %{num_rows: num_rows}} =
-      config.db.query(config.conn, sql, [
+      query(config, sql, [
         Status.to_string(:enqueued),
         workflow_id,
         Status.to_string(:pending)
@@ -393,7 +402,7 @@ defmodule Dbos.SystemDb do
       [config.executor_id, dead_executor_ids, Status.to_string(:pending)] ++
         version_params ++ limit_params
 
-    {:ok, result} = config.db.query(config.conn, sql, params)
+    {:ok, result} = query(config, sql, params)
     Enum.map(result.rows, &WorkflowStatus.from_row/1)
   end
 
@@ -404,6 +413,26 @@ defmodule Dbos.SystemDb do
 
   defp application_version_clause(%{application_version: version}, index),
     do: {"AND application_version = $#{index}", [version], index + 1}
+
+  @doc """
+  The ids of non-queued `PENDING` rows still owned by any of `dead_executor_ids` — the same set
+  `reclaim_pending_workflows/3` claims from, without taking any lock. A row appears here after a
+  reclaim pass exactly when that pass skipped it, either because a concurrent executor holds its
+  lock or because a backend that has not finished being torn down still does.
+  """
+  def list_reclaimable_pending_workflow_ids(%Config{} = config, dead_executor_ids) do
+    {version_clause, version_params, _next_index} = application_version_clause(config, 3)
+
+    sql = """
+    SELECT workflow_uuid FROM #{table(config, "workflow_status")}
+    WHERE executor_id = ANY($1) AND status = $2 AND queue_name IS NULL
+      #{version_clause}
+    """
+
+    params = [dead_executor_ids, Status.to_string(:pending)] ++ version_params
+    {:ok, result} = query(config, sql, params)
+    Enum.map(result.rows, fn [id] -> id end)
+  end
 
   @doc """
   The workflow ids of queued `PENDING` rows owned by any of `dead_executor_ids`.
@@ -417,7 +446,7 @@ defmodule Dbos.SystemDb do
     """
 
     {:ok, result} =
-      config.db.query(config.conn, sql, [dead_executor_ids, Status.to_string(:pending)])
+      query(config, sql, [dead_executor_ids, Status.to_string(:pending)])
 
     Enum.map(result.rows, fn [id] -> id end)
   end
@@ -433,7 +462,7 @@ defmodule Dbos.SystemDb do
     """
 
     cutoff_ms = System.os_time(:millisecond) - threshold_ms
-    {:ok, result} = config.db.query(config.conn, sql, [Status.to_string(:pending), cutoff_ms])
+    {:ok, result} = query(config, sql, [Status.to_string(:pending), cutoff_ms])
     Enum.map(result.rows, fn [id] -> id end)
   end
 
@@ -469,7 +498,7 @@ defmodule Dbos.SystemDb do
       Status.to_string(:cancelled)
     ]
 
-    {:ok, result} = config.db.query(config.conn, sql, params)
+    {:ok, result} = query(config, sql, params)
     Enum.map(result.rows, fn [id] -> id end)
   end
 
@@ -490,7 +519,7 @@ defmodule Dbos.SystemDb do
       Status.to_string(:delayed)
     ]
 
-    {:ok, result} = config.db.query(config.conn, sql, params)
+    {:ok, result} = query(config, sql, params)
     workflow_ids = Enum.map(result.rows, fn [id] -> id end)
     if workflow_ids == [], do: [], else: cancel_workflows(config, workflow_ids)
   end
@@ -503,7 +532,7 @@ defmodule Dbos.SystemDb do
     SELECT workflow_uuid FROM #{table(config, "workflow_status")} WHERE parent_workflow_id = $1
     """
 
-    {:ok, result} = config.db.query(config.conn, sql, [workflow_id])
+    {:ok, result} = query(config, sql, [workflow_id])
     Enum.map(result.rows, fn [id] -> id end)
   end
 
@@ -570,7 +599,7 @@ defmodule Dbos.SystemDb do
       Status.to_string(:error)
     ]
 
-    {:ok, result} = config.db.query(config.conn, sql, params)
+    {:ok, result} = query(config, sql, params)
     Enum.map(result.rows, fn [id] -> id end)
   end
 
@@ -578,7 +607,7 @@ defmodule Dbos.SystemDb do
   def workflow_cancelled?(%Config{} = config, workflow_id) do
     sql = "SELECT status FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1"
 
-    case config.db.query(config.conn, sql, [workflow_id]) do
+    case query(config, sql, [workflow_id]) do
       {:ok, %{rows: [[status]]}} -> status == Status.to_string(:cancelled)
       {:ok, %{rows: []}} -> false
     end
@@ -597,7 +626,7 @@ defmodule Dbos.SystemDb do
     FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1
     """
 
-    case config.db.query(config.conn, sql, [workflow_id]) do
+    case query(config, sql, [workflow_id]) do
       {:ok, %{rows: [[_timeout, deadline]]}} when is_integer(deadline) ->
         deadline
 
@@ -622,7 +651,7 @@ defmodule Dbos.SystemDb do
         RETURNING workflow_deadline_epoch_ms
     """
 
-    case config.db.query(config.conn, sql, [deadline_ms, workflow_id]) do
+    case query(config, sql, [deadline_ms, workflow_id]) do
       {:ok, %{rows: [[persisted]]}} ->
         persisted
 
@@ -646,36 +675,41 @@ defmodule Dbos.SystemDb do
     queue_name = Keyword.get(opts, :queue_name, Dbos.Queue.internal_queue_name())
 
     {:ok, new_workflow_id} =
-      config.db.transaction(config.conn, [], fn conn ->
-        tx_config = %{config | conn: conn}
-        original = fetch_forkable_workflow!(tx_config, original_workflow_id)
+      transaction(
+        config,
+        [],
+        fn conn ->
+          tx_config = %{config | conn: conn}
+          original = fetch_forkable_workflow!(tx_config, original_workflow_id)
 
-        insert_forked_workflow(
-          tx_config,
-          original_workflow_id,
-          original,
-          new_workflow_id,
-          queue_name,
-          Keyword.get(opts, :application_version)
-        )
-
-        if start_step > 0 do
-          copy_operation_outputs(tx_config, original_workflow_id, new_workflow_id, start_step)
-
-          copy_workflow_events_history(
+          insert_forked_workflow(
             tx_config,
             original_workflow_id,
+            original,
             new_workflow_id,
-            start_step
+            queue_name,
+            Keyword.get(opts, :application_version)
           )
 
-          copy_workflow_events(tx_config, original_workflow_id, new_workflow_id, start_step)
-          copy_streams(tx_config, original_workflow_id, new_workflow_id, start_step)
-        end
+          if start_step > 0 do
+            copy_operation_outputs(tx_config, original_workflow_id, new_workflow_id, start_step)
 
-        mark_was_forked_from(tx_config, original_workflow_id)
-        new_workflow_id
-      end)
+            copy_workflow_events_history(
+              tx_config,
+              original_workflow_id,
+              new_workflow_id,
+              start_step
+            )
+
+            copy_workflow_events(tx_config, original_workflow_id, new_workflow_id, start_step)
+            copy_streams(tx_config, original_workflow_id, new_workflow_id, start_step)
+          end
+
+          mark_was_forked_from(tx_config, original_workflow_id)
+          new_workflow_id
+        end,
+        retry: false
+      )
 
     new_workflow_id
   end
@@ -687,7 +721,7 @@ defmodule Dbos.SystemDb do
     FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1
     """
 
-    case config.db.query(config.conn, sql, [workflow_id]) do
+    case query(config, sql, [workflow_id]) do
       {:ok, %{rows: [row]}} -> row
       {:ok, %{rows: []}} -> raise Dbos.NonExistentWorkflowError, workflow_id: workflow_id
     end
@@ -747,7 +781,7 @@ defmodule Dbos.SystemDb do
       original_workflow_id
     ]
 
-    {:ok, _result} = config.db.query(config.conn, sql, params)
+    {:ok, _result} = query(config, sql, params)
     :ok
   end
 
@@ -762,7 +796,7 @@ defmodule Dbos.SystemDb do
     WHERE workflow_uuid = $1 AND function_id < $3
     """
 
-    {:ok, _result} = config.db.query(config.conn, sql, [original_id, new_id, start_step])
+    {:ok, _result} = query(config, sql, [original_id, new_id, start_step])
     :ok
   end
 
@@ -775,7 +809,7 @@ defmodule Dbos.SystemDb do
     WHERE workflow_uuid = $1 AND function_id < $3
     """
 
-    {:ok, _result} = config.db.query(config.conn, sql, [original_id, new_id, start_step])
+    {:ok, _result} = query(config, sql, [original_id, new_id, start_step])
     :ok
   end
 
@@ -792,7 +826,7 @@ defmodule Dbos.SystemDb do
     WHERE h.rn = 1
     """
 
-    {:ok, _result} = config.db.query(config.conn, sql, [original_id, new_id, start_step])
+    {:ok, _result} = query(config, sql, [original_id, new_id, start_step])
     :ok
   end
 
@@ -805,7 +839,7 @@ defmodule Dbos.SystemDb do
     WHERE workflow_uuid = $1 AND function_id < $3
     """
 
-    {:ok, _result} = config.db.query(config.conn, sql, [original_id, new_id, start_step])
+    {:ok, _result} = query(config, sql, [original_id, new_id, start_step])
     :ok
   end
 
@@ -814,7 +848,7 @@ defmodule Dbos.SystemDb do
     UPDATE #{table(config, "workflow_status")} SET was_forked_from = TRUE WHERE workflow_uuid = $1
     """
 
-    {:ok, _result} = config.db.query(config.conn, sql, [workflow_id])
+    {:ok, _result} = query(config, sql, [workflow_id])
     :ok
   end
 
@@ -852,7 +886,7 @@ defmodule Dbos.SystemDb do
     ORDER BY created_at DESC LIMIT 1 OFFSET $1
     """
 
-    case config.db.query(config.conn, sql, [rows_threshold - 1]) do
+    case query(config, sql, [rows_threshold - 1]) do
       {:ok, %{rows: [[created_at]]}} -> created_at
       {:ok, %{rows: []}} -> nil
     end
@@ -871,7 +905,7 @@ defmodule Dbos.SystemDb do
       Status.to_string(:delayed)
     ]
 
-    {:ok, %{num_rows: num_rows}} = config.db.query(config.conn, sql, params)
+    {:ok, %{num_rows: num_rows}} = query(config, sql, params)
     num_rows
   end
 
@@ -913,7 +947,7 @@ defmodule Dbos.SystemDb do
     VALUES (#{placeholders})
     """
 
-    case config.db.query(config.conn, sql, values) do
+    case query_result_once(config, sql, values) do
       {:ok, _result} ->
         {:ok, workflow_id}
 
@@ -970,7 +1004,7 @@ defmodule Dbos.SystemDb do
       Status.to_string(:delayed)
     ]
 
-    case config.db.query(config.conn, sql, params) do
+    case query(config, sql, params) do
       {:ok, %{rows: [[workflow_id]]}} -> {:bounced, workflow_id}
       {:ok, %{rows: []}} -> :not_found
     end
@@ -987,7 +1021,7 @@ defmodule Dbos.SystemDb do
     WHERE queue_name = $1 AND deduplication_id = $2
     """
 
-    case config.db.query(config.conn, sql, [queue_name, debounce_key]) do
+    case query(config, sql, [queue_name, debounce_key]) do
       {:ok, %{rows: [[workflow_id, is_debounced, name]]}} ->
         {:holder, workflow_id, is_debounced, name}
 
@@ -1032,7 +1066,7 @@ defmodule Dbos.SystemDb do
       Map.get(attrs, :queue_name)
     ]
 
-    {:ok, %{rows: [[last_fired_at, status]]}} = config.db.query(config.conn, sql, params)
+    {:ok, %{rows: [[last_fired_at, status]]}} = query(config, sql, params)
     {parse_epoch_ms_text(last_fired_at), status}
   end
 
@@ -1044,7 +1078,7 @@ defmodule Dbos.SystemDb do
     FROM #{table(config, "workflow_schedules")} WHERE status = 'ACTIVE'
     """
 
-    {:ok, result} = config.db.query(config.conn, sql, [])
+    {:ok, result} = query(config, sql, [])
     Enum.map(result.rows, &schedule_from_row/1)
   end
 
@@ -1081,7 +1115,7 @@ defmodule Dbos.SystemDb do
       "UPDATE #{table(config, "workflow_schedules")} SET last_fired_at = $1 WHERE schedule_name = $2"
 
     {:ok, _result} =
-      config.db.query(config.conn, sql, [Integer.to_string(epoch_ms), schedule_name])
+      query(config, sql, [Integer.to_string(epoch_ms), schedule_name])
 
     :ok
   end
@@ -1098,7 +1132,7 @@ defmodule Dbos.SystemDb do
     """
 
     now = System.os_time(:millisecond)
-    {:ok, _result} = config.db.query(config.conn, sql, [Uuid.v4(), version_name, now, now])
+    {:ok, _result} = query(config, sql, [Uuid.v4(), version_name, now, now])
     :ok
   end
 
@@ -1109,7 +1143,7 @@ defmodule Dbos.SystemDb do
     ORDER BY version_timestamp DESC LIMIT 1
     """
 
-    case config.db.query(config.conn, sql, []) do
+    case query(config, sql, []) do
       {:ok, %{rows: [[name]]}} -> {:ok, name}
       {:ok, %{rows: []}} -> :none
     end
@@ -1130,7 +1164,7 @@ defmodule Dbos.SystemDb do
     now = System.os_time(:millisecond)
 
     {:ok, _result} =
-      config.db.query(config.conn, sql, [
+      query(config, sql, [
         Status.to_string(:enqueued),
         now,
         Status.to_string(:delayed)
@@ -1165,7 +1199,7 @@ defmodule Dbos.SystemDb do
     {rate_limit_max, rate_limit_period_sec} = queue_rate_limit_columns(queue.rate_limit)
 
     {:ok, %{num_rows: inserted_rows}} =
-      config.db.query(config.conn, insert_sql, [
+      query(config, insert_sql, [
         Uuid.v4(),
         queue.name,
         queue.global_concurrency,
@@ -1198,7 +1232,7 @@ defmodule Dbos.SystemDb do
     {rate_limit_max, rate_limit_period_sec} = queue_rate_limit_columns(queue.rate_limit)
 
     {:ok, _result} =
-      config.db.query(config.conn, sql, [
+      query(config, sql, [
         queue.global_concurrency,
         queue.worker_concurrency,
         rate_limit_max,
@@ -1226,7 +1260,7 @@ defmodule Dbos.SystemDb do
     FROM #{table(config, "queues")} WHERE name = $1
     """
 
-    case config.db.query(config.conn, sql, [name]) do
+    case query(config, sql, [name]) do
       {:ok, %{rows: [row]}} -> {:ok, queue_from_row(row)}
       {:ok, %{rows: []}} -> :not_found
     end
@@ -1240,7 +1274,7 @@ defmodule Dbos.SystemDb do
     FROM #{table(config, "queues")}
     """
 
-    {:ok, result} = config.db.query(config.conn, sql, [])
+    {:ok, result} = query(config, sql, [])
     {:ok, Enum.map(result.rows, &queue_from_row/1)}
   end
 
@@ -1279,7 +1313,7 @@ defmodule Dbos.SystemDb do
     WHERE queue_name = $1 AND status = $2 AND queue_partition_key IS NOT NULL
     """
 
-    {:ok, result} = config.db.query(config.conn, sql, [queue_name, Status.to_string(:enqueued)])
+    {:ok, result} = query(config, sql, [queue_name, Status.to_string(:enqueued)])
     Enum.map(result.rows, fn [key] -> key end)
   end
 
@@ -1304,10 +1338,15 @@ defmodule Dbos.SystemDb do
       if queue.global_concurrency || queue.rate_limit, do: :repeatable_read, else: :read_committed
 
     result =
-      config.db.transaction(config.conn, [isolation: isolation], fn conn ->
-        tx_config = %{config | conn: conn}
-        do_dequeue_workflows(tx_config, queue, partition_key, local_running_count)
-      end)
+      transaction(
+        config,
+        [isolation: isolation],
+        fn conn ->
+          tx_config = %{config | conn: conn}
+          do_dequeue_workflows(tx_config, queue, partition_key, local_running_count)
+        end,
+        retry_conflicts: true
+      )
 
     case result do
       {:ok, workflows} -> workflows
@@ -1350,7 +1389,7 @@ defmodule Dbos.SystemDb do
       [queue.name, Status.to_string(:enqueued), Status.to_string(:delayed), cutoff_ms] ++
         partition_params
 
-    {:ok, %{rows: [[num_recent]]}} = config.db.query(config.conn, sql, params)
+    {:ok, %{rows: [[num_recent]]}} = query(config, sql, params)
 
     if num_recent >= rate_limit.limit, do: :rate_limited, else: {:ok, num_recent}
   end
@@ -1394,11 +1433,7 @@ defmodule Dbos.SystemDb do
     """
 
     {:ok, %{rows: [[pending_count]]}} =
-      config.db.query(
-        config.conn,
-        sql,
-        [queue.name, Status.to_string(:pending)] ++ partition_params
-      )
+      query(config, sql, [queue.name, Status.to_string(:pending)] ++ partition_params)
 
     available = max(limit - pending_count, 0)
     if max_tasks < 0 or available < max_tasks, do: available, else: max_tasks
@@ -1437,7 +1472,7 @@ defmodule Dbos.SystemDb do
 
     params = [queue.name, Status.to_string(:enqueued), application_version] ++ partition_params
 
-    {:ok, result} = config.db.query(config.conn, sql, params)
+    {:ok, result} = query(config, sql, params)
     Enum.map(result.rows, fn [id] -> id end)
   end
 
@@ -1492,7 +1527,7 @@ defmodule Dbos.SystemDb do
       Status.to_string(:enqueued)
     ]
 
-    case config.db.query(config.conn, sql, params) do
+    case query(config, sql, params) do
       {:ok, %{rows: [[name, inputs, _serialization, config_name]]}} ->
         %{
           workflow_id: workflow_id,
@@ -1510,7 +1545,7 @@ defmodule Dbos.SystemDb do
     sql = "SELECT status FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1"
     cancelled = Status.to_string(:cancelled)
 
-    case config.db.query(config.conn, sql, [workflow_id]) do
+    case query(config, sql, [workflow_id]) do
       {:ok, %{rows: []}} ->
         :ok
 
@@ -1581,7 +1616,7 @@ defmodule Dbos.SystemDb do
         RETURNING recovery_attempts, status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid
     """
 
-    {:ok, %{rows: [row]}} = config.db.query(config.conn, sql, values)
+    {:ok, %{rows: [row]}} = query(config, sql, values)
     InsertWorkflowResult.from_row(row)
   end
 
@@ -1618,7 +1653,7 @@ defmodule Dbos.SystemDb do
     """
 
     {:ok, _result} =
-      config.db.query(config.conn, sql, [
+      query(config, sql, [
         Status.to_string(:max_recovery_attempts_exceeded),
         workflow_id,
         Status.to_string(:pending)
@@ -1630,7 +1665,7 @@ defmodule Dbos.SystemDb do
   defp fetch_workflow_status_for_check!(config, workflow_id) do
     sql = "SELECT status FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1"
 
-    case config.db.query(config.conn, sql, [workflow_id]) do
+    case query(config, sql, [workflow_id]) do
       {:ok, %{rows: [[status]]}} -> Status.from_string(status)
       {:ok, %{rows: []}} -> raise Dbos.NonExistentWorkflowError, workflow_id: workflow_id
     end
@@ -1649,7 +1684,7 @@ defmodule Dbos.SystemDb do
     WHERE workflow_uuid = $1 AND function_id = $2
     """
 
-    case config.db.query(config.conn, sql, [workflow_id, function_id]) do
+    case query(config, sql, [workflow_id, function_id]) do
       {:ok, %{rows: []}} ->
         :none
 
@@ -1702,7 +1737,7 @@ defmodule Dbos.SystemDb do
     ON CONFLICT (workflow_uuid, function_id) DO NOTHING
     """
 
-    {:ok, %{num_rows: num_rows}} = config.db.query(config.conn, sql, values)
+    {:ok, %{num_rows: num_rows}} = query(config, sql, values)
     {:inserted, num_rows > 0}
   end
 
@@ -1767,7 +1802,7 @@ defmodule Dbos.SystemDb do
     WHERE workflow_uuid = $1 AND function_id = $2
     """
 
-    case config.db.query(config.conn, sql, [workflow_id, function_id]) do
+    case query(config, sql, [workflow_id, function_id]) do
       {:ok, %{rows: [row]}} ->
         reconcile_operation_output_row(workflow_id, function_id, attrs, row)
 
@@ -1826,7 +1861,7 @@ defmodule Dbos.SystemDb do
     WHERE workflow_uuid = $2 AND (executor_id IS NULL OR executor_id <> $1)
     """
 
-    case config.db.query(config.conn, sql, [config.executor_id, workflow_id]) do
+    case query_result(config, sql, [config.executor_id, workflow_id]) do
       {:ok, _result} ->
         :ok
 
@@ -1875,12 +1910,15 @@ defmodule Dbos.SystemDb do
       System.os_time(:millisecond)
     ]
 
-    case config.db.query(config.conn, sql, values) do
+    case query_result(config, sql, values) do
       {:ok, _result} ->
         :ok
 
       {:error, %{postgres: %{code: :foreign_key_violation}}} ->
         raise Dbos.NonExistentWorkflowError, workflow_id: destination_id
+
+      {:error, error} ->
+        raise Dbos.SystemDbError, sql: sql, params: values, cause: error
     end
   end
 
@@ -1893,7 +1931,7 @@ defmodule Dbos.SystemDb do
     )
     """
 
-    {:ok, %{rows: [[exists]]}} = config.db.query(config.conn, sql, [destination_id, topic])
+    {:ok, %{rows: [[exists]]}} = query(config, sql, [destination_id, topic])
     exists
   end
 
@@ -1918,7 +1956,7 @@ defmodule Dbos.SystemDb do
     RETURNING message
     """
 
-    case config.db.query(config.conn, sql, [destination_id, topic]) do
+    case query(config, sql, [destination_id, topic]) do
       {:ok, %{rows: [[message]]}} -> {:ok, Serialization.decode(message)}
       {:ok, %{rows: []}} -> :none
     end
@@ -1940,7 +1978,7 @@ defmodule Dbos.SystemDb do
     """
 
     {:ok, _result} =
-      config.db.query(config.conn, upsert_sql, [workflow_id, key, encoded, serialization])
+      query(config, upsert_sql, [workflow_id, key, encoded, serialization])
 
     history_sql = """
     INSERT INTO #{table(config, "workflow_events_history")} (workflow_uuid, function_id, key, value, serialization)
@@ -1950,7 +1988,7 @@ defmodule Dbos.SystemDb do
     """
 
     {:ok, _result} =
-      config.db.query(config.conn, history_sql, [
+      query(config, history_sql, [
         workflow_id,
         function_id,
         key,
@@ -1966,7 +2004,7 @@ defmodule Dbos.SystemDb do
     sql =
       "SELECT value FROM #{table(config, "workflow_events")} WHERE workflow_uuid = $1 AND key = $2"
 
-    case config.db.query(config.conn, sql, [workflow_id, key]) do
+    case query(config, sql, [workflow_id, key]) do
       {:ok, %{rows: [[value]]}} -> {:ok, Serialization.decode(value)}
       {:ok, %{rows: []}} -> :none
     end
@@ -1988,7 +2026,7 @@ defmodule Dbos.SystemDb do
 
     sentinel = Serialization.encode(@stream_closed_marker)
 
-    case config.db.query(config.conn, check_sql, [workflow_id, key, sentinel]) do
+    case query(config, check_sql, [workflow_id, key, sentinel]) do
       {:ok, %{rows: [_ | _]}} ->
         {:error, :stream_closed}
 
@@ -2001,7 +2039,7 @@ defmodule Dbos.SystemDb do
         """
 
         {:ok, _result} =
-          config.db.query(config.conn, insert_sql, [
+          query_once(config, insert_sql, [
             workflow_id,
             key,
             Serialization.encode(value),
@@ -2029,7 +2067,7 @@ defmodule Dbos.SystemDb do
     ORDER BY "offset" ASC
     """
 
-    {:ok, result} = config.db.query(config.conn, sql, [workflow_id, key, from_offset])
+    {:ok, result} = query(config, sql, [workflow_id, key, from_offset])
     collect_stream_rows(result.rows, from_offset, [])
   end
 
@@ -2039,6 +2077,37 @@ defmodule Dbos.SystemDb do
     case Serialization.decode(value) do
       @stream_closed_marker -> {Enum.reverse(acc), offset + 1, true}
       decoded -> collect_stream_rows(rest, offset + 1, [decoded | acc])
+    end
+  end
+
+  defp query(config, sql, params) do
+    raise_on_error(Retry.query(config, sql, params), sql, params)
+  end
+
+  defp query_once(config, sql, params) do
+    raise_on_error(Retry.query(config, sql, params, retry: false), sql, params)
+  end
+
+  defp query_result(config, sql, params), do: Retry.query(config, sql, params)
+
+  defp query_result_once(config, sql, params), do: Retry.query(config, sql, params, retry: false)
+
+  defp raise_on_error({:ok, result}, _sql, _params), do: {:ok, result}
+
+  defp raise_on_error({:error, error}, sql, params),
+    do: raise(Dbos.SystemDbError, sql: sql, params: params, cause: error)
+
+  defp transaction(config, tx_opts, fun, opts \\ []) do
+    case Retry.transaction(config, tx_opts, fun, opts) do
+      {:error, error} ->
+        if is_exception(error) do
+          raise Dbos.SystemDbError, sql: "<transaction>", params: [], cause: error
+        else
+          {:error, error}
+        end
+
+      other ->
+        other
     end
   end
 
