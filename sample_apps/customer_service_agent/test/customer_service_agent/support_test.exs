@@ -11,11 +11,8 @@ defmodule CustomerServiceAgent.SupportTest do
     Application.put_env(:customer_service_agent, :llm, StubLLM)
     start_supervised!(OrderStore)
 
-    engine = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
-
     start_supervised!(
       {Dbos.Supervisor,
-       name: engine,
        db: {Dbos.DB.Postgrex, CustomerServiceAgent.Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Support],
@@ -23,47 +20,43 @@ defmodule CustomerServiceAgent.SupportTest do
        notifications_conn_opts: [
          hostname: System.get_env("PGHOST", "localhost"),
          database: System.get_env("PGDATABASE", "customer_service_agent_test")
-       ]},
-      id: engine
+       ]}
     )
 
-    Dbos.Recovery.await_boot_recovery(engine)
-    {:ok, engine: engine}
+    Dbos.Recovery.await_boot_recovery(Dbos)
+    :ok
   end
 
-  test "immediately refunds a low-value order and replies to the customer", %{engine: engine} do
-    {:ok, handle} =
-      Dbos.start("customer_request", ["cust-1", "Please refund order 101"], engine: engine)
+  test "immediately refunds a low-value order and replies to the customer" do
+    {:ok, handle} = Support.handle_request("cust-1", "Please refund order 101")
 
     assert {:ok, %{customer_id: "cust-1", reply: reply}} = Dbos.await(handle, timeout_ms: 5_000)
     assert reply =~ "refunded"
     assert OrderStore.get(101).status == :refunded
   end
 
-  test "a crash before the order lookup finishes does not repeat the LLM call that already completed",
-       %{engine: engine} do
+  test "a crash before the order lookup finishes does not repeat the LLM call that already completed" do
     message = "Please refund order 101"
     initial_messages = [%{role: "user", content: message}]
     workflow_id = "conv-#{System.unique_integer([:positive])}"
 
-    {:ok, handle} =
-      Dbos.start("customer_request", ["cust-1", message], workflow_id: workflow_id, engine: engine)
+    {:ok, handle} = Support.handle_request("cust-1", message, workflow_id: workflow_id)
 
-    config = Dbos.config(engine)
+    config = Dbos.config()
 
     wait_until(fn ->
       {:ok, steps} = SystemDb.get_workflow_steps(config, workflow_id)
       length(steps) >= 1
     end)
 
-    {:ok, pid} = Dbos.WorkflowSup.whereis(engine, workflow_id)
+    {:ok, pid} = Dbos.WorkflowSup.whereis(Dbos, workflow_id)
     Process.exit(pid, :kill)
     wait_until(fn -> not Process.alive?(pid) end)
 
     {:ok, status} = SystemDb.get_workflow_status(config, workflow_id)
     assert status.status == :pending
 
-    Dbos.Recovery.recover_pending(engine)
+    Dbos.Recovery.recover_pending(Dbos)
 
     assert {:ok, %{reply: reply}} = Dbos.await(handle, timeout_ms: 5_000)
     assert reply =~ "refunded"
@@ -71,23 +64,21 @@ defmodule CustomerServiceAgent.SupportTest do
     assert StubLLM.call_count(initial_messages) == 1
   end
 
-  test "escalates a high-value refund to human approval, parks the wait, and completes exactly once on approval",
-       %{engine: engine} do
+  test "escalates a high-value refund to human approval, parks the wait, and completes exactly once on approval" do
     order_id = 202
     approval_id = Support.approval_workflow_id(order_id)
 
-    {:ok, handle} =
-      Dbos.start("customer_request", ["cust-2", "Please refund order #{order_id}"], engine: engine)
+    {:ok, handle} = Support.handle_request("cust-2", "Please refund order #{order_id}")
 
-    config = Dbos.config(engine)
+    config = Dbos.config()
 
     wait_until(fn ->
       match?({:ok, %{status: :pending}}, SystemDb.get_workflow_status(config, approval_id))
     end)
 
-    wait_until(fn -> Dbos.WorkflowSup.whereis(engine, approval_id) == :error end)
+    wait_until(fn -> Dbos.WorkflowSup.whereis(Dbos, approval_id) == :error end)
 
-    Dbos.send_message(approval_id, "approval_decision", "approve", engine: engine)
+    Dbos.send_message(approval_id, "approval_decision", "approve")
 
     assert {:ok, %{reply: reply}} = Dbos.await(handle, timeout_ms: 10_000)
     assert reply =~ "refunded"

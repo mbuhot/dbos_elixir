@@ -36,11 +36,8 @@ defmodule QueuePatterns.PriorityTest do
         priority: 0
       })
 
-    name = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
-
     start_supervised!(
       {Dbos.Supervisor,
-       name: name,
        db: {Dbos.DB.Postgrex, QueuePatterns.Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Priority],
@@ -51,21 +48,20 @@ defmodule QueuePatterns.PriorityTest do
            base_polling_interval_ms: 20
          )
        ],
-       migrations: :skip},
-      id: name
+       migrations: :skip}
     )
 
-    Dbos.Recovery.await_boot_recovery(name)
+    Dbos.Recovery.await_boot_recovery(Dbos)
 
-    normal_1 = %WorkflowHandle{engine: name, workflow_id: normal_1_id}
-    normal_2 = %WorkflowHandle{engine: name, workflow_id: normal_2_id}
-    urgent = %WorkflowHandle{engine: name, workflow_id: urgent_id}
+    normal_1 = %WorkflowHandle{engine: Dbos, workflow_id: normal_1_id}
+    normal_2 = %WorkflowHandle{engine: Dbos, workflow_id: normal_2_id}
+    urgent = %WorkflowHandle{engine: Dbos, workflow_id: urgent_id}
 
     for handle <- [normal_1, normal_2, urgent] do
       assert {:ok, _result} = Dbos.await(handle, timeout_ms: 10_000)
     end
 
-    config = Dbos.config(name)
+    config = Dbos.config()
 
     started_at = fn handle ->
       {:ok, status} = SystemDb.get_workflow_status(config, handle.workflow_id)

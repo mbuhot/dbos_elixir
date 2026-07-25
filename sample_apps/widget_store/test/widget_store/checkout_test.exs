@@ -5,21 +5,17 @@ defmodule WidgetStore.CheckoutTest do
   alias WidgetStore.Repo
 
   setup do
-    engine = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
-
     start_supervised!(
       {Dbos.Supervisor,
-       name: engine,
        db: {Dbos.DB.Ecto, Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [WidgetStore.Checkout],
-       migrations: :create_if_absent},
-      id: engine
+       migrations: :create_if_absent}
     )
 
-    Dbos.Recovery.await_boot_recovery(engine)
+    Dbos.Recovery.await_boot_recovery(Dbos)
 
-    {:ok, engine: engine}
+    :ok
   end
 
   defp seed_product(product_id, inventory) do
@@ -29,48 +25,47 @@ defmodule WidgetStore.CheckoutTest do
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"
 
-  test "surviving a crash between charging and payment confirmation completes the order exactly once",
-       %{engine: engine} do
+  test "surviving a crash between charging and payment confirmation completes the order exactly once" do
     product_id = unique_id("widget")
     order_id = unique_id("order")
     seed_product(product_id, 5)
 
     {:ok, _handle} =
-      Dbos.start("checkout", [order_id, product_id, 2], workflow_id: order_id, engine: engine)
+      WidgetStore.Checkout.checkout(order_id, product_id, 2, workflow_id: order_id)
 
     wait_until(fn -> Repo.get(WidgetStore.Order, order_id) != nil end)
 
     assert %Product{inventory: 3} = Repo.get(Product, product_id)
     assert %WidgetStore.Order{status: "pending"} = Repo.get(WidgetStore.Order, order_id)
 
-    {:ok, pid} = Dbos.WorkflowSup.whereis(engine, order_id)
+    {:ok, pid} = Dbos.WorkflowSup.whereis(Dbos, order_id)
     Process.exit(pid, :kill)
     wait_until(fn -> not Process.alive?(pid) end)
 
-    {:ok, status} = Dbos.SystemDb.get_workflow_status(Dbos.config(engine), order_id)
+    {:ok, status} = Dbos.SystemDb.get_workflow_status(Dbos.config(), order_id)
     assert status.status == :pending
 
-    Dbos.Recovery.recover_pending(engine)
-    Dbos.send_message(order_id, "payment", :paid, engine: engine)
+    Dbos.Recovery.recover_pending(Dbos)
+    Dbos.send_message(order_id, "payment", :paid)
 
-    {:ok, result} = Dbos.await(%Dbos.WorkflowHandle{engine: engine, workflow_id: order_id})
+    {:ok, result} = Dbos.await(%Dbos.WorkflowHandle{engine: Dbos, workflow_id: order_id})
     assert result == %{order_id: order_id, status: :dispatched}
 
     assert %Product{inventory: 3} = Repo.get(Product, product_id)
     assert %WidgetStore.Order{status: "dispatched"} = Repo.get(WidgetStore.Order, order_id)
   end
 
-  test "a declined payment refunds the customer and restores inventory", %{engine: engine} do
+  test "a declined payment refunds the customer and restores inventory" do
     product_id = unique_id("widget")
     order_id = unique_id("order")
     seed_product(product_id, 5)
 
     {:ok, handle} =
-      Dbos.start("checkout", [order_id, product_id, 2], workflow_id: order_id, engine: engine)
+      WidgetStore.Checkout.checkout(order_id, product_id, 2, workflow_id: order_id)
 
     wait_until(fn -> Repo.get(WidgetStore.Order, order_id) != nil end)
 
-    Dbos.send_message(order_id, "payment", :declined, engine: engine)
+    Dbos.send_message(order_id, "payment", :declined)
 
     {:ok, result} = Dbos.await(handle)
     assert result == %{order_id: order_id, status: :refunded}
@@ -79,15 +74,13 @@ defmodule WidgetStore.CheckoutTest do
     assert %WidgetStore.Order{status: "cancelled"} = Repo.get(WidgetStore.Order, order_id)
   end
 
-  test "checkout rejects an order with insufficient inventory, without touching stock", %{
-    engine: engine
-  } do
+  test "checkout rejects an order with insufficient inventory, without touching stock" do
     product_id = unique_id("widget")
     order_id = unique_id("order")
     seed_product(product_id, 1)
 
     {:ok, handle} =
-      Dbos.start("checkout", [order_id, product_id, 5], workflow_id: order_id, engine: engine)
+      WidgetStore.Checkout.checkout(order_id, product_id, 5, workflow_id: order_id)
 
     {:ok, result} = Dbos.await(handle)
     assert result == %{order_id: order_id, status: :rejected, reason: :out_of_stock}

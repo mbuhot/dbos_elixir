@@ -41,40 +41,33 @@ defmodule DeploySlackbot.NotifyTest do
     Application.put_env(:deploy_slackbot, :slack_module, Logging)
     Application.put_env(:deploy_slackbot, :slack_client, slack_name)
 
-    engine = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
-
     start_supervised!(
       {Dbos.Supervisor,
-       name: engine,
        db: {Dbos.DB.Postgrex, DeploySlackbot.TestConn},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Workflows],
-       migrations: :skip},
-      id: engine
+       migrations: :skip}
     )
 
-    Dbos.Recovery.await_boot_recovery(engine)
+    Dbos.Recovery.await_boot_recovery(Dbos)
 
     deployment = %{id: "d-1", app: "billing-api", version: "v1.2.3", environment: "production"}
     InMemory.push_deployment(source_name, deployment)
 
-    {:ok, engine: engine, slack_name: slack_name, deployment: deployment}
+    {:ok, slack_name: slack_name, deployment: deployment}
   end
 
   test "a duplicate deployment event produces exactly one pair of Slack posts", %{
-    engine: engine,
     slack_name: slack_name,
     deployment: deployment
   } do
     workflow_id = Workflows.workflow_id(deployment.id)
 
-    {:ok, first} =
-      Dbos.start("notify_deployment", [deployment], engine: engine, workflow_id: workflow_id)
+    {:ok, first} = Workflows.notify_deployment(deployment, workflow_id: workflow_id)
 
     assert {:ok, :succeeded} = Dbos.await(first)
 
-    {:ok, second} =
-      Dbos.start("notify_deployment", [deployment], engine: engine, workflow_id: workflow_id)
+    {:ok, second} = Workflows.notify_deployment(deployment, workflow_id: workflow_id)
 
     assert {:ok, :succeeded} = Dbos.await(second)
     assert first.workflow_id == second.workflow_id
@@ -88,28 +81,27 @@ defmodule DeploySlackbot.NotifyTest do
   end
 
   test "a crash between detecting a deployment and finishing its notification does not double-post",
-       %{engine: engine, slack_name: slack_name, deployment: deployment} do
+       %{slack_name: slack_name, deployment: deployment} do
     Application.put_env(:deploy_slackbot, :slack_module, SlowSlack)
 
     workflow_id = Workflows.workflow_id(deployment.id)
 
-    {:ok, handle} =
-      Dbos.start("notify_deployment", [deployment], engine: engine, workflow_id: workflow_id)
+    {:ok, handle} = Workflows.notify_deployment(deployment, workflow_id: workflow_id)
 
     wait_until(fn ->
-      {:ok, steps} = SystemDb.get_workflow_steps(Dbos.config(engine), workflow_id)
+      {:ok, steps} = SystemDb.get_workflow_steps(Dbos.config(), workflow_id)
       length(steps) >= 2
     end)
 
-    {:ok, pid} = Dbos.WorkflowSup.whereis(engine, workflow_id)
+    {:ok, pid} = Dbos.WorkflowSup.whereis(Dbos, workflow_id)
     Process.exit(pid, :kill)
 
-    {:ok, status} = SystemDb.get_workflow_status(Dbos.config(engine), workflow_id)
+    {:ok, status} = SystemDb.get_workflow_status(Dbos.config(), workflow_id)
     refute status.status in [:success, :error]
 
     assert length(Logging.posts(slack_name)) == 1
 
-    Dbos.Recovery.recover_pending(engine)
+    Dbos.Recovery.recover_pending(Dbos)
 
     assert {:ok, :succeeded} = Dbos.await(handle, timeout_ms: 10_000)
 

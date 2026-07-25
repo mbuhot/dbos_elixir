@@ -12,27 +12,23 @@ defmodule Outbox.WorkflowsTest do
     Repo.delete_all(OutboxEvent)
     Repo.delete_all(Order)
 
-    engine = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
-
     start_supervised!(
       {Dbos.Supervisor,
-       name: engine,
        db: {Dbos.DB.Ecto, Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Outbox.Workflows],
-       migrations: :create_if_absent},
-      id: engine
+       migrations: :create_if_absent}
     )
 
-    Dbos.Recovery.await_boot_recovery(engine)
+    Dbos.Recovery.await_boot_recovery(Dbos)
     ExternalSystem.reset!()
 
-    {:ok, engine: engine}
+    :ok
   end
 
-  test "placing an order never commits the order without its outbox event", %{engine: engine} do
+  test "placing an order never commits the order without its outbox event" do
     {:ok, handle} =
-      Outbox.Workflows.place_order("alice", "widget", 3, engine: engine)
+      Outbox.Workflows.place_order("alice", "widget", 3)
 
     {:ok, order_id} = Dbos.await(handle)
 
@@ -43,14 +39,14 @@ defmodule Outbox.WorkflowsTest do
     assert [%OutboxEvent{event_type: "order_placed", status: "pending"}] = events
   end
 
-  test "a publish failure is retried within the same drain, not dropped", %{engine: engine} do
-    {:ok, place_handle} = Outbox.Workflows.place_order("bob", "gadget", 1, engine: engine)
+  test "a publish failure is retried within the same drain, not dropped" do
+    {:ok, place_handle} = Outbox.Workflows.place_order("bob", "gadget", 1)
     {:ok, order_id} = Dbos.await(place_handle)
 
     ExternalSystem.fail_next("order_placed")
 
     {:ok, drain_handle} =
-      Outbox.Workflows.drain_outbox(System.os_time(:millisecond), nil, engine: engine)
+      Outbox.Workflows.drain_outbox(System.os_time(:millisecond), nil)
 
     {:ok, drained_count} = Dbos.await(drain_handle)
     assert drained_count == 1
@@ -61,18 +57,18 @@ defmodule Outbox.WorkflowsTest do
     assert event.status == "sent"
   end
 
-  test "draining twice never re-sends an already-sent event", %{engine: engine} do
-    {:ok, place_handle} = Outbox.Workflows.place_order("carol", "gizmo", 2, engine: engine)
+  test "draining twice never re-sends an already-sent event" do
+    {:ok, place_handle} = Outbox.Workflows.place_order("carol", "gizmo", 2)
     {:ok, order_id} = Dbos.await(place_handle)
 
     {:ok, first_drain} =
-      Outbox.Workflows.drain_outbox(System.os_time(:millisecond), nil, engine: engine)
+      Outbox.Workflows.drain_outbox(System.os_time(:millisecond), nil)
 
     {:ok, 1} = Dbos.await(first_drain)
     assert ExternalSystem.attempts("order_placed") == 1
 
     {:ok, second_drain} =
-      Outbox.Workflows.drain_outbox(System.os_time(:millisecond), nil, engine: engine)
+      Outbox.Workflows.drain_outbox(System.os_time(:millisecond), nil)
 
     {:ok, 0} = Dbos.await(second_drain)
     assert ExternalSystem.attempts("order_placed") == 1

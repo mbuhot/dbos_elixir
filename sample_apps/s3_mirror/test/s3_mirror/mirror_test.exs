@@ -21,45 +21,37 @@ defmodule S3Mirror.MirrorTest do
       File.write!(Path.join(source.root, "object-#{i}.txt"), "content-#{i}")
     end
 
-    engine = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
-
     start_supervised!(
       {Dbos.Supervisor,
-       name: engine,
        db: {Dbos.DB.Postgrex, S3Mirror.TestConn},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Workflows],
        queues: [Dbos.Queue.new(Workflows.queue_name(), worker_concurrency: 5)],
-       migrations: :skip},
-      id: engine
+       migrations: :skip}
     )
 
-    Dbos.Recovery.await_boot_recovery(engine)
+    Dbos.Recovery.await_boot_recovery(Dbos)
 
-    {:ok, engine: engine, source: source, dest: dest}
+    {:ok, source: source, dest: dest}
   end
 
   test "interrupting the mirror mid-run and resuming copies every object exactly once", %{
-    engine: engine,
     source: source,
     dest: dest
   } do
     {:ok, _handle} =
-      Dbos.start("mirror_bucket", [Local, source, Local, dest, ""],
-        engine: engine,
-        workflow_id: "mirror-run-1"
-      )
+      Workflows.mirror_bucket(Local, source, Local, dest, "", workflow_id: "mirror-run-1")
 
     wait_until(fn -> length(File.ls!(dest.root)) >= 2 end)
 
-    kill_every_workflow_process(engine)
+    kill_every_workflow_process()
 
-    {:ok, status} = SystemDb.get_workflow_status(Dbos.config(engine), "mirror-run-1")
+    {:ok, status} = SystemDb.get_workflow_status(Dbos.config(), "mirror-run-1")
     refute status.status in [:success, :error]
 
-    Dbos.Recovery.recover_pending(engine)
+    Dbos.Recovery.recover_pending(Dbos)
 
-    handle = %Dbos.WorkflowHandle{engine: engine, workflow_id: "mirror-run-1"}
+    handle = %Dbos.WorkflowHandle{engine: Dbos, workflow_id: "mirror-run-1"}
     assert {:ok, %{copied: 5, skipped: 0}} = Dbos.await(handle, timeout_ms: 10_000)
 
     {:ok, keys} = Local.list_keys(source, "")
@@ -70,14 +62,13 @@ defmodule S3Mirror.MirrorTest do
       assert {:ok, ^content} = Local.read(dest, key)
 
       workflow_id = Workflows.workflow_id(Local, dest, key)
-      {:ok, steps} = SystemDb.get_workflow_steps(Dbos.config(engine), workflow_id)
+      {:ok, steps} = SystemDb.get_workflow_steps(Dbos.config(), workflow_id)
       write_steps = Enum.filter(steps, &(&1.function_name == "copy_into_dest/4"))
       assert length(write_steps) == 1
     end
   end
 
   test "objects already present at the destination are reported as skipped, not re-copied", %{
-    engine: engine,
     source: source,
     dest: dest
   } do
@@ -89,16 +80,13 @@ defmodule S3Mirror.MirrorTest do
     end
 
     {:ok, handle} =
-      Dbos.start("mirror_bucket", [Local, source, Local, dest, ""],
-        engine: engine,
-        workflow_id: "mirror-run-2"
-      )
+      Workflows.mirror_bucket(Local, source, Local, dest, "", workflow_id: "mirror-run-2")
 
     assert {:ok, %{copied: 0, skipped: 5}} = Dbos.await(handle)
   end
 
-  defp kill_every_workflow_process(engine) do
-    engine
+  defp kill_every_workflow_process do
+    Dbos
     |> Dbos.WorkflowSup.process_name()
     |> DynamicSupervisor.which_children()
     |> Enum.each(fn {_id, pid, _type, _modules} -> Process.exit(pid, :kill) end)

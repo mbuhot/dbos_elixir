@@ -11,20 +11,16 @@ defmodule DocumentPipeline.PipelineTest do
   setup do
     Repo.delete_all(Chunk)
 
-    name = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
-
     start_supervised!(
       {Dbos.Supervisor,
-       name: name,
        db: {Dbos.DB.Ecto, Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Pipeline],
        queues: [Dbos.Queue.new(Pipeline.queue_name(), worker_concurrency: 4)],
-       migrations: :create_if_absent},
-      id: name
+       migrations: :create_if_absent}
     )
 
-    Recovery.await_boot_recovery(name)
+    Recovery.await_boot_recovery(Dbos)
 
     counter = :counters.new(1, [])
     handler_id = "embed-counter-#{System.unique_integer([:positive])}"
@@ -38,29 +34,24 @@ defmodule DocumentPipeline.PipelineTest do
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
-    {:ok, engine: name, config: Dbos.config(name), counter: counter}
+    {:ok, config: Dbos.config(), counter: counter}
   end
 
   test "recovering a document killed mid-ingestion re-embeds nothing already checkpointed", %{
-    engine: engine,
     config: config,
     counter: counter
   } do
     text = String.duplicate("word ", 400)
     document_id = "doc-#{System.unique_integer([:positive])}"
 
-    {:ok, handle} =
-      Dbos.start("ingest_document", [document_id, {:text, text}],
-        engine: engine,
-        workflow_id: document_id
-      )
+    {:ok, handle} = Pipeline.ingest_document(document_id, {:text, text}, workflow_id: document_id)
 
     wait_until(fn ->
       {:ok, steps} = SystemDb.get_workflow_steps(config, document_id)
       length(steps) >= 3
     end)
 
-    {:ok, pid} = WorkflowSup.whereis(engine, document_id)
+    {:ok, pid} = WorkflowSup.whereis(Dbos, document_id)
     Process.exit(pid, :kill)
 
     wait_until(fn ->
@@ -68,7 +59,7 @@ defmodule DocumentPipeline.PipelineTest do
       status.status == :pending
     end)
 
-    Recovery.recover_pending(engine)
+    Recovery.recover_pending(Dbos)
 
     assert {:ok, _result} = Dbos.await(handle, timeout_ms: 15_000)
 

@@ -4,11 +4,8 @@ defmodule QueuePatterns.TenantFairnessTest do
   alias QueuePatterns.TenantFairness
 
   setup do
-    name = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
-
     start_supervised!(
       {Dbos.Supervisor,
-       name: name,
        db: {Dbos.DB.Postgrex, QueuePatterns.Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [TenantFairness],
@@ -20,17 +17,14 @@ defmodule QueuePatterns.TenantFairnessTest do
          ),
          Dbos.Queue.new("global_jobs", global_concurrency: 3, base_polling_interval_ms: 20)
        ],
-       migrations: :skip},
-      id: name
+       migrations: :skip}
     )
 
-    Dbos.Recovery.await_boot_recovery(name)
-    {:ok, engine: name}
+    Dbos.Recovery.await_boot_recovery(Dbos)
+    :ok
   end
 
-  test "each tenant's jobs route through their own partition onto the shared global queue", %{
-    engine: engine
-  } do
+  test "each tenant's jobs route through their own partition onto the shared global queue" do
     jobs = for tenant <- ["tenant-a", "tenant-b"], job_number <- 1..3, do: {tenant, job_number}
 
     handles =
@@ -40,8 +34,7 @@ defmodule QueuePatterns.TenantFairnessTest do
         {:ok, handle} =
           Dbos.enqueue(&TenantFairness.route_job/2, [tenant_id, job_id],
             queue_name: "tenant_jobs",
-            partition_key: tenant_id,
-            engine: engine
+            partition_key: tenant_id
           )
 
         {job_id, handle}

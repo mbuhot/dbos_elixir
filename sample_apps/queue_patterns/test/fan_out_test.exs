@@ -4,28 +4,23 @@ defmodule QueuePatterns.FanOutTest do
   alias QueuePatterns.FanOut
 
   setup do
-    name = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
-
     start_supervised!(
       {Dbos.Supervisor,
-       name: name,
        db: {Dbos.DB.Postgrex, QueuePatterns.Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [FanOut],
        queues: [Dbos.Queue.new("fan_out", worker_concurrency: 5, base_polling_interval_ms: 20)],
-       migrations: :skip},
-      id: name
+       migrations: :skip}
     )
 
-    Dbos.Recovery.await_boot_recovery(name)
-    {:ok, engine: name}
+    Dbos.Recovery.await_boot_recovery(Dbos)
+    :ok
   end
 
-  test "fans out N children onto the queue and fans their results back in, in submission order",
-       %{engine: engine} do
+  test "fans out N children onto the queue and fans their results back in, in submission order" do
     batch_id = "batch-#{System.unique_integer([:positive])}"
 
-    {:ok, handle} = Dbos.start("process_batch", [batch_id, [1, 2, 3, 4, 5]], engine: engine)
+    {:ok, handle} = FanOut.process_batch(batch_id, [1, 2, 3, 4, 5])
 
     assert {:ok, results} = Dbos.await(handle, timeout_ms: 10_000)
 
