@@ -183,6 +183,21 @@ defmodule Dbos.NotSupportedError do
   def message(%__MODULE__{reason: reason}), do: reason
 end
 
+defmodule Dbos.Waits.Parked do
+  @moduledoc """
+  Raised at a durable wait site to unwind a workflow process that is parking instead of staying
+  resident. Caught by `Dbos.WorkflowProcess`, which records no outcome — the workflow's row is
+  left `PENDING`, exactly as `Dbos.Waits` left it, for the eventual wake to redispatch.
+  """
+
+  defexception [:workflow_id]
+
+  @impl true
+  def message(%__MODULE__{workflow_id: workflow_id}) do
+    "workflow #{workflow_id} parked its durable wait; its process is exiting"
+  end
+end
+
 defmodule Dbos.MaxStepRetriesExceededError do
   @moduledoc "Raised when a step exhausts its configured retry budget, wrapping the last underlying failure."
 

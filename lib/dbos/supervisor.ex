@@ -38,6 +38,12 @@ defmodule Dbos.Supervisor do
   `:admin_server` opts, off by default: `:enabled` — starts `Dbos.AdminServer`; `:port` (default
   `3001`). `:scheduler_poll_interval_ms` (default `30_000`) controls how often `Dbos.Scheduler`
   reconciles cron schedules from `workflow_schedules`.
+
+  `:park_exit_threshold_ms` (default `60_000`, or `:infinity` to disable parking) — a workflow
+  blocked in `sleep`/`recv_message`/`get_event` with more than this much wait remaining exits its
+  process instead of staying resident, per `Dbos.Waits`. `:park_replay_ceiling` (default `500`)
+  caps this by how many steps the workflow has already completed in this run, since a parked
+  workflow rehydrates by replaying from the top.
   """
   def start_link(opts) do
     name = Keyword.get(opts, :name, Dbos)
@@ -70,7 +76,9 @@ defmodule Dbos.Supervisor do
       orphan_sweep_threshold_ms: Keyword.get(orphan_sweep_opts, :threshold_ms, 300_000),
       notifications: Keyword.get(opts, :notifications, :listen),
       notifications_conn_opts: Keyword.get(opts, :notifications_conn_opts),
-      scheduler_poll_interval_ms: Keyword.get(opts, :scheduler_poll_interval_ms, 30_000)
+      scheduler_poll_interval_ms: Keyword.get(opts, :scheduler_poll_interval_ms, 30_000),
+      park_exit_threshold_ms: Keyword.get(opts, :park_exit_threshold_ms, 60_000),
+      park_replay_ceiling: Keyword.get(opts, :park_replay_ceiling, 500)
     }
 
     Dbos.put_config(config)
@@ -86,6 +94,7 @@ defmodule Dbos.Supervisor do
         {Registry, keys: :unique, name: Dbos.Notifications.recv_registry_name(name)},
         {Registry, keys: :duplicate, name: Dbos.Notifications.wait_registry_name(name)},
         {Dbos.Notifications, name: name},
+        {Dbos.Waits, name: name},
         {WorkflowSup, name: name},
         {Dbos.Recovery, name: name},
         {Dbos.Queue.Sup, name: name, queues: queues},

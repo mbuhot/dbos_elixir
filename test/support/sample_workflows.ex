@@ -192,6 +192,27 @@ defmodule Dbos.SampleWorkflows do
     end)
   end
 
+  def event_waiter(target_workflow_id, key, timeout_ms),
+    do: Dbos.get_event(target_workflow_id, key, timeout_ms)
+
+  @doc """
+  Runs `step_count` steps, each bumping `table`'s `:padding_runs` counter only when its body
+  actually executes (never on replay), then durably sleeps for `ms`. Used both to prove a
+  rehydrated workflow does not re-execute its completed steps, and that a workflow already deep
+  into its run stays resident on a long wait instead of parking.
+  """
+  def counted_steps_then_sleep(table, step_count, ms) do
+    Enum.each(1..step_count, fn i ->
+      Dbos.Runtime.run_step("padding_step/1", [], fn ->
+        :ets.update_counter(table, :padding_runs, {2, 1}, {:padding_runs, 0})
+        i
+      end)
+    end)
+
+    Dbos.sleep(ms)
+    :woke
+  end
+
   def step_id_layout_workflow(target_workflow_id) do
     msg = Dbos.recv_message("topic", 5_000)
     event_value = Dbos.get_event(target_workflow_id, "key", 5_000)

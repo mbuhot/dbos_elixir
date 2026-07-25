@@ -61,12 +61,16 @@ defmodule Dbos.WorkflowProcess do
   defp classify_failure(:error, %Dbos.WorkflowCancelledError{}, _stacktrace),
     do: :already_cancelled
 
+  defp classify_failure(:error, %Dbos.Waits.Parked{}, _stacktrace), do: :parked
+
   defp classify_failure(:error, %Dbos.ConcurrentCheckpointConflictError{}, _stacktrace),
     do: :concurrent_conflict
 
   defp classify_failure(kind, value, stacktrace), do: {:failure, kind, value, stacktrace}
 
   defp record_outcome(_config, _engine, _workflow_id, :already_cancelled), do: :ok
+
+  defp record_outcome(_config, _engine, _workflow_id, :parked), do: :ok
 
   defp record_outcome(_config, engine, workflow_id, :concurrent_conflict) do
     Dbos.await(%WorkflowHandle{engine: engine, workflow_id: workflow_id})

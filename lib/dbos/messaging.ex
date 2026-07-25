@@ -11,6 +11,7 @@ defmodule Dbos.Messaging do
   alias Dbos.Serialization
   alias Dbos.StepNames
   alias Dbos.SystemDb
+  alias Dbos.Waits
 
   @doc "The sentinel topic a no-topic `send`/`recv` uses."
   def null_topic, do: SystemDb.null_topic()
@@ -74,6 +75,13 @@ defmodule Dbos.Messaging do
                 Runtime.run_step_at(sleep_step_id, StepNames.sleep(), [], fn ->
                   System.os_time(:millisecond) + timeout_ms
                 end)
+
+              remaining_ms = deadline_ms - System.os_time(:millisecond)
+
+              if Waits.should_park?(config, remaining_ms, Runtime.current_step_id()) do
+                Notifications.unsubscribe_recv(engine, workflow_id, topic)
+                Waits.park(config, workflow_id, {:recv, topic}, deadline_ms)
+              end
 
               result =
                 Notifications.wait_until(engine, deadline_ms, fn ->
@@ -160,6 +168,13 @@ defmodule Dbos.Messaging do
               Runtime.run_step_at(sleep_step_id, StepNames.sleep(), [], fn ->
                 System.os_time(:millisecond) + timeout_ms
               end)
+
+            remaining_ms = deadline_ms - System.os_time(:millisecond)
+
+            if Waits.should_park?(config, remaining_ms, Runtime.current_step_id()) do
+              Notifications.unsubscribe_event(engine, target_workflow_id, key)
+              Waits.park(config, workflow_id, {:event, target_workflow_id, key}, deadline_ms)
+            end
 
             Notifications.wait_until(engine, deadline_ms, fn ->
               event_present?(config, target_workflow_id, key) or
@@ -309,6 +324,12 @@ defmodule Dbos.Messaging do
       Runtime.run_step_at(function_id, StepNames.sleep(), [], fn ->
         System.os_time(:millisecond) + ms
       end)
+
+    remaining_ms = deadline_ms - System.os_time(:millisecond)
+
+    if Waits.should_park?(config, remaining_ms, Runtime.current_step_id()) do
+      Waits.park(config, workflow_id, :sleep, deadline_ms)
+    end
 
     Notifications.wait_until(engine, deadline_ms, fn ->
       System.os_time(:millisecond) >= deadline_ms or

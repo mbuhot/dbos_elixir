@@ -19,7 +19,9 @@ defmodule Dbos.Config do
             orphan_sweep_threshold_ms: 300_000,
             notifications: :listen,
             notifications_conn_opts: nil,
-            scheduler_poll_interval_ms: 30_000
+            scheduler_poll_interval_ms: 30_000,
+            park_exit_threshold_ms: 60_000,
+            park_replay_ceiling: 500
 
   @type cluster_mode :: :disabled | :cluster_only | :cluster_and_orphan_sweep
 
@@ -38,6 +40,8 @@ defmodule Dbos.Config do
           orphan_sweep_threshold_ms: pos_integer,
           notifications: :listen | :poll,
           notifications_conn_opts: keyword | nil,
-          scheduler_poll_interval_ms: pos_integer
+          scheduler_poll_interval_ms: pos_integer,
+          park_exit_threshold_ms: pos_integer | :infinity,
+          park_replay_ceiling: pos_integer
         }
 end
