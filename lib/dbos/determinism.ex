@@ -159,6 +159,61 @@ defmodule Dbos.Determinism do
   defp resolve_module(mod, _env) when is_atom(mod), do: mod
   defp resolve_module(_other, _env), do: nil
 
+  @doc """
+  Walks `body` (a `defstep`/`deftransaction`'s raw do-block AST) and raises `CompileError` on the
+  first call that hands execution to another process — `Task.*`, `spawn`/`spawn_link`/
+  `spawn_monitor` — since that process starts with none of the workflow context the process
+  dictionary carries, and any durable call made from inside it silently skips its checkpoint.
+  `context`: `:env` (the `Macro.Env` at the call site), `:step_name`.
+  """
+  def check_step!(body, context) do
+    violations = Macro.prewalk(body, [], &collect_step_violation(&1, &2, context)) |> elem(1)
+
+    case Enum.reverse(violations) do
+      [] ->
+        :ok
+
+      messages ->
+        raise CompileError, file: context.env.file, description: Enum.join(messages, "\n\n")
+    end
+  end
+
+  defp collect_step_violation(node, acc, context) do
+    case step_banned(node) do
+      nil -> {node, acc}
+      {description, fix} -> {node, [format_step_violation(context, node, description, fix) | acc]}
+    end
+  end
+
+  defp format_step_violation(context, node, description, fix) do
+    line = line_of(node)
+
+    "#{context.env.file}:#{line}: step #{inspect(context.step_name)} calls #{description}, " <>
+      "which runs in a new process with no workflow context — any durable call made from " <>
+      "inside it takes the passthrough path and silently skips its checkpoint.\n    #{fix}"
+  end
+
+  defp step_banned({fun, _, args})
+       when fun in [:spawn, :spawn_link, :spawn_monitor] and is_list(args) do
+    {"#{fun}/#{length(args)}",
+     "run the work inline in this step, or move it into its own step, instead of a bare process."}
+  end
+
+  defp step_banned({{:., _, [{:__aliases__, _, [:Kernel]}, fun]}, _, args})
+       when fun in [:spawn, :spawn_link, :spawn_monitor] do
+    {"Kernel.#{fun}/#{length(args)}",
+     "run the work inline in this step, or move it into its own step, instead of a bare process."}
+  end
+
+  defp step_banned({{:., _, [{:__aliases__, _, [:Task]}, fun]}, _, args})
+       when fun in [:async, :await, :async_stream, :start, :start_link] do
+    {"Task.#{fun}/#{length(args)}",
+     "run the work inline in this step, or call a durable step/child workflow for real " <>
+       "concurrency — a Task does not inherit the workflow context."}
+  end
+
+  defp step_banned(_node), do: nil
+
   defp maybe_warn_cross_module_calls(_body, %{warn_cross_module_calls: false}), do: :ok
 
   defp maybe_warn_cross_module_calls(body, context) do

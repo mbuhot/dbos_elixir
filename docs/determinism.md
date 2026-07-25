@@ -77,6 +77,37 @@ output or the workflow's own input; a live read of mutable state breaks that gua
 | Direct repo calls outside a transactional step | Side effect with no checkpoint; re-runs for real on every replay | A transactional step |
 | Reading mutable module/application state (ETS, `Application.get_env` for values that can change, global counters, in-memory caches) | Value can differ between original run and replay | A step that reads and returns the value |
 
+## A step body is not a workflow body
+
+A step is where nondeterminism is supposed to live. `DateTime.utc_now`, `:rand.uniform`, a
+database read, an HTTP call — all of that belongs in a step, and is the reason steps exist.
+Banning them there would make the library unusable.
+
+What is still unsafe in a `defstep`/`deftransaction` body is anything that hands execution to a
+process the step did not create with the workflow context intact. The engine tracks "am I inside
+a workflow, inside a step" in the process dictionary; a `Task` or a bare `spawn` starts a fresh
+process with none of it. A step called from inside one takes the passthrough path — no
+checkpoint, no error, no log line — the same silent failure the workflow-level `Task` callout
+above describes.
+
+| Construct | Why it's still banned in a step | Use instead |
+|---|---|---|
+| `spawn`, `spawn_link`, `spawn_monitor` | New process has no workflow context | Run the work inline in this step, or split it into its own step |
+| `Task.async`, `Task.await`, `Task.async_stream`, `Task.start`, `Task.start_link` | Same problem — the spawned process starts with an empty process dictionary | Run the work inline, or use a durable step/child workflow for real concurrency |
+
+Everything else on the workflow-body ban list above is ordinary code inside a step, and is not
+checked there:
+
+- `:rand.*`, `DateTime.utc_now`, `System.system_time` and friends — this is exactly what a step is
+  for.
+- `Process.sleep` — an ordinary blocking wait in the step's own process. `Dbos.sleep/1` is a
+  workflow-level primitive and cannot be called from a step, so `Process.sleep` is the correct
+  tool here.
+- `receive` — a step body runs in the workflow's own process, not a spawned one, so a bare
+  `receive` does not lose any context. It blocks that process the same way `Process.sleep` does.
+- `send/2`, `make_ref`, a direct repo call — none of these move execution to another process, so
+  none of them touch the process-dictionary failure mode a step's ban list exists to close.
+
 ## Enforced at compile time vs. guidance only
 
 `defworkflow` (`Dbos.Macros`, `Dbos.Determinism`) runs a compile-time checker over a workflow
@@ -87,6 +118,11 @@ the fix: `:rand.*`, `DateTime.utc_now`, `NaiveDateTime.utc_now`, `Date.utc_today
 `make_ref`, and a direct call to the module passed as `use Dbos, repo: ...`. It also warns
 (suppressible with `use Dbos, warn_cross_module_calls: false`) on a call to a public function in
 another module that is not a registered `defstep`/`deftransaction`.
+
+`defstep` and `deftransaction` run a separate, narrower compile-time checker over their own body:
+a `CompileError` naming the call, the file/line, and the fix for `spawn`/`spawn_link`/
+`spawn_monitor` and `Task.async`/`await`/`async_stream`/`start`/`start_link` only, per the table
+above.
 
 `self()`-dependent logic, `node()`-dependent logic, and reads of mutable module/application state
 (ETS, `Application.get_env`, global counters, in-memory caches) are **not** mechanically detected

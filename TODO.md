@@ -5,13 +5,6 @@ what fixing it involves. Items resolved should be deleted, not ticked.
 
 ## Correctness
 
-### Determinism checker does not walk `defstep` bodies
-`Dbos.Determinism` walks `defworkflow` bodies only. A `Task.async` inside a `defstep` body hits
-the exact failure the checker exists to prevent — the spawned process has no workflow context, so
-any durable call inside it silently skips checkpointing.
-
-`defstep` is also a macro holding its body, so extending the walk is small. This was an oversight.
-
 ### The checker cannot see helper functions
 The macro only ever sees the literal `do` block. A violation inside a private helper the body
 calls is invisible:

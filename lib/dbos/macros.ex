@@ -2,8 +2,9 @@ defmodule Dbos.Macros do
   @moduledoc """
   `use Dbos` brings in `defstep/2`, `deftransaction/2`, and `defworkflow/2`.
   `defstep`/`deftransaction` wrap a plain function body in `Dbos.Runtime.run_step/3` /
-  `Dbos.transaction/3`; `defworkflow` additionally runs `Dbos.Determinism.check!/2` over the body
-  at compile time and generates a durable dispatcher.
+  `Dbos.transaction/3`, and run `Dbos.Determinism.check_step!/2` over the body at compile time to
+  reject a call that hands execution to another process; `defworkflow` additionally runs
+  `Dbos.Determinism.check!/2` over the body and generates a durable dispatcher.
 
   `defworkflow` calls are captured and processed once, in `@before_compile`, alongside every
   other `defworkflow` in the module: anything that must see every `defworkflow` in the module —
@@ -85,17 +86,19 @@ defmodule Dbos.Macros do
   override with `name:`. Any other option (`:max_retries`, `:base_interval_ms`,
   `:backoff_factor`, `:max_interval_ms`) is forwarded to `Dbos.RetryPolicy`.
   """
-  defmacro defstep(call, do_block), do: build_step(call, do_block)
-  defmacro defstep(call, opts, do_block), do: build_step(call, Keyword.merge(opts, do_block))
+  defmacro defstep(call, do_block), do: build_step(call, do_block, __CALLER__)
+
+  defmacro defstep(call, opts, do_block),
+    do: build_step(call, Keyword.merge(opts, do_block), __CALLER__)
 
   @doc """
   Wraps `call`'s body in `Dbos.transaction/3`. The step name defaults to `"name/arity"`; override
   with `name:`. `opts[:isolation]` is forwarded to `Dbos.transaction/3`.
   """
-  defmacro deftransaction(call, do_block), do: build_transaction(call, do_block)
+  defmacro deftransaction(call, do_block), do: build_transaction(call, do_block, __CALLER__)
 
   defmacro deftransaction(call, opts, do_block),
-    do: build_transaction(call, Keyword.merge(opts, do_block))
+    do: build_transaction(call, Keyword.merge(opts, do_block), __CALLER__)
 
   @doc """
   Defines a durable workflow. `name:` is required (recovery dispatches on it). Generates three
@@ -158,11 +161,13 @@ defmodule Dbos.Macros do
     end
   end
 
-  defp build_step(call, opts) do
+  defp build_step(call, opts, env) do
     {block, extra_opts} = Keyword.pop!(opts, :do)
     {fun_name, arity} = head_name_arity(call)
     step_name = Keyword.get(extra_opts, :name, "#{fun_name}/#{arity}")
     run_opts = Keyword.delete(extra_opts, :name)
+
+    Dbos.Determinism.check_step!(block, %{env: env, step_name: step_name})
 
     quote do
       @dbos_steps {unquote(step_name), {unquote(fun_name), unquote(arity)}}
@@ -170,11 +175,13 @@ defmodule Dbos.Macros do
     end
   end
 
-  defp build_transaction(call, opts) do
+  defp build_transaction(call, opts, env) do
     {block, extra_opts} = Keyword.pop!(opts, :do)
     {fun_name, arity} = head_name_arity(call)
     step_name = Keyword.get(extra_opts, :name, "#{fun_name}/#{arity}")
     run_opts = Keyword.delete(extra_opts, :name)
+
+    Dbos.Determinism.check_step!(block, %{env: env, step_name: step_name})
 
     quote do
       @dbos_steps {unquote(step_name), {unquote(fun_name), unquote(arity)}}

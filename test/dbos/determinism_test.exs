@@ -27,6 +27,24 @@ defmodule Dbos.DeterminismTest do
   defp use_line(""), do: "use Dbos"
   defp use_line(opts), do: "use Dbos, #{opts}"
 
+  defp compile_step(body, opts \\ []) do
+    module = fresh_module_name()
+    use_line = use_line(Keyword.get(opts, :use_opts, ""))
+    macro = Keyword.get(opts, :macro, "defstep")
+
+    source = """
+    defmodule #{inspect(module)} do
+      #{use_line}
+
+      #{macro} run(x) do
+        #{body}
+      end
+    end
+    """
+
+    Code.compile_string(source, "test/fixture.ex")
+  end
+
   test "defworkflow without name: is a compile error naming the workflow and explaining why" do
     module = fresh_module_name()
 
@@ -207,6 +225,100 @@ defmodule Dbos.DeterminismTest do
       end)
 
     refute output =~ "not a registered step"
+  end
+
+  @step_banned [
+    {"spawn(fn -> :ok end)", "spawn"},
+    {"spawn_link(fn -> :ok end)", "spawn_link"},
+    {"spawn_monitor(fn -> :ok end)", "spawn_monitor"},
+    {"Task.async(fn -> :ok end)", "Task.async"},
+    {"Task.await(Task.async(fn -> :ok end))", "Task.await"},
+    {"Task.async_stream([1], fn i -> i end)", "Task.async_stream"},
+    {"Task.start(fn -> :ok end)", "Task.start"},
+    {"Task.start_link(fn -> :ok end)", "Task.start_link"}
+  ]
+
+  for {{code, expected}, index} <- Enum.with_index(@step_banned) do
+    test "banned construct in a step body #{index}: #{expected}" do
+      error =
+        assert_raise CompileError, fn ->
+          compile_step(unquote(code))
+        end
+
+      assert error.description =~ unquote(expected)
+      assert error.description =~ ~r/test\/fixture\.ex:\d+/
+      assert error.description =~ "no workflow context"
+    end
+
+    test "banned construct in a transaction body #{index}: #{expected}" do
+      error =
+        assert_raise CompileError, fn ->
+          compile_step(unquote(code), macro: "deftransaction")
+        end
+
+      assert error.description =~ unquote(expected)
+      assert error.description =~ ~r/test\/fixture\.ex:\d+/
+      assert error.description =~ "no workflow context"
+    end
+  end
+
+  test "a violation nested inside a case branch in a step body is caught" do
+    body = """
+    case x do
+      1 -> Task.async(fn -> :ok end)
+      _ -> :ok
+    end
+    """
+
+    error =
+      assert_raise CompileError, fn ->
+        compile_step(body)
+      end
+
+    assert error.description =~ "Task.async"
+  end
+
+  test "a violation nested inside an anonymous function within a step body is caught" do
+    body = """
+    fun = fn -> spawn(fn -> :ok end) end
+    fun.()
+    """
+
+    error =
+      assert_raise CompileError, fn ->
+        compile_step(body)
+      end
+
+    assert error.description =~ "spawn/1"
+  end
+
+  test "DateTime.utc_now/0 is allowed in a step body" do
+    assert [{_module, _binary}] = compile_step("DateTime.utc_now()")
+  end
+
+  test ":rand.uniform/1 is allowed in a step body" do
+    assert [{_module, _binary}] = compile_step(":rand.uniform(10)")
+  end
+
+  test "System.system_time/1 is allowed in a step body" do
+    assert [{_module, _binary}] = compile_step("System.system_time(:millisecond)")
+  end
+
+  test "a repo call is allowed in a step body" do
+    assert [{_module, _binary}] = compile_step("Dbos.DeterminismFixtureRepo.insert!(x)")
+  end
+
+  test "Process.sleep/1 is allowed in a step body" do
+    assert [{_module, _binary}] = compile_step("Process.sleep(10)")
+  end
+
+  test "receive is allowed in a step body" do
+    assert [{_module, _binary}] =
+             compile_step("""
+             receive do
+               :go -> :ok
+             end
+             """)
   end
 
   test "calling a registered step in another module does not warn" do
