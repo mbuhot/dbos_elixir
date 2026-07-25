@@ -77,9 +77,14 @@ defmodule Dbos.Messaging do
                   System.os_time(:millisecond) + timeout_ms
                 end)
 
-              Notifications.wait_until(engine, deadline_ms, fn ->
-                SystemDb.notification_pending?(config, workflow_id, topic)
-              end) == :timeout
+              result =
+                Notifications.wait_until(engine, deadline_ms, fn ->
+                  SystemDb.notification_pending?(config, workflow_id, topic) or
+                    SystemDb.workflow_cancelled?(config, workflow_id)
+                end)
+
+              raise_if_cancelled!(config, workflow_id)
+              result == :timeout
             end
 
           consume_recv(config, workflow_id, topic, step_id, timeout_occurred)
@@ -160,8 +165,11 @@ defmodule Dbos.Messaging do
               end)
 
             Notifications.wait_until(engine, deadline_ms, fn ->
-              event_present?(config, target_workflow_id, key)
+              event_present?(config, target_workflow_id, key) or
+                SystemDb.workflow_cancelled?(config, workflow_id)
             end)
+
+            raise_if_cancelled!(config, workflow_id)
           end
 
           Runtime.run_step_at(step_id, StepNames.get_event(), [], fn ->
@@ -292,17 +300,30 @@ defmodule Dbos.Messaging do
   @doc """
   Durably sleeps for `ms`: checkpoints the absolute wake time under one `DBOS.sleep` step, then
   waits only the remaining interval, so a recovered workflow does not wait the full duration
-  again.
+  again. Waits via `Dbos.Notifications.wait_until/3` (not `Process.sleep/1`) so cancelling this
+  workflow wakes and interrupts the sleep immediately rather than waiting it out.
   """
-  def sleep(_config, ms) do
+  def sleep(config, ms) do
     function_id = Runtime.next_function_id()
+    workflow_id = Runtime.current_workflow_id()
+    engine = config.name
 
     deadline_ms =
       Runtime.run_step_at(function_id, StepNames.sleep(), [], fn ->
         System.os_time(:millisecond) + ms
       end)
 
-    remaining_ms = max(deadline_ms - System.os_time(:millisecond), 0)
-    Process.sleep(remaining_ms)
+    Notifications.wait_until(engine, deadline_ms, fn ->
+      System.os_time(:millisecond) >= deadline_ms or
+        SystemDb.workflow_cancelled?(config, workflow_id)
+    end)
+
+    raise_if_cancelled!(config, workflow_id)
+  end
+
+  defp raise_if_cancelled!(config, workflow_id) do
+    if SystemDb.workflow_cancelled?(config, workflow_id) do
+      raise Dbos.WorkflowCancelledError, workflow_id: workflow_id
+    end
   end
 end

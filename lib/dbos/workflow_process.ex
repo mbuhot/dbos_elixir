@@ -29,11 +29,13 @@ defmodule Dbos.WorkflowProcess do
         } = process_args
       ) do
     register_in_process_registry(engine, workflow_id, process_args)
+    ack_registration(process_args)
 
     outcome =
       try do
         value =
           Runtime.with_context([config: config, workflow_id: workflow_id, replay: replay], fn ->
+            Runtime.arm_deadline(config, workflow_id)
             apply(module, function, args)
           end)
 
@@ -85,4 +87,7 @@ defmodule Dbos.WorkflowProcess do
       {queue_name, partition_key}
     )
   end
+
+  defp ack_registration(%{caller: caller}), do: send(caller, {:dbos_workflow_registered, self()})
+  defp ack_registration(_process_args), do: :ok
 end

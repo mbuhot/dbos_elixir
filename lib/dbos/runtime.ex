@@ -14,15 +14,29 @@ defmodule Dbos.Runtime do
   @context_key :dbos_workflow_context
 
   defmodule Context do
-    @moduledoc "One workflow's in-process state: its config, id, step-id counter, and replay flag."
+    @moduledoc """
+    One workflow's in-process state: its config, id, step-id counter, replay flag, deadline (if
+    any), and whether the calling frame is nested inside a step or a transaction body.
+    """
 
-    defstruct [:config, :workflow_id, :replay, step_id: -1]
+    defstruct [
+      :config,
+      :workflow_id,
+      :replay,
+      :deadline_epoch_ms,
+      step_id: -1,
+      in_step: false,
+      in_transaction: false
+    ]
 
     @type t :: %__MODULE__{
             config: Config.t(),
             workflow_id: String.t(),
             replay: boolean,
-            step_id: integer
+            deadline_epoch_ms: integer | nil,
+            step_id: integer,
+            in_step: boolean,
+            in_transaction: boolean
           }
   end
 
@@ -37,6 +51,9 @@ defmodule Dbos.Runtime do
 
   @doc "The last step id allocated in the active context. Raises `Dbos.NotInWorkflowError` outside one."
   def current_step_id, do: fetch_context!().step_id
+
+  @doc "The active context's resolved deadline (epoch ms), or `nil` if none. Raises `Dbos.NotInWorkflowError` outside one."
+  def current_deadline_epoch_ms, do: fetch_context!().deadline_epoch_ms
 
   @doc """
   Allocates and returns the next step id, `0, 1, 2, ...` in call order. Raises
@@ -102,6 +119,10 @@ defmodule Dbos.Runtime do
   def run_step_at(function_id, name, opts \\ [], fun) do
     context = fetch_context!()
 
+    if context.in_transaction do
+      raise Dbos.StepInTransactionError, workflow_id: context.workflow_id, function_name: name
+    end
+
     case SystemDb.check_operation_execution(
            context.config,
            context.workflow_id,
@@ -121,7 +142,10 @@ defmodule Dbos.Runtime do
 
   defp execute_and_checkpoint_step(context, function_id, name, opts, fun) do
     started_at = System.os_time(:millisecond)
-    outcome = run_with_retries(context.workflow_id, name, opts, fun)
+
+    outcome =
+      with_flag(:in_step, true, fn -> run_with_retries(context.workflow_id, name, opts, fun) end)
+
     completed_at = System.os_time(:millisecond)
 
     case outcome do
@@ -174,6 +198,130 @@ defmodule Dbos.Runtime do
       started_at: started_at,
       completed_at: completed_at
     })
+  end
+
+  @doc """
+  Runs `fun.(conn)` as a durable transactional step named `name`, per `notes/datasource.md`. Only
+  the `sameAsSystemDB` path is implemented (`DECISIONS.md`): the user's writes made through `conn`
+  and the `operation_outputs` checkpoint commit together in one `config.db.transaction/3` call on
+  the system database's own connection/pool.
+
+  Nesting (`notes/datasource.md` §5): raises `Dbos.NestedTransactionError` from inside another
+  transaction's body. Called from inside a plain step's body, runs a real transaction but records
+  no separate durability row — it rides on the enclosing step's own checkpoint. `opts`:
+  `:isolation` (`:read_committed` | `:repeatable_read` | `:serializable`, default the adapter's
+  own default).
+  """
+  def run_transaction(name, opts \\ [], fun) do
+    context = fetch_context!()
+
+    cond do
+      context.in_transaction ->
+        raise Dbos.NestedTransactionError, workflow_id: context.workflow_id
+
+      context.in_step ->
+        run_transaction_within_step(context, opts, fun)
+
+      true ->
+        function_id = next_function_id()
+        run_transaction_at(context, function_id, name, opts, fun)
+    end
+  end
+
+  defp run_transaction_at(context, function_id, name, opts, fun) do
+    case SystemDb.check_operation_execution(
+           context.config,
+           context.workflow_id,
+           function_id,
+           name
+         ) do
+      {:replay, output} ->
+        output
+
+      {:replay_failure, failure} ->
+        Serialization.reraise_failure(failure)
+
+      :none ->
+        execute_and_checkpoint_transaction(context, function_id, name, opts, fun)
+    end
+  end
+
+  defp execute_and_checkpoint_transaction(context, function_id, name, opts, fun) do
+    isolation = Keyword.get(opts, :isolation)
+    started_at = System.os_time(:millisecond)
+
+    {:ok, value} =
+      context.config.db.transaction(context.config.conn, [isolation: isolation], fn conn ->
+        value = with_flag(:in_transaction, true, fn -> fun.(conn) end)
+        completed_at = System.os_time(:millisecond)
+        tx_config = %{context.config | conn: conn}
+
+        SystemDb.record_operation_result(tx_config, %{
+          workflow_id: context.workflow_id,
+          function_id: function_id,
+          function_name: name,
+          output: Serialization.encode(value),
+          started_at: started_at,
+          completed_at: completed_at
+        })
+
+        value
+      end)
+
+    value
+  end
+
+  defp run_transaction_within_step(context, opts, fun) do
+    isolation = Keyword.get(opts, :isolation)
+
+    {:ok, value} =
+      context.config.db.transaction(context.config.conn, [isolation: isolation], fn conn ->
+        with_flag(:in_transaction, true, fn -> fun.(conn) end)
+      end)
+
+    value
+  end
+
+  defp with_flag(key, value, fun) do
+    context = fetch_context!()
+    previous = Map.fetch!(context, key)
+    Process.put(@context_key, Map.put(context, key, value))
+
+    try do
+      fun.()
+    after
+      restored = fetch_context!()
+      Process.put(@context_key, Map.put(restored, key, previous))
+    end
+  end
+
+  @doc """
+  Resolves and arms this workflow's durable deadline, per `notes/recovery.md` §6: if a
+  `workflow_timeout_ms` is set but no `workflow_deadline_epoch_ms` yet, computes and persists
+  `now + timeout`; otherwise reuses whatever deadline is already recorded (so recovery/resume/fork
+  do not restart the clock). If a deadline results, stores it on the active context (so a child
+  workflow started from here inherits it, per `notes/recovery.md` §6) and starts an unsupervised
+  timer task that calls `Dbos.cancel/2` once the deadline passes — a no-op if the workflow has
+  already reached a terminal status by then.
+  """
+  def arm_deadline(config, workflow_id) do
+    case SystemDb.resolve_workflow_deadline(config, workflow_id) do
+      nil ->
+        :ok
+
+      deadline_ms ->
+        context = fetch_context!()
+        Process.put(@context_key, %{context | deadline_epoch_ms: deadline_ms})
+        remaining_ms = max(deadline_ms - System.os_time(:millisecond), 0)
+        engine = config.name
+
+        Task.start(fn ->
+          Process.sleep(remaining_ms)
+          Dbos.cancel(workflow_id, engine: engine)
+        end)
+
+        :ok
+    end
   end
 
   defp run_with_retries(workflow_id, name, opts, fun) do

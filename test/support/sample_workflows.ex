@@ -48,6 +48,82 @@ defmodule Dbos.SampleWorkflows do
     :woke
   end
 
+  def cancellable_recv(topic, timeout_ms), do: Dbos.recv_message(topic, timeout_ms)
+
+  def cancellable_sleep(ms) do
+    Dbos.sleep(ms)
+    :woke
+  end
+
+  def multi_step_with_gate(table) do
+    Dbos.Runtime.run_step("first_step/0", [], fn -> :ok end)
+
+    Dbos.Runtime.run_step("wait_for_gate/0", [], fn ->
+      receive do
+        :go -> :ok
+      end
+    end)
+
+    :ets.insert(table, {:gate_seen, Dbos.Runtime.current_workflow_id()})
+
+    Dbos.Runtime.run_step("second_step/0", [], fn -> :ok end)
+    Dbos.Runtime.run_step("third_step/0", [], fn -> :ok end)
+  end
+
+  def timeout_workflow(ms) do
+    Dbos.sleep(ms)
+    :never_gets_here
+  end
+
+  def parent_with_timeout_child(_arg) do
+    {:ok, handle} = Dbos.start("child_deadline_probe/0", [])
+    {:ok, deadline_epoch_ms} = Dbos.await(handle, timeout_ms: 30_000)
+    deadline_epoch_ms
+  end
+
+  def child_deadline_probe do
+    Dbos.Runtime.current_deadline_epoch_ms()
+  end
+
+  def transactional_insert(table, workflow_conn_mod, user_id) do
+    Dbos.transaction("insert_user/2", [], fn conn ->
+      workflow_conn_mod.query!(conn, "INSERT INTO #{table} (id) VALUES ($1)", [user_id])
+      user_id
+    end)
+  end
+
+  def transactional_insert_then_raise(table, workflow_conn_mod, user_id) do
+    Dbos.transaction("insert_user_then_raise/2", [], fn conn ->
+      workflow_conn_mod.query!(conn, "INSERT INTO #{table} (id) VALUES ($1)", [user_id])
+      raise "boom"
+    end)
+  end
+
+  def transaction_in_transaction do
+    Dbos.transaction("outer_tx/0", [], fn _conn ->
+      Dbos.transaction("inner_tx/0", [], fn _conn2 -> :ok end)
+    end)
+  end
+
+  def step_in_transaction do
+    Dbos.transaction("outer_tx/0", [], fn _conn ->
+      Dbos.Runtime.run_step("inner_step/0", [], fn -> :ok end)
+    end)
+  end
+
+  def transaction_in_step do
+    Dbos.Runtime.run_step("outer_step/0", [], fn ->
+      Dbos.transaction("inner_tx/0", [], fn _conn -> :ok end)
+    end)
+  end
+
+  def transaction_isolation_probe(_table, workflow_conn_mod) do
+    Dbos.transaction("isolation_probe/1", [isolation: :serializable], fn conn ->
+      %{rows: [[level]]} = workflow_conn_mod.query!(conn, "SHOW transaction_isolation", [])
+      level
+    end)
+  end
+
   def step_id_layout_workflow(target_workflow_id) do
     msg = Dbos.recv_message("topic", 5_000)
     event_value = Dbos.get_event(target_workflow_id, "key", 5_000)

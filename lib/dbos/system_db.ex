@@ -158,7 +158,12 @@ defmodule Dbos.SystemDb do
     {:ok, Enum.map(result.rows, &StepInfo.from_row/1)}
   end
 
-  @doc "Returns a workflow's outcome: `{:ok, term}`, `{:error, exception}`, or `:pending`."
+  @doc """
+  Returns a workflow's outcome: `{:ok, term}`, `{:error, exception}`, `{:error,
+  %Dbos.WorkflowCancelledError{}}`, `{:error, %Dbos.MaxRecoveryAttemptsExceededError{}}`, or
+  `:pending` while still running. Distinguishes `:cancelled` and
+  `:max_recovery_attempts_exceeded` rather than collapsing them into `:pending`.
+  """
   def get_workflow_result(%Config{} = config, workflow_id) do
     case get_workflow_status(config, workflow_id) do
       {:error, :not_found} ->
@@ -169,6 +174,13 @@ defmodule Dbos.SystemDb do
 
       {:ok, %WorkflowStatus{status: :error, error: error}} ->
         {:error, error}
+
+      {:ok, %WorkflowStatus{status: :cancelled}} ->
+        {:error, %Dbos.WorkflowCancelledError{workflow_id: workflow_id}}
+
+      {:ok, %WorkflowStatus{status: :max_recovery_attempts_exceeded, recovery_attempts: attempts}} ->
+        {:error,
+         %Dbos.MaxRecoveryAttemptsExceededError{workflow_id: workflow_id, attempts: attempts}}
 
       {:ok, %WorkflowStatus{}} ->
         :pending
@@ -424,6 +436,408 @@ defmodule Dbos.SystemDb do
     cutoff_ms = System.os_time(:millisecond) - threshold_ms
     {:ok, result} = config.db.query(config.conn, sql, [Status.to_string(:pending), cutoff_ms])
     Enum.map(result.rows, fn [id] -> id end)
+  end
+
+  @doc """
+  Cancels every workflow in `workflow_ids`, per `notes/recovery.md` §3 (`CancelWorkflows`): a
+  data-modifying CTE that updates every row not already `SUCCESS`/`ERROR`/`CANCELLED` to
+  `CANCELLED` (nulling `started_at_epoch_ms`, `queue_name`, `deduplication_id`; setting
+  `completed_at`), then returns every id that existed at all — including ids already terminal,
+  which are left untouched but still reported as "existing", matching upstream. `CancelChildren`
+  expansion is not implemented (deviation, see report).
+  """
+  def cancel_workflows(%Config{} = config, workflow_ids) do
+    now = System.os_time(:millisecond)
+
+    sql = """
+    WITH existing AS (
+      SELECT workflow_uuid FROM #{table(config, "workflow_status")} WHERE workflow_uuid = ANY($3)
+    ), updated AS (
+      UPDATE #{table(config, "workflow_status")}
+          SET status = $1, updated_at = $2, completed_at = $2, started_at_epoch_ms = NULL,
+              queue_name = NULL, deduplication_id = NULL
+          WHERE workflow_uuid = ANY($3) AND status NOT IN ($4, $5, $6)
+          RETURNING workflow_uuid
+    )
+    SELECT workflow_uuid FROM existing
+    """
+
+    params = [
+      Status.to_string(:cancelled),
+      now,
+      workflow_ids,
+      Status.to_string(:success),
+      Status.to_string(:error),
+      Status.to_string(:cancelled)
+    ]
+
+    {:ok, result} = config.db.query(config.conn, sql, params)
+    Enum.map(result.rows, fn [id] -> id end)
+  end
+
+  @doc """
+  Cancels every `PENDING`/`ENQUEUED`/`DELAYED` workflow created at or before `cutoff_ms`, per
+  `notes/recovery.md` §3 (`CancelAllBefore`) — the operation backing `POST /dbos-global-timeout`
+  (the HTTP route itself is Phase 6). Returns the cancelled ids.
+  """
+  def cancel_all_before(%Config{} = config, cutoff_ms) do
+    sql = """
+    SELECT workflow_uuid FROM #{table(config, "workflow_status")}
+    WHERE created_at <= $1 AND status IN ($2, $3, $4)
+    """
+
+    params = [
+      cutoff_ms,
+      Status.to_string(:pending),
+      Status.to_string(:enqueued),
+      Status.to_string(:delayed)
+    ]
+
+    {:ok, result} = config.db.query(config.conn, sql, params)
+    workflow_ids = Enum.map(result.rows, fn [id] -> id end)
+    if workflow_ids == [], do: [], else: cancel_workflows(config, workflow_ids)
+  end
+
+  @doc """
+  Resumes every workflow in `workflow_ids`, per `notes/recovery.md` §4 (`ResumeWorkflows`):
+  re-enqueues onto `opts[:queue_name]` (default `Dbos.Queue.internal_queue_name/0`), resetting
+  `recovery_attempts` to `0` and clearing `workflow_deadline_epoch_ms`, `deduplication_id`,
+  `started_at_epoch_ms`, `completed_at`. Rows already `SUCCESS`/`ERROR` are excluded by the guard
+  and left untouched, but are still reported as "existing" — matching upstream, resuming an
+  already-terminal (success/error) workflow is a silent no-op. Returns the existing ids.
+  """
+  def resume_workflows(%Config{} = config, workflow_ids, opts \\ []) do
+    queue_name = Keyword.get(opts, :queue_name, Dbos.Queue.internal_queue_name())
+    now = System.os_time(:millisecond)
+
+    sql = """
+    WITH existing AS (
+      SELECT workflow_uuid FROM #{table(config, "workflow_status")} WHERE workflow_uuid = ANY($5)
+    ), updated AS (
+      UPDATE #{table(config, "workflow_status")}
+          SET status = $1, queue_name = $2, recovery_attempts = $3,
+              workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
+              started_at_epoch_ms = NULL, updated_at = $4, completed_at = NULL
+          WHERE workflow_uuid = ANY($5) AND status NOT IN ($6, $7)
+          RETURNING workflow_uuid
+    )
+    SELECT workflow_uuid FROM existing
+    """
+
+    params = [
+      Status.to_string(:enqueued),
+      queue_name,
+      0,
+      now,
+      workflow_ids,
+      Status.to_string(:success),
+      Status.to_string(:error)
+    ]
+
+    {:ok, result} = config.db.query(config.conn, sql, params)
+    Enum.map(result.rows, fn [id] -> id end)
+  end
+
+  @doc "Whether `workflow_id`'s status is currently `CANCELLED`."
+  def workflow_cancelled?(%Config{} = config, workflow_id) do
+    sql = "SELECT status FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1"
+
+    case config.db.query(config.conn, sql, [workflow_id]) do
+      {:ok, %{rows: [[status]]}} -> status == Status.to_string(:cancelled)
+      {:ok, %{rows: []}} -> false
+    end
+  end
+
+  @doc """
+  Resolves this workflow's durable deadline, per `notes/recovery.md` §6: if a
+  `workflow_timeout_ms` is set but no `workflow_deadline_epoch_ms` yet, computes and durably
+  persists `now + timeout` (guarded so a race between concurrent resolvers only ever persists
+  once); otherwise returns whatever deadline is already recorded. Returns `nil` if no timeout is
+  set at all.
+  """
+  def resolve_workflow_deadline(%Config{} = config, workflow_id) do
+    sql = """
+    SELECT workflow_timeout_ms, workflow_deadline_epoch_ms
+    FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1
+    """
+
+    case config.db.query(config.conn, sql, [workflow_id]) do
+      {:ok, %{rows: [[_timeout, deadline]]}} when is_integer(deadline) ->
+        deadline
+
+      {:ok, %{rows: [[timeout, nil]]}} when is_integer(timeout) ->
+        compute_and_persist_deadline(config, workflow_id, timeout)
+
+      {:ok, %{rows: [[nil, nil]]}} ->
+        nil
+
+      {:ok, %{rows: []}} ->
+        nil
+    end
+  end
+
+  defp compute_and_persist_deadline(config, workflow_id, timeout_ms) do
+    deadline_ms = System.os_time(:millisecond) + timeout_ms
+
+    sql = """
+    UPDATE #{table(config, "workflow_status")}
+        SET workflow_deadline_epoch_ms = $1
+        WHERE workflow_uuid = $2 AND workflow_deadline_epoch_ms IS NULL
+        RETURNING workflow_deadline_epoch_ms
+    """
+
+    case config.db.query(config.conn, sql, [deadline_ms, workflow_id]) do
+      {:ok, %{rows: [[persisted]]}} ->
+        persisted
+
+      {:ok, %{rows: []}} ->
+        resolve_workflow_deadline(config, workflow_id)
+    end
+  end
+
+  @doc """
+  Forks `original_workflow_id` from step `start_step` into a new workflow id
+  (`opts[:new_workflow_id]`, default a fresh random UUID), per `notes/recovery.md` §5
+  (`ForkWorkflows`): copies `operation_outputs`/`workflow_events_history`/`streams` rows with
+  `function_id < start_step`, recomputes `workflow_events` from the latest history row per key
+  before the fork point, marks the original `was_forked_from = TRUE`, and enqueues the fork onto
+  `opts[:queue_name]` (default the internal queue) so it re-runs starting at `start_step`.
+  `opts[:application_version]` overrides the copied application version. Raises
+  `Dbos.NonExistentWorkflowError` if `original_workflow_id` has no row.
+  """
+  def fork_workflow(%Config{} = config, original_workflow_id, start_step, opts \\ []) do
+    new_workflow_id = Keyword.get_lazy(opts, :new_workflow_id, &Uuid.v4/0)
+    queue_name = Keyword.get(opts, :queue_name, Dbos.Queue.internal_queue_name())
+
+    {:ok, new_workflow_id} =
+      config.db.transaction(config.conn, [], fn conn ->
+        tx_config = %{config | conn: conn}
+        original = fetch_forkable_workflow!(tx_config, original_workflow_id)
+
+        insert_forked_workflow(
+          tx_config,
+          original_workflow_id,
+          original,
+          new_workflow_id,
+          queue_name,
+          Keyword.get(opts, :application_version)
+        )
+
+        if start_step > 0 do
+          copy_operation_outputs(tx_config, original_workflow_id, new_workflow_id, start_step)
+
+          copy_workflow_events_history(
+            tx_config,
+            original_workflow_id,
+            new_workflow_id,
+            start_step
+          )
+
+          copy_workflow_events(tx_config, original_workflow_id, new_workflow_id, start_step)
+          copy_streams(tx_config, original_workflow_id, new_workflow_id, start_step)
+        end
+
+        mark_was_forked_from(tx_config, original_workflow_id)
+        new_workflow_id
+      end)
+
+    new_workflow_id
+  end
+
+  defp fetch_forkable_workflow!(config, workflow_id) do
+    sql = """
+    SELECT name, authenticated_user, assumed_role, authenticated_roles, application_version,
+           application_id, inputs, serialization, class_name, config_name, attributes
+    FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1
+    """
+
+    case config.db.query(config.conn, sql, [workflow_id]) do
+      {:ok, %{rows: [row]}} -> row
+      {:ok, %{rows: []}} -> raise Dbos.NonExistentWorkflowError, workflow_id: workflow_id
+    end
+  end
+
+  defp insert_forked_workflow(
+         config,
+         original_workflow_id,
+         [
+           name,
+           authenticated_user,
+           assumed_role,
+           authenticated_roles,
+           application_version,
+           application_id,
+           inputs,
+           serialization,
+           class_name,
+           config_name,
+           attributes
+         ],
+         new_workflow_id,
+         queue_name,
+         application_version_override
+       ) do
+    now = System.os_time(:millisecond)
+
+    sql = """
+    INSERT INTO #{table(config, "workflow_status")}
+        (workflow_uuid, status, name, queue_name, authenticated_user, assumed_role,
+         authenticated_roles, executor_id, application_version, application_id, created_at,
+         recovery_attempts, updated_at, inputs, owner_xid, class_name, config_name, serialization,
+         attributes, forked_from)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+    """
+
+    params = [
+      new_workflow_id,
+      Status.to_string(:enqueued),
+      name,
+      queue_name,
+      authenticated_user,
+      assumed_role,
+      authenticated_roles,
+      config.executor_id,
+      application_version_override || application_version,
+      application_id,
+      now,
+      0,
+      now,
+      inputs,
+      Uuid.v4(),
+      class_name,
+      config_name,
+      serialization,
+      attributes,
+      original_workflow_id
+    ]
+
+    {:ok, _result} = config.db.query(config.conn, sql, params)
+    :ok
+  end
+
+  defp copy_operation_outputs(config, original_id, new_id, start_step) do
+    sql = """
+    INSERT INTO #{table(config, "operation_outputs")}
+        (workflow_uuid, function_id, function_name, output, error, child_workflow_id,
+         started_at_epoch_ms, completed_at_epoch_ms, serialization)
+    SELECT $2, function_id, function_name, output, error, child_workflow_id,
+           started_at_epoch_ms, completed_at_epoch_ms, serialization
+    FROM #{table(config, "operation_outputs")}
+    WHERE workflow_uuid = $1 AND function_id < $3
+    """
+
+    {:ok, _result} = config.db.query(config.conn, sql, [original_id, new_id, start_step])
+    :ok
+  end
+
+  defp copy_workflow_events_history(config, original_id, new_id, start_step) do
+    sql = """
+    INSERT INTO #{table(config, "workflow_events_history")}
+        (workflow_uuid, function_id, key, value, serialization)
+    SELECT $2, function_id, key, value, serialization
+    FROM #{table(config, "workflow_events_history")}
+    WHERE workflow_uuid = $1 AND function_id < $3
+    """
+
+    {:ok, _result} = config.db.query(config.conn, sql, [original_id, new_id, start_step])
+    :ok
+  end
+
+  defp copy_workflow_events(config, original_id, new_id, start_step) do
+    sql = """
+    INSERT INTO #{table(config, "workflow_events")} (workflow_uuid, key, value, serialization)
+    SELECT $2, h.key, h.value, h.serialization
+    FROM (
+      SELECT key, value, serialization,
+             ROW_NUMBER() OVER (PARTITION BY key ORDER BY function_id DESC) AS rn
+      FROM #{table(config, "workflow_events_history")}
+      WHERE workflow_uuid = $1 AND function_id < $3
+    ) h
+    WHERE h.rn = 1
+    """
+
+    {:ok, _result} = config.db.query(config.conn, sql, [original_id, new_id, start_step])
+    :ok
+  end
+
+  defp copy_streams(config, original_id, new_id, start_step) do
+    sql = """
+    INSERT INTO #{table(config, "streams")}
+        (workflow_uuid, key, value, "offset", function_id, serialization)
+    SELECT $2, key, value, "offset", function_id, serialization
+    FROM #{table(config, "streams")}
+    WHERE workflow_uuid = $1 AND function_id < $3
+    """
+
+    {:ok, _result} = config.db.query(config.conn, sql, [original_id, new_id, start_step])
+    :ok
+  end
+
+  defp mark_was_forked_from(config, workflow_id) do
+    sql = """
+    UPDATE #{table(config, "workflow_status")} SET was_forked_from = TRUE WHERE workflow_uuid = $1
+    """
+
+    {:ok, _result} = config.db.query(config.conn, sql, [workflow_id])
+    :ok
+  end
+
+  @doc """
+  Deletes every `workflow_status` row (cascading to its `operation_outputs` etc.) older than an
+  effective cutoff, per `notes/recovery.md` §7 (`GarbageCollectWorkflows`) — upstream's admin HTTP
+  route is a documented no-op stub; this is the real, working operation underneath it.
+  `opts[:cutoff_epoch_timestamp_ms]` and/or `opts[:rows_threshold]` (keep at least this many of
+  the newest rows) may be given; the effective cutoff is the max of both. `PENDING`/`ENQUEUED`/
+  `DELAYED` rows are never deleted. Returns the number of rows deleted.
+  """
+  def garbage_collect_workflows(%Config{} = config, opts \\ []) do
+    case effective_gc_cutoff(config, opts) do
+      nil -> 0
+      cutoff_ms -> delete_workflows_before(config, cutoff_ms)
+    end
+  end
+
+  defp effective_gc_cutoff(config, opts) do
+    cutoff = Keyword.get(opts, :cutoff_epoch_timestamp_ms)
+    threshold_cutoff = rows_threshold_cutoff(config, Keyword.get(opts, :rows_threshold))
+
+    [cutoff, threshold_cutoff]
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> nil
+      values -> Enum.max(values)
+    end
+  end
+
+  defp rows_threshold_cutoff(_config, nil), do: nil
+
+  defp rows_threshold_cutoff(config, rows_threshold) do
+    sql = """
+    SELECT created_at FROM #{table(config, "workflow_status")}
+    ORDER BY created_at DESC LIMIT 1 OFFSET $1
+    """
+
+    case config.db.query(config.conn, sql, [rows_threshold - 1]) do
+      {:ok, %{rows: [[created_at]]}} -> created_at
+      {:ok, %{rows: []}} -> nil
+    end
+  end
+
+  defp delete_workflows_before(config, cutoff_ms) do
+    sql = """
+    DELETE FROM #{table(config, "workflow_status")}
+    WHERE created_at < $1 AND status NOT IN ($2, $3, $4)
+    """
+
+    params = [
+      cutoff_ms,
+      Status.to_string(:pending),
+      Status.to_string(:enqueued),
+      Status.to_string(:delayed)
+    ]
+
+    {:ok, %{num_rows: num_rows}} = config.db.query(config.conn, sql, params)
+    num_rows
   end
 
   @doc "Registers `version_name` as a known application version, if not already present. Idempotent."

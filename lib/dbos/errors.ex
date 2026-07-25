@@ -158,6 +158,47 @@ defmodule Dbos.StreamClosedError do
   end
 end
 
+defmodule Dbos.NestedTransactionError do
+  @moduledoc """
+  Raised when `Dbos.transaction/3` is called from inside another `Dbos.transaction/3`'s body, per
+  `notes/datasource.md` §5 (rejected unconditionally, matching upstream's `RunAsTransaction`
+  nesting guard).
+  """
+
+  defexception [:workflow_id]
+
+  @impl true
+  def message(%__MODULE__{workflow_id: workflow_id}) do
+    "workflow #{workflow_id}: cannot call Dbos.transaction/3 within a transaction"
+  end
+end
+
+defmodule Dbos.StepInTransactionError do
+  @moduledoc """
+  Raised when `Dbos.Runtime.run_step/3` (or any durable operation built on it — `send_message`,
+  `recv_message`, `set_event`, etc.) is called from inside a `Dbos.transaction/3` body. Upstream
+  prevents this at compile time (a transaction's function type does not expose step-capable
+  context methods); this port has no equivalent type-level guard, so it is added here explicitly,
+  per `notes/datasource.md` §5/§7 (a deliberate addition, not upstream behavior).
+  """
+
+  defexception [:workflow_id, :function_name]
+
+  @impl true
+  def message(%__MODULE__{workflow_id: workflow_id, function_name: function_name}) do
+    "workflow #{workflow_id}: cannot call step #{inspect(function_name)} from within a Dbos.transaction/3 body"
+  end
+end
+
+defmodule Dbos.NotSupportedError do
+  @moduledoc "Raised when a call requires functionality this port has not implemented."
+
+  defexception [:reason]
+
+  @impl true
+  def message(%__MODULE__{reason: reason}), do: reason
+end
+
 defmodule Dbos.MaxStepRetriesExceededError do
   @moduledoc """
   Raised when a step exhausts its configured retry budget. Mirrors upstream's

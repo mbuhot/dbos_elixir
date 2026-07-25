@@ -10,6 +10,7 @@ defmodule Dbos do
   alias Dbos.Config
   alias Dbos.Messaging
   alias Dbos.Notifications
+  alias Dbos.Queue
   alias Dbos.Registry
   alias Dbos.Runtime
   alias Dbos.SystemDb
@@ -70,7 +71,8 @@ defmodule Dbos do
       deduplication_id: Keyword.get(opts, :deduplication_id),
       queue_partition_key: Keyword.get(opts, :partition_key),
       delay_ms: Keyword.get(opts, :delay_ms),
-      application_version: Keyword.get(opts, :application_version, config.application_version)
+      application_version: Keyword.get(opts, :application_version, config.application_version),
+      workflow_timeout_ms: Keyword.get(opts, :timeout_ms)
     }
 
     {:ok, workflow_id} = SystemDb.insert_enqueued_workflow(config, params)
@@ -156,6 +158,74 @@ defmodule Dbos do
     Messaging.sleep(Runtime.current_config(), ms)
   end
 
+  @doc """
+  Runs `fun.(conn)` as a durable transactional step named `name`: the user's writes made through
+  `conn` and the step's `operation_outputs` checkpoint commit together in one database
+  transaction, per `notes/datasource.md`. Must be called from inside a workflow. Raises
+  `Dbos.NestedTransactionError` from inside another transaction's body, and
+  `Dbos.StepInTransactionError` if any durable step is called from inside this transaction's
+  body. `opts[:isolation]`: `:read_committed` | `:repeatable_read` | `:serializable`.
+  """
+  def transaction(name, opts \\ [], fun) do
+    Runtime.run_transaction(name, opts, fun)
+  end
+
+  @doc """
+  Cancels `workflow_id`: durably marks it `CANCELLED` (a no-op if it is already
+  `SUCCESS`/`ERROR`/`CANCELLED`), per `notes/recovery.md` §3. If the workflow has a live process
+  on this engine, wakes it immediately so a blocked `recv`/`get_event`/`sleep` is interrupted
+  promptly rather than waiting out its timeout; a workflow actively running plain steps instead
+  stops cooperatively at its next step boundary, where `check_operation_execution` observes the
+  cancellation. `opts[:engine]` defaults to `Dbos`.
+  """
+  def cancel(workflow_id, opts \\ []) do
+    engine = engine(opts)
+    config = config(engine)
+    SystemDb.cancel_workflows(config, [workflow_id])
+
+    case WorkflowSup.whereis(engine, workflow_id) do
+      {:ok, pid} -> send(pid, {:dbos_notify, :cancelled, workflow_id})
+      :error -> :ok
+    end
+
+    :ok
+  end
+
+  @doc """
+  Resumes `workflow_id` from its last checkpoint: clears its queue assignment and deadline and
+  re-enqueues it onto `opts[:queue_name]` (default `Dbos.Queue.internal_queue_name/0`), per
+  `notes/recovery.md` §4. Matches upstream: resuming a workflow already `SUCCESS`/`ERROR` is a
+  silent no-op (the row is left unchanged). `opts[:engine]` defaults to `Dbos`.
+  """
+  def resume(workflow_id, opts \\ []) do
+    config = opts |> engine() |> config()
+    queue_name = Keyword.get(opts, :queue_name, Queue.internal_queue_name())
+    SystemDb.resume_workflows(config, [workflow_id], queue_name: queue_name)
+    :ok
+  end
+
+  @doc """
+  Forks `workflow_id` from step `start_step`: copies every checkpoint before `start_step` into a
+  new workflow (`opts[:new_workflow_id]`, default a fresh random id), marks the original
+  `was_forked_from`, and enqueues the fork so it re-runs starting at `start_step`, per
+  `notes/recovery.md` §5. `opts`: `:new_workflow_id`, `:queue_name` (default the internal queue),
+  `:application_version`, `:engine` (default `Dbos`).
+  """
+  def fork(workflow_id, start_step, opts \\ []) do
+    engine = engine(opts)
+    config = config(engine)
+    new_workflow_id = Keyword.get_lazy(opts, :new_workflow_id, &Uuid.v4/0)
+
+    SystemDb.fork_workflow(
+      config,
+      workflow_id,
+      start_step,
+      Keyword.put(opts, :new_workflow_id, new_workflow_id)
+    )
+
+    {:ok, %WorkflowHandle{engine: engine, workflow_id: new_workflow_id}}
+  end
+
   defp workflow_or_engine_config(opts) do
     if Runtime.in_workflow?(), do: Runtime.current_config(), else: config(engine(opts))
   end
@@ -217,7 +287,8 @@ defmodule Dbos do
       inputs: args,
       deduplication_id: Keyword.get(opts, :deduplication_id),
       priority: Keyword.get(opts, :priority, 0),
-      application_version: Keyword.get(opts, :application_version, config.application_version)
+      application_version: Keyword.get(opts, :application_version, config.application_version),
+      workflow_timeout_ms: Keyword.get(opts, :timeout_ms)
     })
 
     {:ok, _pid} = WorkflowSup.start_workflow(engine, workflow_id, mfa, args)
@@ -242,7 +313,9 @@ defmodule Dbos do
           name: name,
           inputs: args,
           parent_workflow_id: parent_id,
-          application_version: Keyword.get(opts, :application_version, config.application_version)
+          application_version:
+            Keyword.get(opts, :application_version, config.application_version),
+          workflow_deadline_epoch_ms: Runtime.current_deadline_epoch_ms()
         })
 
         {:ok, _pid} = WorkflowSup.start_workflow(engine, child_id, mfa, args)

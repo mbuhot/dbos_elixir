@@ -31,10 +31,29 @@ defmodule Dbos.WorkflowSup do
       args: args,
       replay: Keyword.get(opts, :replay, false),
       queue_name: Keyword.get(opts, :queue_name),
-      partition_key: Keyword.get(opts, :partition_key)
+      partition_key: Keyword.get(opts, :partition_key),
+      caller: self()
     }
 
-    DynamicSupervisor.start_child(process_name(engine_name), {Dbos.WorkflowProcess, process_args})
+    case DynamicSupervisor.start_child(
+           process_name(engine_name),
+           {Dbos.WorkflowProcess, process_args}
+         ) do
+      {:ok, pid} = ok ->
+        await_registration(pid)
+        ok
+
+      other ->
+        other
+    end
+  end
+
+  defp await_registration(pid) do
+    receive do
+      {:dbos_workflow_registered, ^pid} -> :ok
+    after
+      1_000 -> :ok
+    end
   end
 
   @doc "The pid of the running workflow process for `workflow_id`, if any."
