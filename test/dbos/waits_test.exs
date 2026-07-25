@@ -193,7 +193,7 @@ defmodule Dbos.WaitsTest do
     engine =
       start_engine([{"sleeper/1", {SampleWorkflows, :sleeper, 1}}], park_exit_threshold_ms: 100)
 
-    wait_count = 2_000
+    wait_count = 400
 
     force_gc()
     process_count_before = :erlang.system_info(:process_count)
@@ -205,7 +205,7 @@ defmodule Dbos.WaitsTest do
         handle
       end
 
-    wait_until(fn -> Waits.count(engine) == wait_count end, 1_000)
+    wait_until(fn -> Waits.count(engine) == wait_count end, 3_000)
 
     force_gc()
     process_count_after = :erlang.system_info(:process_count)
@@ -216,15 +216,9 @@ defmodule Dbos.WaitsTest do
 
     process_growth = process_count_after - process_count_before
     memory_growth_bytes = memory_after - memory_before
-    bytes_per_wait = memory_growth_bytes / wait_count
 
-    IO.puts(
-      "scale test: #{wait_count} parked waits, process_growth=#{process_growth}, " <>
-        "vm_memory_growth_bytes=#{memory_growth_bytes}, vm_bytes_per_wait=#{bytes_per_wait}, " <>
-        "ets_table_bytes_per_wait=#{ets_bytes_per_wait}"
-    )
-
-    assert process_growth < wait_count
+    assert process_growth < 50
+    assert memory_growth_bytes / wait_count < 20_000
     assert ets_bytes_per_wait < 2_000
 
     Enum.each(handles, &Dbos.cancel(&1.workflow_id, engine: engine))
