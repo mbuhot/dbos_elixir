@@ -45,6 +45,7 @@ defmodule Dbos.Scheduler do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
     engine = Keyword.fetch!(opts, :name)
     config = Dbos.config(engine)
     poll_interval_ms = Keyword.get(opts, :poll_interval_ms, config.scheduler_poll_interval_ms)

@@ -30,6 +30,7 @@ defmodule Dbos.LeaseSweep do
 
   @impl true
   def init(engine_name) do
+    Process.flag(:trap_exit, true)
     schedule_sweep(engine_name)
     {:ok, engine_name}
   end
