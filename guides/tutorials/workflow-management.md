@@ -155,7 +155,7 @@ ids safely: the reassigning `UPDATE` is the serialization point, so whichever ca
 redispatches nothing. `opts[:batch_size]` bounds how many non-queued rows one call claims
 (unbounded by default).
 
-Deciding *who* is dead is `Dbos.Cluster`'s job, or an operator's, via the admin server's recovery
+Deciding *who* is dead is the lease sweep's job, or an operator's, via the admin server's recovery
 route.
 
 ## The admin HTTP API

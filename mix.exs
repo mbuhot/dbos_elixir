@@ -178,7 +178,7 @@ defmodule Dbos.MixProject do
       "guides/tutorials/testing.md",
       "docs/determinism.md",
       "docs/system-database.md",
-      "docs/clustering.md",
+      "docs/executor-leases.md",
       "docs/telemetry.md",
       "guides/production-checklist.md",
       "guides/faq.md"
@@ -222,7 +222,7 @@ defmodule Dbos.MixProject do
         Dbos.Migration,
         Dbos.Migrator
       ],
-      Operations: [Dbos.Recovery, Dbos.Cluster, Dbos.AdminServer],
+      Operations: [Dbos.Recovery, Dbos.AdminServer],
       Testing: [Dbos.Testing],
       "Credo Checks": [Credo.Check.Warning.DbosDeterminism],
       Errors: ~r{Dbos\..*Error$}

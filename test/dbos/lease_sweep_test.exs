@@ -1,8 +1,7 @@
-defmodule Dbos.ClusterTest do
+defmodule Dbos.LeaseSweepTest do
   use Dbos.Case, async: false
 
-  alias Dbos.Cluster
-  alias Dbos.Cluster.OrphanSweep
+  alias Dbos.LeaseSweep
   alias Dbos.SampleWorkflows
   alias Dbos.SystemDb
   alias Dbos.WorkflowSup
@@ -11,52 +10,19 @@ defmodule Dbos.ClusterTest do
     Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
   end
 
-  defp put_config(name, conn, extra \\ %{}) do
-    config =
-      Map.merge(
-        %Dbos.Config{
-          name: name,
-          db: Dbos.DB.Postgrex,
-          conn: conn,
-          executor_id: "exec-1"
-        },
-        extra
-      )
+  defp put_config(name, conn) do
+    config = %Dbos.Config{
+      name: name,
+      db: Dbos.DB.Postgrex,
+      conn: conn,
+      executor_id: "exec-1"
+    }
 
     Dbos.put_config(config)
     config
   end
 
-  describe "roster/1 with distributed Erlang disabled" do
-    test "yields a single-entry roster of just this engine and does not crash", %{conn: conn} do
-      name = unique_engine_name()
-      config = put_config(name, conn)
-
-      start_supervised!({Cluster, name: name})
-
-      assert Cluster.roster(name) == MapSet.new([{node(), config.executor_id}])
-    end
-
-    test "executor_ids_for_node/2 resolves this node to its own executor id", %{conn: conn} do
-      name = unique_engine_name()
-      config = put_config(name, conn)
-
-      start_supervised!({Cluster, name: name})
-
-      assert Cluster.executor_ids_for_node(name, node()) == [config.executor_id]
-    end
-
-    test "executor_ids_for_node/2 returns an empty list for a node never seen", %{conn: conn} do
-      name = unique_engine_name()
-      put_config(name, conn)
-
-      start_supervised!({Cluster, name: name})
-
-      assert Cluster.executor_ids_for_node(name, :"never-seen@nowhere") == []
-    end
-  end
-
-  describe "Dbos.Cluster.OrphanSweep, lease-based, with clustering disabled" do
+  describe "reclaiming workflows from a dead executor" do
     setup %{conn: conn} do
       name = unique_engine_name()
       config = put_config(name, conn)
@@ -74,10 +40,10 @@ defmodule Dbos.ClusterTest do
       {:ok, config: config, name: name}
     end
 
-    test "works with no Dbos.Cluster process running at all: reclaims a PENDING row whose executor has no lease row",
-         %{config: config, name: name} do
-      assert Process.whereis(Cluster.process_name(name)) == nil
-
+    test "a pending workflow whose executor never took a lease is picked up and finishes", %{
+      config: config,
+      name: name
+    } do
       SystemDb.insert_workflow_status(%{config | executor_id: "exec-no-lease"}, %{
         workflow_id: "wf-orphan-no-lease",
         status: :pending,
@@ -85,7 +51,7 @@ defmodule Dbos.ClusterTest do
         inputs: [1, 2]
       })
 
-      OrphanSweep.sweep_now(name)
+      LeaseSweep.sweep_now(name)
 
       wait_until(fn ->
         {:ok, status} = SystemDb.get_workflow_status(config, "wf-orphan-no-lease")
@@ -93,7 +59,7 @@ defmodule Dbos.ClusterTest do
       end)
     end
 
-    test "reclaims a PENDING row whose executor's lease has expired", %{
+    test "a pending workflow whose executor's lease has expired is picked up and finishes", %{
       config: config,
       name: name
     } do
@@ -107,7 +73,7 @@ defmodule Dbos.ClusterTest do
         inputs: [1, 2]
       })
 
-      OrphanSweep.sweep_now(name)
+      LeaseSweep.sweep_now(name)
 
       wait_until(fn ->
         {:ok, status} = SystemDb.get_workflow_status(config, "wf-orphan-expired")
@@ -115,7 +81,7 @@ defmodule Dbos.ClusterTest do
       end)
     end
 
-    test "a live lease makes a row immune even when it is hours stale by updated_at — the regression test for the old staleness signal",
+    test "a workflow untouched for hours stays with its executor while that executor's lease is live",
          %{config: config, name: name} do
       hours_stale = System.os_time(:millisecond) - :timer.hours(6)
 
@@ -129,12 +95,43 @@ defmodule Dbos.ClusterTest do
         updated_at: hours_stale
       })
 
-      OrphanSweep.sweep_now(name)
+      LeaseSweep.sweep_now(name)
       Process.sleep(50)
 
       {:ok, status} = SystemDb.get_workflow_status(config, "wf-alive-but-stale")
       assert status.status == :pending
       assert status.executor_id == "exec-alive"
+    end
+  end
+
+  defp start_engine(extra_opts) do
+    name = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
+
+    opts =
+      [
+        name: name,
+        db: {Dbos.DB.Postgrex, Dbos.TestConn},
+        executor_id: "exec-#{System.unique_integer([:positive])}",
+        migrations: :skip,
+        workflows: []
+      ] ++ extra_opts
+
+    start_supervised!({Dbos.Supervisor, opts}, id: name)
+    Dbos.Recovery.await_boot_recovery(name)
+    name
+  end
+
+  describe "engine configuration" do
+    test "an engine sweeps for expired leases by default" do
+      name = start_engine([])
+
+      assert Process.whereis(LeaseSweep.process_name(name)) != nil
+    end
+
+    test "an engine started with the sweep disabled does not sweep" do
+      name = start_engine(lease_sweep: [enabled: false])
+
+      assert Process.whereis(LeaseSweep.process_name(name)) == nil
     end
   end
 

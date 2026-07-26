@@ -8,7 +8,7 @@
 # Node affinity falls out of workflow_status.executor_id, unchanged by parking: a parked wait's
 # row is PENDING under this engine's own executor id, so a node that dies with parked waits
 # outstanding leaves behind ordinary PENDING rows that Dbos.Recovery's boot scan and
-# Dbos.Cluster.OrphanSweep's lease-expiry reclaim already know how to pick up — parking invents no
+# Dbos.LeaseSweep's lease-expiry reclaim already know how to pick up — parking invents no
 # new recovery path. That path only runs on a full engine restart or a live dead-executor reclaim,
 # though; it does not fire when only this GenServer crashes and its supervisor restarts it in
 # place, so the table itself is owned by Dbos.Waits.Table, a separate, sibling process that

@@ -19,8 +19,7 @@ defmodule Dbos.Supervisor do
   workflow modules automatically — see below), `:workflows` (a list of modules or explicit
   `{name, {module, function, arity}}` entries, additive with `:otp_app`), `:queues` (a list of
   `Dbos.Queue`, default `[]`), `:migrations` (`:verify` (default), `:create_if_absent`, or
-  `:skip`), `:max_recovery_attempts` (default `3`), `:testing` (see below), `:cluster` (see
-  below).
+  `:skip`), `:max_recovery_attempts` (default `3`), `:testing` (see below).
 
   `:otp_app` — resolves to every module the named OTP application has compiled
   (`:application.get_key/2`), keeping the ones that export `__dbos_workflows__/0` (every module
@@ -37,7 +36,7 @@ defmodule Dbos.Supervisor do
   `:manual` runs `Dbos.start/3` the same way but leaves an `Dbos.enqueue/3`'d row untouched until
   `Dbos.Testing.drain_queue/2` or `Dbos.Testing.drain_all/1` claims it. Either mode starts none
   of `Dbos.Notifications`, the wait parking table, the executor lease, the queue runners,
-  `Dbos.Scheduler`, the boot recovery scan, `Dbos.Cluster`, or `Dbos.AdminServer` — the point is
+  `Dbos.Scheduler`, the boot recovery scan, the lease sweep, or `Dbos.AdminServer` — the point is
   removing every
   process that could touch the database outside the caller's own connection, which is what makes
   these modes compatible with `Ecto.Adapters.SQL.Sandbox`. See `guides/tutorials/testing.md`.
@@ -48,21 +47,15 @@ defmodule Dbos.Supervisor do
   `:notifications_conn_opts` overrides the Postgrex connection options used for that dedicated
   connection (otherwise derived from the Ecto repo's own config, when `:db` is `Dbos.DB.Ecto`).
 
-  `:lease` opts (see `docs/clustering.md`): `:ttl_ms` (default `60_000`) — how long this
+  `:lease` opts (see `docs/executor-leases.md`): `:ttl_ms` (default `60_000`) — how long this
   executor's lease stays valid without a renewal; `:renew_interval_ms` (default `10_000`) — how
   often it renews. The lease is written at boot, before recovery runs, and is the sole authority
-  the orphan sweep consults to decide an executor is dead.
+  the lease sweep consults to decide an executor is dead.
 
-  `:orphan_sweep` opts, on by default: `:enabled` (default `true`) — periodically reclaims
+  `:lease_sweep` opts, on by default: `:enabled` (default `true`) — periodically reclaims
   `PENDING` rows whose executor's lease has expired or is entirely absent; `:interval_ms` (default
-  `300_000`) — how often it scans. Runs with no dependency on `:cluster` or distributed Erlang.
-
-  `:cluster` opts, off by default (see `docs/clustering.md`): `:enabled` — joins a `:pg` group and
-  triggers an immediate orphan sweep pass on `:nodedown`, a latency optimisation only (the sweep
-  still requires an expired lease before reclaiming anything); `:batch_size` (default `50`) — how
-  many rows one reclaim pass claims; `:group` (default `Dbos.Cluster.Group`) — the shared `:pg`
-  group name every engine that should see each other's roster must agree on (several engines in
-  one deployment sharing the default is what makes the node-to-executor-ids mapping many-to-one).
+  `30_000`) — how often it scans; `:batch_size` (default `50`) — how many rows one reclaim pass
+  claims.
 
   `:admin_server` opts, off by default: `:enabled` — starts `Dbos.AdminServer`; `:port` (default
   `3001`). `:scheduler_poll_interval_ms` (default `30_000`) controls how often `Dbos.Scheduler`
@@ -87,8 +80,7 @@ defmodule Dbos.Supervisor do
     workflows = Enum.flat_map(workflow_entries, &normalize_workflow_entry/1)
     schedules = Enum.flat_map(workflow_entries, &collect_schedules/1)
 
-    cluster_opts = Keyword.get(opts, :cluster, [])
-    orphan_sweep_opts = Keyword.get(opts, :orphan_sweep, [])
+    lease_sweep_opts = Keyword.get(opts, :lease_sweep, [])
     lease_opts = Keyword.get(opts, :lease, [])
     testing = fetch_testing_mode!(opts)
     queues = [internal_queue() | Keyword.get(opts, :queues, [])]
@@ -101,11 +93,9 @@ defmodule Dbos.Supervisor do
       executor_id: resolve_executor_id(opts),
       application_version: resolve_application_version(opts, workflows),
       max_recovery_attempts: Keyword.get(opts, :max_recovery_attempts, 3),
-      cluster_enabled: Keyword.get(cluster_opts, :enabled, false),
-      cluster_group: Keyword.get(cluster_opts, :group, Dbos.Cluster.Group),
-      reclaim_batch_size: Keyword.get(cluster_opts, :batch_size, 50),
-      orphan_sweep_enabled: Keyword.get(orphan_sweep_opts, :enabled, true),
-      orphan_sweep_interval_ms: Keyword.get(orphan_sweep_opts, :interval_ms, 300_000),
+      reclaim_batch_size: Keyword.get(lease_sweep_opts, :batch_size, 50),
+      lease_sweep_enabled: Keyword.get(lease_sweep_opts, :enabled, true),
+      lease_sweep_interval_ms: Keyword.get(lease_sweep_opts, :interval_ms, 30_000),
       lease_ttl_ms: Keyword.get(lease_opts, :ttl_ms, 60_000),
       lease_renew_interval_ms: Keyword.get(lease_opts, :renew_interval_ms, 10_000),
       notifications: Keyword.get(opts, :notifications, :listen),
@@ -155,8 +145,7 @@ defmodule Dbos.Supervisor do
       {Dbos.Scheduler,
        name: name, schedules: schedules, poll_interval_ms: config.scheduler_poll_interval_ms}
     ] ++
-      cluster_children(config) ++
-      orphan_sweep_children(config) ++
+      lease_sweep_children(config) ++
       admin_server_children(name, Keyword.get(opts, :admin_server, []))
   end
 
@@ -211,19 +200,10 @@ defmodule Dbos.Supervisor do
     end
   end
 
-  defp cluster_children(%Config{cluster_enabled: false}), do: []
+  defp lease_sweep_children(%Config{lease_sweep_enabled: false}), do: []
 
-  defp cluster_children(%Config{cluster_enabled: true, name: name}) do
-    [
-      {Dbos.Cluster, name: name},
-      {Dbos.Cluster.NodeWatcher, name: name}
-    ]
-  end
-
-  defp orphan_sweep_children(%Config{orphan_sweep_enabled: false}), do: []
-
-  defp orphan_sweep_children(%Config{orphan_sweep_enabled: true, name: name}),
-    do: [{Dbos.Cluster.OrphanSweep, name: name}]
+  defp lease_sweep_children(%Config{lease_sweep_enabled: true, name: name}),
+    do: [{Dbos.LeaseSweep, name: name}]
 
   defp resolve_executor_id(opts) do
     Keyword.get(opts, :executor_id) || System.get_env("DBOS__VMID") || node_executor_id()

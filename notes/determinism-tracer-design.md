@@ -180,7 +180,7 @@ scratch on mismatch. The version is the `boundary` package version, frozen into 
 own compile time.
 
 **The references manifest is not versioned.** Only `--force` clears it. This is a real gap and
-we should not copy it (§7.3).
+we should not copy it (§6.3).
 
 ### 2.6 Dependencies and external modules
 
@@ -331,6 +331,11 @@ call site.
 | `{:remote_macro, ...}` / `{:imported_macro, ...}` | recorded, flagged `mode: :compile` |
 | `{:on_module, bytecode, _}` | dispatched off-process; abstract-code scan for special forms (§3.4) |
 | everything else | `initialize_module(env.module)` only |
+
+Line attribution comes from `meta[:line]` alone. Inside a re-injected workflow body `env.line`
+is the `defmodule` line, so `boundary`'s `Keyword.get(meta, :line, env.line)` fallback would
+place every such diagnostic at line 1 (§7, assumption 2). An event with no `:line` in `meta` is
+recorded with `line: nil` and reported at the entry point's declared line.
 
 Captures matter and come for free: `&helper/1` emits `local_function`, `&Mod.f/1` emits
 `remote_function`. A function value passed as an argument is therefore an edge. This is a
@@ -522,7 +527,7 @@ Invalidation cases:
 | Nothing changed | `flush/1` skips the `tab2file` write entirely. |
 | Entry point removed from a module | Entry rows are keyed by module and cleared by the same `initialize_module/1`. |
 | `mix compile --force` | `--force` reaches `State.start_link/1`, which starts with empty tables. |
-| Checker rules changed (dbos upgraded) | §7.3 — the hard one. |
+| Checker rules changed (dbos upgraded) | §6.3 — the hard one. |
 
 Table layout, all `duplicate_bag`, all keyed by **module** so one `:ets.delete/2` invalidates
 everything about it:

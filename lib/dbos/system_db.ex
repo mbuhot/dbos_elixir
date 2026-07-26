@@ -551,7 +551,7 @@ defmodule Dbos.SystemDb do
 
   @doc """
   Writes or renews `config.executor_id`'s lease, expiring `ttl_ms` from now. The sole authority
-  `Dbos.Cluster.OrphanSweep` consults for automatic reclaim: renewed over the same connection this
+  `Dbos.LeaseSweep` consults for automatic reclaim: renewed over the same connection this
   executor needs to checkpoint, so an executor that cannot renew also cannot write conflicting
   checkpoints.
   """
@@ -626,7 +626,7 @@ defmodule Dbos.SystemDb do
 
   @doc """
   The distinct `executor_id`s among `PENDING` rows whose lease has expired, or who have never
-  renewed one at all, for `Dbos.Cluster.OrphanSweep`. `updated_at` plays no part: a workflow
+  renewed one at all, for `Dbos.LeaseSweep`. `updated_at` plays no part: a workflow
   legitimately sitting untouched for days in a durable sleep or `recv_message` is not a signal
   about its executor's liveness.
   """

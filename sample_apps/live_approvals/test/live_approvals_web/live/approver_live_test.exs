@@ -18,7 +18,7 @@ defmodule LiveApprovalsWeb.ApproverLiveTest do
   defp resume_review(engine, request) do
     await_decision_delivered(engine, request.id)
     simulate_lost_process(engine, request.id)
-    assert Dbos.Testing.recover_pending(engine: engine) == 1
+    assert Dbos.Recovery.recover_pending(engine) == [request.id]
     assert drain_reviews(engine) == 1
   end
 

@@ -1,4 +1,4 @@
-# Clustering: executor leases and dead-executor recovery
+# Executor leases and dead-executor recovery
 
 Run several engines against one system database and any of them can die mid-workflow. The
 survivors need a rule for deciding when a `PENDING` row's owner is gone and its work may be picked
@@ -16,22 +16,22 @@ executor is alive.
 
 ```mermaid
 flowchart LR
-    A["lease heartbeat renews dbos.executor_leases"] --> B["orphan sweep scans on a timer"]
-    C[":nodedown"] -.schedules a sweep at lease expiry.-> B
-    B --> D{"lease expired or absent?"}
-    D -- yes --> E["Dbos.Recovery.reclaim/3"]
-    D -- no --> F["left alone"]
+    A["lease heartbeat renews dbos.executor_leases"] --> B["lease sweep scans on a timer"]
+    B --> C{"lease expired or absent?"}
+    C -- yes --> D["Dbos.Recovery.reclaim/3"]
+    C -- no --> E["left alone"]
 ```
 
-| Piece | Started | Role |
-|---|---|---|
-| Lease heartbeat | always | Writes this executor's lease at boot, before recovery runs, and renews it every `lease.renew_interval_ms`. Graceful shutdown expires the lease immediately, so a replacement does not wait out the TTL; a killed node's lease expires on its own. |
-| Orphan sweep | by default | Scans every `orphan_sweep.interval_ms` for `PENDING` rows whose executor's lease has expired or is absent, and reclaims them. Needs only the system database — no `:pg`, no distributed Erlang. |
-| Node watcher | with `cluster.enabled` | Tracks which executor ids live on which node via a `:pg` group. On `:nodedown` it schedules a sweep for the instant the departed executors' leases expire, bringing reclaim forward from "TTL plus whatever is left of the sweep interval" to roughly the TTL. |
+| Piece | Role |
+|---|---|
+| Lease heartbeat | Writes this executor's lease at boot, before recovery runs, and renews it every `lease.renew_interval_ms`. Graceful shutdown expires the lease immediately, so a replacement does not wait out the TTL; a killed node's lease expires on its own. |
+| Lease sweep | Scans every `lease_sweep.interval_ms` for `PENDING` rows whose executor's lease has expired or is absent, and reclaims them. |
 
-A `:nodedown` never shortens a lease. Two BEAM nodes losing sight of each other says nothing about
-whether either can still reach Postgres; a netsplit therefore waits out the lease TTL, and neither
-side evicts the other.
+Both need only the system database. Nothing here uses distributed Erlang, so a fleet of pods that
+never see each other on the BEAM recovers exactly like a connected cluster.
+
+Worst-case detection latency is `lease.ttl_ms + lease_sweep.interval_ms` — 90 seconds on the
+defaults, 75 on average.
 
 ## Configuration
 
@@ -40,23 +40,19 @@ side evicts the other.
  name: MyApp.Dbos,
  db: {Dbos.DB.Ecto, MyApp.Repo},
  lease: [ttl_ms: 60_000, renew_interval_ms: 10_000],
- orphan_sweep: [enabled: true, interval_ms: 300_000],
- cluster: [enabled: true, batch_size: 50]}
+ lease_sweep: [enabled: true, interval_ms: 30_000, batch_size: 50]}
 ```
 
 | Option | Default | What it controls |
 |---|---|---|
 | `lease.ttl_ms` | `60_000` | How long a lease stays valid without a renewal. |
 | `lease.renew_interval_ms` | `10_000` | How often it renews — keep it a small fraction of the TTL so a couple of missed renewals are survivable. |
-| `orphan_sweep.enabled` | `true` | The lease-expiry scan. |
-| `orphan_sweep.interval_ms` | `300_000` | How often the scan runs. |
-| `cluster.enabled` | `false` | Joins a `:pg` group and schedules a sweep at lease expiry on `:nodedown`. A latency optimisation. |
-| `cluster.batch_size` | `50` | Rows one reclaim pass claims. |
-| `cluster.group` | `Dbos.Cluster.Group` | The `:pg` group name every engine that should see each other's roster must agree on. |
+| `lease_sweep.enabled` | `true` | The lease-expiry scan. |
+| `lease_sweep.interval_ms` | `30_000` | How often the scan runs. |
+| `lease_sweep.batch_size` | `50` | Rows one reclaim pass claims. |
 
-The sweep runs whether or not `cluster:` is enabled, which is what keeps a Kubernetes-style
-deployment working: `DBOS__VMID` there is typically a pod name that changes every deploy, so the
-old pod's `PENDING` rows are only ever recovered by a lease-driven sweep.
+`DBOS__VMID` in a Kubernetes-style deployment is typically a pod name that changes every deploy, so
+the old pod's `PENDING` rows are recovered by the sweep once its lease lapses.
 
 ## Capability-aware reclaim
 
@@ -99,6 +95,6 @@ operator cannot make an engine run code it does not have.
 
 | Concern | Detail |
 |---|---|
-| Cost | One lease process and one sweep process per engine; two more with `cluster.enabled`. One `INSERT ... ON CONFLICT` per renewal interval, and one query per sweep interval, independent of workflow count. |
+| Cost | One lease process and one sweep process per engine. One `INSERT ... ON CONFLICT` per renewal interval, and one sweep query per sweep interval. The sweep query reads `PENDING` rows through the `idx_workflow_status_pending` partial index and joins the one-row-per-executor lease table, so it scales with in-flight work, not with history. |
 | Stale local timers | A workflow parked in `Dbos.sleep/1`/`recv_message/2` leaves a timer on its original executor. When it fires, the redispatch proceeds only if the row's `executor_id` still matches that engine, so a reclaimed row is never run twice. |
 | Partition risk | A live lease makes a row immune to reclaim, so only a node that has stopped renewing loses its rows. The case a lease cannot close is a wedged node that keeps renewing. `workflow_status.owner_xid` is the safety net there: a checkpoint written under a different owner is detected as a mismatch. It makes a double execution visible without preventing it. |

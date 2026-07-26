@@ -45,15 +45,13 @@ every item lives in the rest of the guides.
 
 ## Leases and dead-executor recovery
 
-On by default (`orphan_sweep: [enabled: true]`): any `PENDING` workflow whose executor's lease has
+On by default (`lease_sweep: [enabled: true]`): any `PENDING` workflow whose executor's lease has
 expired or is absent is reclaimed and redispatched.
 
 - [ ] Review `lease.ttl_ms` (default `60_000`) and `lease.renew_interval_ms` (default `10_000`)
       against how long you can tolerate a dead instance's workflows sitting idle.
-- [ ] Review `orphan_sweep.interval_ms` (default `300_000`), the scan cadence.
-- [ ] Decide on `cluster.enabled` (off by default). It joins a `:pg` group and triggers an
-      immediate sweep on `:nodedown`, shortening detection latency. The sweep still requires an
-      expired lease, so correctness is unchanged either way.
+- [ ] Review `lease_sweep.interval_ms` (default `30_000`), the scan cadence. Worst-case detection
+      is the TTL plus this interval; each pass is one indexed query over `PENDING` rows.
 - [ ] A `DBOS__VMID` that changes every deploy is handled by the lease alone: the old instance's
       lease expires once it stops renewing, and its `PENDING` rows become reclaimable.
 

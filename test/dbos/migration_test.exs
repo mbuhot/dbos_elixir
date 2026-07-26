@@ -78,6 +78,17 @@ defmodule Dbos.MigrationTest do
     assert extension_version(prefix) == Migrator.expected_extension_version()
   end
 
+  test "raises a message naming ecto_sql when Ecto.Migration is not loaded" do
+    error =
+      assert_raise RuntimeError, fn ->
+        Dbos.Migration.ensure_ecto_migration_available!(false)
+      end
+
+    assert error.message =~ "Ecto.Migration"
+    assert error.message =~ "ecto_sql"
+    assert error.message =~ "mix deps.compile dbos --force"
+  end
+
   defp migrate_up do
     Ecto.Migrator.up(Repo, next_version(), MigrationFixture, log: false)
   end

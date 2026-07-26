@@ -54,7 +54,7 @@ erDiagram
 | `application_versions` | Every distinct `application_version` string this deployment has registered, with a timestamp. |
 | `workflow_schedules` | One row per cron-scheduled workflow declaration (`schedule:` on `defworkflow`), plus its `last_fired_at` catch-up floor. |
 | `queues` | One row per declared `Dbos.Queue`'s persisted configuration — concurrency, rate limit, partitioning. |
-| `executor_leases` | One row per executor: `lease_expires_epoch_ms`, `renewed_at_epoch_ms`, and the node it runs on. The reclaim authority described in `docs/clustering.md`. |
+| `executor_leases` | One row per executor: `lease_expires_epoch_ms`, `renewed_at_epoch_ms`, and the node it runs on. The reclaim authority described in `docs/executor-leases.md`. |
 | `dbos_migrations` | Version marker for the base schema. |
 | `extension_migrations` | Version marker for the tables this engine adds beyond the base schema. |
 

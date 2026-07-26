@@ -5,10 +5,10 @@
 # updated_at staleness plays no part — a workflow legitimately parked for days in Dbos.sleep/1 or
 # recv_message/2 says nothing about whether its executor is alive.
 #
-# Independent of :pg, distributed Erlang, and Dbos.Cluster: it needs only the system database, so
-# it covers single-node-per-deployment setups (a Kubernetes pod whose identity changes every
-# deploy) exactly as well as a clustered one. On by default (orphan_sweep: [enabled: true]).
-defmodule Dbos.Cluster.OrphanSweep do
+# Needs only the system database, so it covers a single-node-per-deployment setup (a Kubernetes
+# pod whose identity changes every deploy) exactly as well as a multi-node one. On by default
+# (lease_sweep: [enabled: true]).
+defmodule Dbos.LeaseSweep do
   @moduledoc false
 
   use GenServer
@@ -16,14 +16,14 @@ defmodule Dbos.Cluster.OrphanSweep do
   alias Dbos.Recovery
   alias Dbos.SystemDb
 
-  @doc "Starts the orphan sweep for the engine named `opts[:name]`."
+  @doc "Starts the lease sweep for the engine named `opts[:name]`."
   def start_link(opts) do
     engine_name = Keyword.fetch!(opts, :name)
     GenServer.start_link(__MODULE__, engine_name, name: process_name(engine_name))
   end
 
-  @doc "The name this engine's orphan sweep process is registered under."
-  def process_name(engine_name), do: Module.concat(engine_name, Cluster.OrphanSweep)
+  @doc "The name this engine's lease sweep process is registered under."
+  def process_name(engine_name), do: Module.concat(engine_name, LeaseSweep)
 
   @doc "Runs one sweep pass immediately, outside the timer. Tests use this to avoid waiting on the interval."
   def sweep_now(engine_name), do: sweep(engine_name)
@@ -42,7 +42,7 @@ defmodule Dbos.Cluster.OrphanSweep do
   end
 
   defp schedule_sweep(engine_name) do
-    interval_ms = Dbos.config(engine_name).orphan_sweep_interval_ms
+    interval_ms = Dbos.config(engine_name).lease_sweep_interval_ms
     Process.send_after(self(), :sweep, interval_ms)
   end
 

@@ -42,6 +42,7 @@ if Code.ensure_loaded?(Ecto) do
 
     defp generate(repo, args) do
       {_opts, _rest} = OptionParser.parse!(args, strict: @switches, aliases: @aliases)
+      ensure_dbos_migration_compiled!()
 
       path = Path.join(source_repo_priv(repo), "migrations")
       unless File.dir?(path), do: create_directory(path)
@@ -54,6 +55,20 @@ if Code.ensure_loaded?(Ecto) do
 
         [existing | _rest] ->
           Mix.raise("migration can't be created, dbos is already installed by #{existing}")
+      end
+    end
+
+    defp ensure_dbos_migration_compiled! do
+      unless Code.ensure_loaded?(Dbos.Migration) do
+        Mix.raise("""
+        Dbos.Migration is not compiled, so the migration this task generates would fail at \
+        runtime. This usually means :dbos compiled before :ecto_sql during `mix deps.compile`. \
+        Run:
+
+            mix deps.compile dbos --force
+
+        then retry this task.
+        """)
       end
     end
 

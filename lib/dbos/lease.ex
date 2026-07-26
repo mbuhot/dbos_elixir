@@ -2,7 +2,7 @@
 # Dbos.Config.lease_renew_interval_ms — a small fraction of Dbos.Config.lease_ttl_ms, so a couple
 # of missed renewals are survivable. Renewed over the same connection this executor checkpoints
 # through, so a node that cannot renew also cannot write conflicting checkpoints: this is the
-# property that makes the lease Dbos.Cluster.OrphanSweep's sole authority for automatic reclaim.
+# property that makes the lease Dbos.LeaseSweep's sole authority for automatic reclaim.
 #
 # Writes the first lease synchronously in init/1, before Dbos.Recovery starts, so this engine's
 # own PENDING rows are never briefly lease-less while it boots. A renewal failure is logged and

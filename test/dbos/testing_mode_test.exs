@@ -12,6 +12,7 @@ defmodule Dbos.TestingModeTest do
 
   alias Dbos.Notifications
   alias Dbos.Queue
+  alias Dbos.Recovery
   alias Dbos.SampleWorkflows
   alias Dbos.SystemDb
   alias Dbos.Testing
@@ -60,8 +61,7 @@ defmodule Dbos.TestingModeTest do
       refute Process.whereis(Module.concat(engine, Recovery))
       refute Process.whereis(Dbos.Scheduler.process_name(engine))
       refute Process.whereis(Module.concat(engine, Queue.Sup))
-      refute Process.whereis(Dbos.Cluster.OrphanSweep.process_name(engine))
-      refute Process.whereis(Dbos.Cluster.process_name(engine))
+      refute Process.whereis(Dbos.LeaseSweep.process_name(engine))
       refute Process.whereis(WorkflowSup.process_name(engine))
       assert Process.whereis(Module.concat(engine, Registry))
     end
@@ -123,7 +123,7 @@ defmodule Dbos.TestingModeTest do
         [workflow_id]
       )
 
-      assert Testing.recover_pending(engine: engine) == 1
+      assert Recovery.recover_pending(engine) == [workflow_id]
 
       assert :ets.lookup_element(table, :padding_runs, 2) == 3
 
@@ -242,9 +242,9 @@ defmodule Dbos.TestingModeTest do
       assert {:ok, 4} = Dbos.await(handle_b, engine: engine)
     end
 
-    test "recover_pending is a no-op-safe call that returns 0 when there is nothing pending" do
+    test "recover_pending is a no-op-safe call that returns an empty list when there is nothing pending" do
       engine = start_engine(testing: :manual)
-      assert Testing.recover_pending(engine: engine) == 0
+      assert Recovery.recover_pending(engine) == []
     end
 
     test "send_message before draining lets recv_message consume an already-pending message" do

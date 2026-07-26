@@ -37,17 +37,6 @@ defmodule Dbos.Testing do
     |> Enum.reduce(0, fn queue_name, total -> total + drain_queue(queue_name, opts) end)
   end
 
-  @doc """
-  Runs a synchronous recovery pass for `opts[:engine]` (default `Dbos`): every `PENDING`
-  workflow this executor owns is redispatched in the caller. Returns how many it acted on.
-  """
-  def recover_pending(opts \\ []) do
-    opts
-    |> Keyword.get(:engine, Dbos)
-    |> Dbos.Recovery.recover_pending()
-    |> length()
-  end
-
   defp engine_config(opts), do: opts |> Keyword.get(:engine, Dbos) |> Dbos.config()
 
   defp fetch_queue!(config, queue_name) do
