@@ -37,6 +37,10 @@ defmodule Dbos.Messaging do
   `send` lands between the check and the registration. Raises `Dbos.RecvConflictError` if
   another `recv` is already registered for this `(workflow_id, topic)`, or
   `Dbos.RecvTimeoutError` if the deadline passes with nothing consumed.
+
+  Under an `:inline`/`:manual` testing-mode engine, nothing pending is the deadline having
+  passed: no process exists to deliver a message later, so the outcome is already decided and
+  `Dbos.RecvTimeoutError` is raised without waiting out `timeout_ms`.
   """
   def recv_message(config, topic, timeout_ms) do
     topic = topic || null_topic()
@@ -58,14 +62,8 @@ defmodule Dbos.Messaging do
 
   defp do_recv(config, workflow_id, topic, step_id, _sleep_step_id, _timeout_ms)
        when config.testing in [:inline, :manual] do
-    if SystemDb.notification_pending?(config, workflow_id, topic) do
-      consume_recv(config, workflow_id, topic, step_id, false)
-    else
-      raise Dbos.TestingModeWaitError,
-        workflow_id: workflow_id,
-        operation: "recv_message",
-        topic_or_key: topic
-    end
+    timed_out? = not SystemDb.notification_pending?(config, workflow_id, topic)
+    consume_recv(config, workflow_id, topic, step_id, timed_out?)
   end
 
   defp do_recv(config, workflow_id, topic, step_id, sleep_step_id, timeout_ms) do

@@ -111,6 +111,14 @@ defmodule Dbos.SampleWorkflows do
 
   def receiver(topic, timeout_ms), do: Dbos.recv_message(topic, timeout_ms)
 
+  @doc "Takes its own branch when nothing arrives, the way a workflow with an expiry deadline does."
+  def receiver_with_expiry(topic, timeout_ms) do
+    Dbos.recv_message(topic, timeout_ms)
+    :confirmed
+  rescue
+    Dbos.RecvTimeoutError -> :expired
+  end
+
   def sleeper(ms) do
     Dbos.sleep(ms)
     :woke

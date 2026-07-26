@@ -23,6 +23,7 @@ defmodule Dbos.TestingModeTest do
     {"three_steps/1", {SampleWorkflows, :three_steps, 1}},
     {"sleeper/1", {SampleWorkflows, :sleeper, 1}},
     {"receiver/2", {SampleWorkflows, :receiver, 2}},
+    {"receiver_with_expiry/2", {SampleWorkflows, :receiver_with_expiry, 2}},
     {"counted_steps_then_sleep/3", {SampleWorkflows, :counted_steps_then_sleep, 3}},
     {"stream_writer/2", {SampleWorkflows, :stream_writer, 2}},
     {"stream_self_reader/2", {SampleWorkflows, :stream_self_reader, 2}}
@@ -142,14 +143,22 @@ defmodule Dbos.TestingModeTest do
       assert {:ok, 3} = Dbos.await(handle, engine: engine)
     end
 
-    test "recv_message with nothing pending raises immediately instead of blocking" do
+    test "recv_message with nothing pending times out immediately instead of blocking" do
       engine = start_engine(testing: :inline)
 
       {:ok, handle} = Dbos.start("receiver/2", ["topic", 5_000], engine: engine)
 
-      assert {:error, %Dbos.TestingModeWaitError{} = error} = Dbos.await(handle, engine: engine)
-      assert error.operation == "recv_message"
-      assert Exception.message(error) =~ "manual"
+      assert {:error, %Dbos.RecvTimeoutError{} = error} = Dbos.await(handle, engine: engine)
+      assert error.topic == "topic"
+    end
+
+    test "a workflow that handles its own expiry takes that branch" do
+      engine = start_engine(testing: :inline)
+
+      {:ok, handle} =
+        Dbos.start("receiver_with_expiry/2", ["decision", 30_000], engine: engine)
+
+      assert {:ok, :expired} = Dbos.await(handle, engine: engine)
     end
 
     test "writing and closing a stream completes, and the items read back in order" do

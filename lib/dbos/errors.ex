@@ -234,9 +234,12 @@ end
 
 defmodule Dbos.TestingModeWaitError do
   @moduledoc """
-  Raised when a durable wait (`recv_message/2`, `get_event/4`) has nothing pending under an
+  Raised when a durable wait (`get_event/4`, `read_stream/3`) has nothing pending under an
   `:inline`/`:manual` testing-mode engine — one with no background process able to wake it
   later.
+
+  `recv_message/2` always carries a deadline, so nothing pending there is a timeout rather than
+  an undefined outcome, and it raises `Dbos.RecvTimeoutError` instead.
   """
 
   defexception [:workflow_id, :operation, :topic_or_key]
@@ -248,7 +251,7 @@ defmodule Dbos.TestingModeWaitError do
         topic_or_key: topic_or_key
       }) do
     "workflow #{workflow_id}: #{operation} has nothing pending for #{inspect(topic_or_key)} " <>
-      "under a testing-mode engine; send the message or set the event before running the " <>
+      "under a testing-mode engine; set the event or write the stream before running the " <>
       "workflow, or enqueue it and drain with Dbos.Testing under :manual mode"
   end
 end

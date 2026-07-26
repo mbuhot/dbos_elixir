@@ -114,9 +114,13 @@ to release it.
 
 ## Testing an approval flow: send before drain, then run
 
-Under `:inline`/`:manual`, `recv_message/2` and `get_event/4` consume whatever is already there,
-and raise `Dbos.TestingModeWaitError` immediately when nothing is pending. So enqueue, send, then
-drain:
+Under `:inline`/`:manual`, `recv_message/2` and `get_event/4` consume whatever is already there.
+Nothing is running to deliver a message later, so `recv_message/2` with nothing pending is the
+deadline having already passed: it raises `Dbos.RecvTimeoutError` at once rather than waiting out
+its timeout, and a workflow that handles expiry takes that branch. `get_event/4` raises
+`Dbos.TestingModeWaitError` when the key is unset.
+
+To drive the message through instead, enqueue, send, then drain:
 
 ```elixir
 test "an order waits for manual approval before shipping", %{engine: engine} do
