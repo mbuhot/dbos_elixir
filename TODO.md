@@ -26,13 +26,3 @@ has not published capabilities suppresses the report rather than producing false
 **Phases 2-5 remain**: the `ex_workflow_version` column, the workflow-skeleton digest, the
 per-workflow reclaim predicate, and prefix verification with `Dbos.Recovery.adopt/3`.
 
-## Whole-application determinism checker
-
-`Mix.Tasks.Compile.Dbos` ships every phase of `notes/determinism-tracer-design.md`: the
-tracer, the ETS state and manifest, entry points from the macros, forward BFS with witness
-chains, the `:on_module` abstract-code scan for `receive`, `@dbos_deterministic` and the project
-`trusted:` list. The Credo check is gone.
-
-Two gaps are recorded in §8 of the design note: this repo cannot trace a compile run that also
-recompiles the tracer's own modules, and a stale or missing manifest under-reports until the next
-full recompile.
