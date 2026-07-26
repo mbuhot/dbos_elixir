@@ -99,7 +99,7 @@ Three layers, sharing one banned-construct table, so they always agree.
 | Layer | Sees | On a violation |
 |---|---|---|
 | The `defworkflow`/`defstep`/`deftransaction` macros | The literal `do` block handed to the macro | `CompileError` naming the call, its file and line, and the fix |
-| `Mix.Tasks.Compile.Dbos` | Every function in the application, reached forward from every workflow, step and transaction body | A compiler warning carrying the whole chain from the entry point to the banned call |
+| `Mix.Tasks.Compile.Dbos` | Every function in the application, reached forward from every workflow, step and transaction body, including the `receive` forms in their compiled abstract code | A compiler warning carrying the whole chain from the entry point to the banned construct |
 | Code review | `self()`, `node()`, ETS reads, mutable `Application.get_env` values | Guidance |
 
 ### The whole-application compiler
@@ -116,8 +116,10 @@ end
 ```
 
 A compilation tracer records a call graph of resolved `{module, function, arity}` nodes while
-`compile.elixir` runs, and the compiler then walks it forward from each entry point. A finding
-reads:
+`compile.elixir` runs, and the compiler then walks it forward from each entry point. A `receive`
+is a special form and raises no trace event, so each compiled module's abstract code is also
+scanned for one; an occurrence becomes an edge in the same graph and is reported with the same
+chain. A finding reads:
 
 ```
 warning: nondeterministic call reachable from a workflow body
@@ -170,6 +172,7 @@ reachable. Treat it as a large, cheap improvement in recall, and not as a guaran
 | A call through a variable module (`mod.fetch(id)`), protocol dispatch, a behaviour callback | Invisible |
 | A function value received as an argument and called | Invisible at the callee; the capture at the call site is followed |
 | A branch that never runs | Reported anyway |
+| A module compiled without debug info | Not scanned for `receive`; reported as a hint when a workflow reaches it |
 | Workflows defined in a compiled dependency | Not checked — their call graph belongs to another compile run |
 | A macro that expands to a banned call | Reported at the macro's line |
 

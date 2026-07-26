@@ -23,6 +23,13 @@ defmodule Dbos.Recovery do
   `t:decline_reason/0`. Each group logs one warning and emits one `[:dbos, :recovery, :declined]`
   event measuring `%{count: n}`, so a population no live executor can claim is a steady signal
   rather than silence.
+
+  ## Orphans
+
+  That report is local: it says what *this* executor declined. `orphans/1` answers the fleet-wide
+  question by joining `PENDING` rows against the capabilities every live executor publishes with
+  its lease, so a group it returns is one nothing currently deployed can pick up. `GET
+  /dbos-orphans` and `mix dbos.orphans` serve the same query.
   """
 
   use GenServer
@@ -43,6 +50,26 @@ defmodule Dbos.Recovery do
   claimable and another transaction held it.
   """
   @type decline_reason :: :name_not_registered | :version_mismatch | :locked_elsewhere
+
+  @typedoc """
+  Why no live executor can claim an orphaned group: the fleet holds no live lease at all, no live
+  executor advertises the workflow name, or some advertise the name but none at the row's
+  `application_version`.
+  """
+  @type orphan_reason :: :no_live_executors | :name_not_registered | :version_mismatch
+
+  @typedoc """
+  One `{name, application_version}` group of `PENDING` rows no live executor can claim, with why,
+  how many, how long the oldest has been waiting, and one id to look at.
+  """
+  @type orphan :: %{
+          name: String.t(),
+          application_version: String.t() | nil,
+          reason: orphan_reason(),
+          count: non_neg_integer(),
+          oldest_created_at_epoch_ms: integer(),
+          example_workflow_id: String.t()
+        }
 
   @doc "Starts recovery for the engine named `opts[:name]`, scanning once in a `handle_continue` so `start_link` returns promptly."
   def start_link(opts) do
@@ -95,6 +122,29 @@ defmodule Dbos.Recovery do
 
       queued_ids ++ ids
     end)
+  end
+
+  @doc """
+  Every group of `PENDING` workflows no live executor in the fleet can claim, newest question
+  answered against the capabilities each executor publishes with its lease.
+
+  Grouped by `{name, application_version}` rather than listed per row: the count is what tells an
+  operator how bad it is, the reason is what tells them which deploy fixes it, and both are
+  properties of the group. One example id per group is enough to look at a row;
+  `Dbos.Client.list/2` filtered by name and version enumerates the rest.
+
+  Emits one `[:dbos, :recovery, :orphaned]` event per group, measuring `%{count: n}`.
+
+  This is an operator-facing query, not part of any sweep: it scans the `PENDING` partial index
+  once per call and anti-joins the fleet-sized lease table.
+  """
+  @spec orphans(atom()) :: [orphan()]
+  def orphans(engine_name) do
+    config = Dbos.config(engine_name)
+
+    config
+    |> SystemDb.list_orphan_pending_workflow_groups()
+    |> Enum.map(&report_orphan_group(engine_name, &1))
   end
 
   @doc """
@@ -210,6 +260,33 @@ defmodule Dbos.Recovery do
       group.count
     )
   end
+
+  defp report_orphan_group(engine_name, group) do
+    reason = orphan_reason(group)
+
+    Telemetry.orphaned(
+      %{
+        engine: engine_name,
+        name: group.name,
+        row_version: group.application_version,
+        reason: reason
+      },
+      group.count
+    )
+
+    %{
+      name: group.name,
+      application_version: group.application_version,
+      reason: reason,
+      count: group.count,
+      oldest_created_at_epoch_ms: group.oldest_created_at_epoch_ms,
+      example_workflow_id: group.example_workflow_id
+    }
+  end
+
+  defp orphan_reason(%{live_executors: 0}), do: :no_live_executors
+  defp orphan_reason(%{name_advertised: true}), do: :version_mismatch
+  defp orphan_reason(%{name_advertised: false}), do: :name_not_registered
 
   defp decline_reason(%{claimable: true}, _registered_names), do: :locked_elsewhere
 

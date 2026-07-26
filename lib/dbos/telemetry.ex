@@ -37,6 +37,15 @@ defmodule Dbos.Telemetry do
   end
 
   @doc """
+  Reports one group of `PENDING` workflows no live executor in the fleet can claim:
+  `[:dbos, :recovery, :orphaned]`, measuring `%{count: n}`. Emitted once per
+  `{name, version, reason}` group per `Dbos.Recovery.orphans/1` call.
+  """
+  def orphaned(metadata, count) do
+    :telemetry.execute([:dbos, :recovery, :orphaned], %{count: count}, metadata)
+  end
+
+  @doc """
   Spans one blocking wait — sleep, recv, or get_event: `[:dbos, :wait, ...]`. `fun` returns
   `{result, outcome}` and `outcome` (`:resolved` or `:timeout`) is merged into the `:stop`
   metadata. A `Dbos.Waits.Parked` unwinding the wait stops the span with `outcome: :parked` and

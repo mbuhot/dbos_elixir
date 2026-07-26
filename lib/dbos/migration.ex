@@ -37,8 +37,8 @@ defmodule Dbos.Migration do
   the whole thing out from under them is not this module's call to make.
 
   `opts[:version]` selects which schema version to bring the database to (`up/1`) or back from
-  (`down/1`). Only one version exists today, so it currently has no effect; once a second
-  version exists, `up/1` is expected to apply every version's guarded section up to and
+  (`down/1`). It currently has no effect: `up/1` always goes to the latest. Once it is honoured,
+  `up/1` is expected to apply every version's guarded section up to and
   including the requested one (default: the latest), and `down/1` to remove every version's
   section back down to (excluding) the requested one — the same shape `Ecto.Migrator`'s own
   `:to`/`:to_exclusive` options take.
@@ -56,7 +56,10 @@ defmodule Dbos.Migration do
     {base_sql, extension_sql} = Migrator.schema_parts(config.schema)
 
     apply_part(config, "dbos_migrations", base_sql)
-    apply_part(config, "extension_migrations", extension_sql)
+
+    config
+    |> Migrator.pending_extension_sections(extension_sql)
+    |> Enum.each(fn {_version, sql} -> execute_statements(sql) end)
 
     :ok
   end
@@ -93,18 +96,19 @@ defmodule Dbos.Migration do
 
   defp apply_part(config, marker_table, sql) do
     case Migrator.current_version(config, marker_table) do
-      {:ok, _version} ->
-        :ok
-
-      {:error, :not_found} ->
-        sql
-        |> Migrator.statements()
-        |> Enum.each(fn statement ->
-          statement
-          |> without_concurrently()
-          |> Ecto.Migration.execute()
-        end)
+      {:ok, _version} -> :ok
+      {:error, :not_found} -> execute_statements(sql)
     end
+  end
+
+  defp execute_statements(sql) do
+    sql
+    |> Migrator.statements()
+    |> Enum.each(fn statement ->
+      statement
+      |> without_concurrently()
+      |> Ecto.Migration.execute()
+    end)
   end
 
   defp without_concurrently(statement) do

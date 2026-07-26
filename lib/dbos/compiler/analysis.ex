@@ -6,8 +6,9 @@ defmodule Dbos.Compiler.Analysis do
   body under the weaker process-handoff rule set. Descent stops at every other entry point, at
   `Dbos` engine internals, at anything annotated `@dbos_deterministic` or listed in the project's
   `trusted:` list, and at every module outside the application being compiled. What remains is
-  the user's own helpers, and each banned call found in there yields one diagnostic carrying the
-  chain that reaches it.
+  the user's own helpers, and each banned construct found in there yields one diagnostic carrying
+  the chain that reaches it. A `receive` arrives as an edge to `Kernel.SpecialForms.receive/1` and
+  is treated like any other banned target.
 
   The result is neither sound nor complete: `apply/3` with a computed module, protocol dispatch
   and behaviour callbacks through a variable module are invisible, and a branch never taken at
@@ -59,7 +60,8 @@ defmodule Dbos.Compiler.Analysis do
     reached = walks |> Enum.flat_map(& &1.reached) |> MapSet.new()
 
     (Enum.flat_map(walks, & &1.diagnostics) ++
-       unused_suppressions(annotated, project_trusted, reached, app_modules))
+       unused_suppressions(annotated, project_trusted, reached, app_modules) ++
+       unscannable(Map.get(by_kind, :unscannable, []), reached, app_modules))
     |> Enum.uniq_by(&{&1.file, &1.position, &1.message})
     |> Enum.sort_by(&{&1.file, &1.position})
   end
@@ -198,7 +200,7 @@ defmodule Dbos.Compiler.Analysis do
 
   defp message(point, scope, chain, edge, rule) do
     heading =
-      "nondeterministic call reachable from a #{kind_label(point.kind)} body\n\n" <>
+      "#{subject(rule.id)} reachable from a #{kind_label(point.kind)} body\n\n" <>
         "  #{format_mfa(point.mfa)}  (#{kind_label(point.kind)} #{inspect(point.name)})"
 
     steps =
@@ -208,6 +210,9 @@ defmodule Dbos.Compiler.Analysis do
 
     heading <> steps <> "\n\n  #{scope_note(scope)} #{capitalize(rule.fix)}"
   end
+
+  defp subject(:receive), do: "blocking receive"
+  defp subject(_id), do: "nondeterministic call"
 
   defp capitalize(<<first::utf8, rest::binary>>), do: String.upcase(<<first::utf8>>) <> rest
 
@@ -225,6 +230,8 @@ defmodule Dbos.Compiler.Analysis do
   defp kind_label(:workflow), do: "workflow"
   defp kind_label(:step), do: "step"
   defp kind_label(:transaction), do: "transaction"
+
+  defp format_mfa({Kernel.SpecialForms, fun, arity}), do: "#{fun}/#{arity}"
 
   defp format_mfa({module, fun, arity}) do
     "#{inspect(module)}.#{strip_body_suffix(fun)}/#{arity}"
@@ -269,6 +276,27 @@ defmodule Dbos.Compiler.Analysis do
       end)
 
     from_annotations ++ unused_trusted
+  end
+
+  defp unscannable(rows, reached, app_modules) do
+    reached_modules = MapSet.new(reached, &elem(&1, 0))
+
+    rows
+    |> Enum.filter(&MapSet.member?(app_modules, &1.module))
+    |> Enum.filter(&MapSet.member?(reached_modules, &1.module))
+    |> Enum.uniq_by(& &1.module)
+    |> Enum.map(fn row ->
+      %Diagnostic{
+        compiler_name: "dbos",
+        file: row.file,
+        position: 0,
+        severity: :hint,
+        message:
+          "#{inspect(row.module)} was compiled without debug info, so it was not scanned for " <>
+            "a blocking receive. A workflow reaches it.",
+        details: %{rule: :unscannable, module: row.module}
+      }
+    end)
   end
 
   defp reached_trusted?(module, reached) when is_atom(module) do

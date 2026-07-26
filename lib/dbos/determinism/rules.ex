@@ -58,6 +58,9 @@ defmodule Dbos.Determinism.Rules do
   def match_mfa(Kernel, :send, 2, :workflow), do: rule(:send, "Kernel.send/2", @send_fix)
   def match_mfa(:erlang, :send, 2, :workflow), do: rule(:send, ":erlang.send/2", @send_fix)
 
+  def match_mfa(Kernel.SpecialForms, :receive, arity, :workflow),
+    do: rule(:receive, "receive/#{arity}", @receive_fix)
+
   def match_mfa(Kernel, :make_ref, 0, :workflow),
     do: rule(:make_ref, "Kernel.make_ref/0", @make_ref_fix)
 

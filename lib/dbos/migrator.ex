@@ -9,8 +9,9 @@ defmodule Dbos.Migrator do
   alias Dbos.Config
 
   @expected_version 42
-  @expected_extension_version 1
+  @expected_extension_version 2
   @extension_marker "-- Extension tables:"
+  @extension_section_marker ~r/^-- extension migration (\d+):/m
 
   @doc "The base schema's `dbos_migrations.version` this engine targets."
   def expected_version, do: @expected_version
@@ -42,7 +43,10 @@ defmodule Dbos.Migrator do
     {base_sql, extension_sql} = schema_parts(config.schema)
 
     apply_unless_present(config, "dbos_migrations", base_sql)
-    apply_unless_present(config, "extension_migrations", extension_sql)
+
+    config
+    |> pending_extension_sections(extension_sql)
+    |> Enum.each(fn {_version, sql} -> apply_statements(config, sql) end)
 
     :ok
   end
@@ -66,6 +70,38 @@ defmodule Dbos.Migrator do
 
   @doc "Splits one `schema_parts/1` part into its individual SQL statements."
   def statements(sql), do: split_statements(sql)
+
+  @doc """
+  The extension part of `schema_parts/1` split into its individually versioned sections,
+  `{version, sql}` ascending. Each section ends by writing its own number into
+  `extension_migrations`, so applying a suffix of them brings a database holding an earlier
+  version forward.
+  """
+  def extension_sections(extension_sql) do
+    case Regex.split(@extension_section_marker, extension_sql, include_captures: true) do
+      [_unmarked] ->
+        []
+
+      [preamble | marked] ->
+        marked
+        |> Enum.chunk_every(2)
+        |> Enum.map(fn [marker, body] -> {section_version(marker), marker <> body} end)
+        |> prepend_preamble(preamble)
+    end
+  end
+
+  @doc "The `extension_sections/1` of `extension_sql` this database has yet to apply."
+  def pending_extension_sections(%Config{} = config, extension_sql) do
+    applied =
+      case current_version(config, "extension_migrations") do
+        {:ok, version} -> version
+        {:error, :not_found} -> 0
+      end
+
+    extension_sql
+    |> extension_sections()
+    |> Enum.filter(fn {version, _sql} -> version > applied end)
+  end
 
   @doc """
   The marker table's current version, or `{:error, :not_found}` if the table doesn't exist yet.
@@ -104,18 +140,29 @@ defmodule Dbos.Migrator do
     |> String.replace("'dbos'", "'#{schema}'")
   end
 
+  defp prepend_preamble([{version, sql} | rest], preamble),
+    do: [{version, preamble <> sql} | rest]
+
+  defp prepend_preamble([], _preamble), do: []
+
+  defp section_version(marker) do
+    [_match, digits] = Regex.run(@extension_section_marker, marker)
+    String.to_integer(digits)
+  end
+
   defp apply_unless_present(config, marker_table, sql) do
     case current_version(config, marker_table) do
-      {:ok, _version} ->
-        :ok
-
-      {:error, :not_found} ->
-        sql
-        |> statements()
-        |> Enum.each(fn statement ->
-          {:ok, _result} = config.db.query(config.conn, statement, [])
-        end)
+      {:ok, _version} -> :ok
+      {:error, :not_found} -> apply_statements(config, sql)
     end
+  end
+
+  defp apply_statements(config, sql) do
+    sql
+    |> statements()
+    |> Enum.each(fn statement ->
+      {:ok, _result} = config.db.query(config.conn, statement, [])
+    end)
   end
 
   defp verify_table_version!(config, table, expected_version) do

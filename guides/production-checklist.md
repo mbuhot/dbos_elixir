@@ -8,7 +8,10 @@ every item lives in the rest of the guides.
 - [ ] Generate the migration with `mix dbos.gen.migration` and apply it through `mix ecto.migrate`,
       reviewed like any other migration in your sequence.
 - [ ] Leave `migrations: :verify` (the default) in production. `Dbos.Migrator.verify!/1` checks
-      `<schema>.dbos_migrations.version` is exactly `42` and raises at boot on anything else.
+      `<schema>.dbos_migrations.version` is exactly `42` and
+      `<schema>.extension_migrations.version` is at this engine's own extension version, raising
+      at boot on either mismatch. Apply the migration before rolling the new build out, so the
+      old build keeps running against a schema it still understands.
 
 ## Identity
 
@@ -21,6 +24,11 @@ every item lives in the rest of the guides.
       (`Dbos.Version.compute/1`) hashes code per instance, so instances can disagree.
 - [ ] Confirm they gate recovery and dequeue the way you expect: a workflow whose
       `application_version` no live executor matches sits unclaimed.
+- [ ] **Run `mix dbos.orphans` after every deploy**, once the new fleet is up and the old one has
+      drained. It lists the `PENDING` workflows nothing currently deployed can claim, grouped by
+      workflow name and version, with why and how many. An empty report is the deploy's
+      all-clear; a non-empty one is work that will sit untouched until you deploy something that
+      can run it. `GET /dbos-orphans` is the same answer over HTTP.
 
 ## Notifications
 
@@ -66,7 +74,8 @@ expired or is absent is reclaimed and redispatched.
 ## Admin server
 
 `Dbos.AdminServer` is off by default (`admin_server: [enabled: true, port: 3001]`). Alongside
-introspection (`POST /workflows`, `GET /workflows/{id}`, `GET /workflows/{id}/steps`) it exposes
+introspection (`POST /workflows`, `GET /workflows/{id}`, `GET /workflows/{id}/steps`,
+`GET /dbos-orphans`) it exposes
 mutating operations: `POST /workflows/{id}/cancel`, `POST /workflows/{id}/resume`,
 `POST /workflows/{id}/fork`, `POST /dbos-workflow-recovery`, `POST /dbos-garbage-collect`,
 `GET /deactivate`, and `POST /dbos-global-timeout` (cancels every non-terminal workflow created at
@@ -85,6 +94,9 @@ Four `:telemetry.span/3` spans — workflow, step, queue dequeue, recovery — e
 - [ ] Alert on `[:dbos, :workflow, :exception]` — a workflow process crashed running its body.
 - [ ] Alert on `[:dbos, :step, :exception]` — a step failed.
 - [ ] Alert on `[:dbos, :recovery, :exception]` — a recovery or reclaim pass itself failed.
+- [ ] Watch `[:dbos, :recovery, :declined]` (what one executor left behind on a reclaim pass) and
+      `[:dbos, :recovery, :orphaned]` (what the whole fleet cannot claim). Poll
+      `Dbos.Recovery.orphans/1` on your own schedule to turn the latter into a gauge.
 - [ ] Filter `[:dbos, :queue, :dequeue, :exception]` through
       `Dbos.SystemDb.contention_error?/1` before paging. Lock-contention races under concurrent
       dequeuers are routine.

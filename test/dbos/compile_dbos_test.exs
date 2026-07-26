@@ -451,6 +451,289 @@ defmodule Dbos.CompileDbosTest do
   end
 
   @tag :tmp_dir
+  test "a receive in a helper is reported against the workflow that reaches it" do
+    suffix = unique_suffix()
+
+    compile(
+      """
+      defmodule Helpers#{suffix} do
+        def wait(x) do
+          receive do
+            ^x -> :ok
+          end
+        end
+      end
+      """,
+      "lib/helpers.ex"
+    )
+
+    compile(
+      """
+      defmodule Orders#{suffix} do
+        use Dbos
+
+        defworkflow place(x), name: "place" do
+          Helpers#{suffix}.wait(x)
+        end
+      end
+      """,
+      "lib/orders.ex"
+    )
+
+    assert [diagnostic] = diagnostics()
+    assert diagnostic.severity == :warning
+    assert diagnostic.file == "lib/helpers.ex"
+    assert diagnostic.position == 3
+    assert diagnostic.message =~ "blocking receive reachable from a workflow body"
+    assert diagnostic.message =~ ~s|Orders#{suffix}.place/1  (workflow "place")|
+    assert diagnostic.message =~ "→ receive/1  lib/helpers.ex:3"
+    assert diagnostic.message =~ "Dbos.send_message/recv_message"
+  end
+
+  @tag :tmp_dir
+  test "a receive with a timeout is reported at the line it is written on" do
+    suffix = unique_suffix()
+
+    compile(
+      """
+      defmodule Helpers#{suffix} do
+        def noise(x), do: x
+
+        def wait(x) do
+          receive do
+            ^x -> :ok
+          after
+            100 -> :timeout
+          end
+        end
+      end
+      """,
+      "lib/helpers.ex"
+    )
+
+    compile(
+      """
+      defmodule Orders#{suffix} do
+        use Dbos
+
+        defworkflow place(x), name: "place" do
+          Helpers#{suffix}.wait(x)
+        end
+      end
+      """,
+      "lib/orders.ex"
+    )
+
+    assert [diagnostic] = diagnostics()
+    assert diagnostic.position == 5
+  end
+
+  @tag :tmp_dir
+  test "a receive two helper modules away names every hop that reaches it" do
+    suffix = unique_suffix()
+
+    compile(
+      """
+      defmodule Inner#{suffix} do
+        def wait(x) do
+          receive do
+            ^x -> :ok
+          end
+        end
+      end
+      """,
+      "lib/inner.ex"
+    )
+
+    compile(
+      """
+      defmodule Helpers#{suffix} do
+        def outer(x), do: Inner#{suffix}.wait(x)
+      end
+      """,
+      "lib/helpers.ex"
+    )
+
+    compile(
+      """
+      defmodule Orders#{suffix} do
+        use Dbos
+
+        defworkflow place(x), name: "place" do
+          Helpers#{suffix}.outer(x)
+        end
+      end
+      """,
+      "lib/orders.ex"
+    )
+
+    assert [diagnostic] = diagnostics()
+    assert diagnostic.file == "lib/inner.ex"
+    assert diagnostic.position == 3
+    assert diagnostic.message =~ "→ Helpers#{suffix}.outer/1  lib/orders.ex:5"
+    assert diagnostic.message =~ "→ Inner#{suffix}.wait/1  lib/helpers.ex:2"
+    assert diagnostic.message =~ "→ receive/1  lib/inner.ex:3"
+  end
+
+  @tag :tmp_dir
+  test "a receive inside an anonymous function in a helper is reported" do
+    suffix = unique_suffix()
+
+    compile(
+      """
+      defmodule Helpers#{suffix} do
+        def wait(x) do
+          fun = fn ->
+            receive do
+              ^x -> :ok
+            end
+          end
+
+          fun.()
+        end
+      end
+      """,
+      "lib/helpers.ex"
+    )
+
+    compile(
+      """
+      defmodule Orders#{suffix} do
+        use Dbos
+
+        defworkflow place(x), name: "place" do
+          Helpers#{suffix}.wait(x)
+        end
+      end
+      """,
+      "lib/orders.ex"
+    )
+
+    assert [diagnostic] = diagnostics()
+    assert diagnostic.position == 4
+  end
+
+  @tag :tmp_dir
+  test "a step may block on a receive in a helper" do
+    suffix = unique_suffix()
+
+    compile(
+      """
+      defmodule Helpers#{suffix} do
+        def wait(x) do
+          receive do
+            ^x -> :ok
+          end
+        end
+      end
+      """,
+      "lib/helpers.ex"
+    )
+
+    compile(
+      """
+      defmodule Orders#{suffix} do
+        use Dbos
+
+        defworkflow place(x), name: "place" do
+          collect(x)
+        end
+
+        defstep collect(x) do
+          Helpers#{suffix}.wait(x)
+        end
+      end
+      """,
+      "lib/orders.ex"
+    )
+
+    assert diagnostics() == []
+  end
+
+  @tag :tmp_dir
+  test "adding a receive to a helper reports the workflow whose file did not change", context do
+    suffix = unique_suffix()
+
+    compile(
+      """
+      defmodule Helpers#{suffix} do
+        def wait(x), do: x
+      end
+      """,
+      "lib/helpers.ex"
+    )
+
+    compile(
+      """
+      defmodule Orders#{suffix} do
+        use Dbos
+
+        defworkflow place(x), name: "place" do
+          Helpers#{suffix}.wait(x)
+        end
+      end
+      """,
+      "lib/orders.ex"
+    )
+
+    assert diagnostics() == []
+    finish_run(context)
+
+    start_run(context.app, context.manifest)
+
+    compile(
+      """
+      defmodule Helpers#{suffix} do
+        def wait(x) do
+          receive do
+            ^x -> :ok
+          end
+        end
+      end
+      """,
+      "lib/helpers.ex"
+    )
+
+    assert [diagnostic] = diagnostics()
+    assert diagnostic.message =~ ~s|Orders#{suffix}.place/1  (workflow "place")|
+    assert diagnostic.file == "lib/helpers.ex"
+    assert diagnostic.position == 3
+  end
+
+  @tag :tmp_dir
+  test "a helper a workflow reaches but cannot be scanned is reported as unchecked" do
+    suffix = unique_suffix()
+
+    compile(
+      """
+      defmodule Helpers#{suffix} do
+        def wait(x), do: to_string(x)
+      end
+      """,
+      "lib/helpers.ex",
+      debug_info: false
+    )
+
+    compile(
+      """
+      defmodule Orders#{suffix} do
+        use Dbos
+
+        defworkflow place(x), name: "place" do
+          Helpers#{suffix}.wait(x)
+        end
+      end
+      """,
+      "lib/orders.ex"
+    )
+
+    assert [diagnostic] = diagnostics()
+    assert diagnostic.severity == :hint
+    assert diagnostic.file == "lib/helpers.ex"
+    assert diagnostic.message =~ "Helpers#{suffix} was compiled without debug info"
+  end
+
+  @tag :tmp_dir
   test "a module deleted from the application stops being reported" do
     suffix = compile_fixture()
     assert [_diagnostic] = diagnostics()
@@ -529,9 +812,11 @@ defmodule Dbos.CompileDbosTest do
     (State.calls() |> Enum.map(&elem(&1.from, 0))) ++ entry_modules
   end
 
-  defp compile(source, file) do
+  defp compile(source, file, opts \\ []) do
     previous = Code.get_compiler_option(:tracers)
+    previous_debug_info = Code.get_compiler_option(:debug_info)
     Code.put_compiler_option(:tracers, [Mix.Tasks.Compile.Dbos | previous])
+    Code.put_compiler_option(:debug_info, Keyword.get(opts, :debug_info, true))
 
     try do
       ExUnit.CaptureIO.capture_io(:stderr, fn ->
@@ -543,6 +828,7 @@ defmodule Dbos.CompileDbosTest do
       end
     after
       Code.put_compiler_option(:tracers, previous)
+      Code.put_compiler_option(:debug_info, previous_debug_info)
     end
   end
 end

@@ -8,7 +8,8 @@ defmodule Mix.Tasks.Compile.Dbos do
   the application is built the compiler walks that graph forward from every `defworkflow`,
   `defstep` and `deftransaction` body, reporting the banned constructs it reaches. This catches
   what the `defworkflow` macro cannot: a violation that lives in a helper function, in any module
-  of the application.
+  of the application. A `receive` raises no trace event, so each module's abstract code is scanned
+  for one as it is compiled, and the occurrence joins the same graph.
 
   Install it ahead of the standard compilers, in `:dev` and `:test`:
 
@@ -42,7 +43,9 @@ defmodule Mix.Tasks.Compile.Dbos do
   Dynamic dispatch is invisible. `apply/3` with a computed module, protocol dispatch and a
   behaviour callback reached through a variable module are all reported as blind spots at most,
   never followed. A dependency is an opaque leaf: its calls are checked against the rule table,
-  its internals are not traced. A branch that never runs is still reported.
+  its internals are not traced. A branch that never runs is still reported. A module compiled
+  without debug info is not scanned for `receive`, and is reported as a hint when a workflow
+  reaches it.
 
   A compile run that recompiles the tracer's own modules loses the events raised while their old
   code is purged, which under-reports until the next full recompile. Only the `dbos` repository
@@ -52,6 +55,7 @@ defmodule Mix.Tasks.Compile.Dbos do
   use Mix.Task.Compiler
 
   alias Dbos.Compiler.Analysis
+  alias Dbos.Compiler.SpecialForms
   alias Dbos.Compiler.State
   alias Dbos.Determinism.Rules
 
@@ -68,7 +72,9 @@ defmodule Mix.Tasks.Compile.Dbos do
 
   @tracer :dbos_determinism_tracer
 
-  @tracer_modules [__MODULE__, Dbos.Compiler.State, Dbos.Determinism.Rules]
+  @tracer_modules [__MODULE__, Dbos.Determinism.Rules]
+
+  @tracer_module_prefix "Elixir.Dbos.Compiler."
 
   @impl Mix.Task.Compiler
   def run(argv) do
@@ -127,9 +133,12 @@ defmodule Mix.Tasks.Compile.Dbos do
           Mix.Tasks.Compile.Dbos.trace(event, env)
         rescue
           error in UndefinedFunctionError ->
-            if error.module in unquote(@tracer_modules),
-              do: :ok,
-              else: reraise(error, __STACKTRACE__)
+            if own_module?(error.module), do: :ok, else: reraise(error, __STACKTRACE__)
+        end
+
+        defp own_module?(module) do
+          module in unquote(@tracer_modules) or
+            String.starts_with?(Atom.to_string(module), unquote(@tracer_module_prefix))
         end
       end
     end
@@ -157,11 +166,37 @@ defmodule Mix.Tasks.Compile.Dbos do
     record(env, meta, {caller, fun, arity}, mode(event, env))
   end
 
+  def trace({:on_module, bytecode, _ignore}, %{module: caller} = env)
+      when not is_nil(caller) do
+    State.initialize_module(caller)
+    record_special_forms(caller, Path.relative_to_cwd(env.file), bytecode)
+  end
+
   def trace(_event, %{module: caller}) when not is_nil(caller) do
     State.initialize_module(caller)
   end
 
   def trace(_event, _env), do: :ok
+
+  defp record_special_forms(module, file, bytecode) do
+    case SpecialForms.scan(bytecode) do
+      {:ok, occurrences} ->
+        Enum.each(occurrences, fn {{fun, arity}, mfa, line} ->
+          State.add_call(module, %{
+            from: {module, fun, arity},
+            to: mfa,
+            file: file,
+            line: line,
+            mode: :runtime
+          })
+        end)
+
+      :no_debug_info ->
+        State.add_entry(module, %{kind: :unscannable, module: module, file: file})
+    end
+
+    :ok
+  end
 
   defp mode(event, _env) when event in [:remote_macro, :imported_macro, :local_macro],
     do: :compile

@@ -1,6 +1,6 @@
 # Telemetry
 
-Five spans and one standalone event. Attach your own handler (`:telemetry.attach/4`, `:telemetry.attach_many/4`) and bridge
+Five spans and two standalone events. Attach your own handler (`:telemetry.attach/4`, `:telemetry.attach_many/4`) and bridge
 to whatever backend you use.
 
 Every span emits the standard triple: `[..., :start]`, `[..., :stop]`, and `[..., :exception]` on a
@@ -16,7 +16,8 @@ units); `:stop`/`:exception` measurements carry `duration` (native units, conver
 | `[:dbos, :queue, :dequeue]` | one dequeue poll of one queue/partition pair |
 | `[:dbos, :recovery]` | one `Dbos.Recovery.reclaim/2,3` pass |
 
-`[:dbos, :recovery, :declined]` is a standalone event rather than a span — see below.
+`[:dbos, :recovery, :declined]` and `[:dbos, :recovery, :orphaned]` are standalone events rather
+than spans — see below.
 
 `kind`, `reason`, and `stacktrace` are present on every `:exception` event and are omitted from
 the tables below.
@@ -120,6 +121,24 @@ re-reports on every lease sweep, so the count reads as a gauge.
 
 `:locked_elsewhere` is transient — a peer held the row's lock during this pass. The other two
 persist until an operator acts.
+
+## `[:dbos, :recovery, :orphaned]`
+
+A standalone event, emitted once per `{name, version, reason}` group by `Dbos.Recovery.orphans/1`
+— and so by `GET /dbos-orphans` and `mix dbos.orphans`. Measures `%{count: n}`.
+
+Where `:declined` reports what one executor refused, this reports what the whole fleet cannot
+claim, read from the capabilities every live executor publishes with its lease.
+
+| Metadata | Meaning |
+|---|---|
+| `engine` | The engine name. |
+| `name` | The workflow name of the orphaned rows. |
+| `row_version` | The `application_version` recorded on those rows. |
+| `reason` | `:no_live_executors`, `:name_not_registered`, or `:version_mismatch`. |
+
+Nothing emits it on a timer. Poll `Dbos.Recovery.orphans/1` from your own scheduler to turn it
+into a gauge.
 
 ## Attaching a handler
 

@@ -15,18 +15,23 @@ workflow strands in-flight instances of all of them.
 `Logger.warning` and one `[:dbos, :recovery, :declined]` event per `{name, version, reason}`
 group, with `reason` in `:name_not_registered | :version_mismatch | :locked_elsewhere`.
 
-**Phases 1-5 remain**: the `ex_workflow_version` column and `ex_capabilities` on leases,
-`Dbos.Recovery.orphans/1` and `mix dbos.orphans`, the workflow-skeleton digest, the per-workflow
-reclaim predicate, and prefix verification with `Dbos.Recovery.adopt/3`.
+**Phase 1 is done**: extension migration 2 adds `executor_leases.ex_capabilities`, a nullable
+JSONB array of the `{name, version}` pairs each executor accepts, republished on every lease
+renewal. `Dbos.Recovery.orphans/1` joins `PENDING` rows against it to answer the fleet-wide
+question one executor's declined report cannot, grouped by `{name, application_version}` with a
+reason of `:no_live_executors | :name_not_registered | :version_mismatch`. Served by
+`GET /dbos-orphans`, `mix dbos.orphans`, and `[:dbos, :recovery, :orphaned]`. A live lease that
+has not published capabilities suppresses the report rather than producing false orphans.
+
+**Phases 2-5 remain**: the `ex_workflow_version` column, the workflow-skeleton digest, the
+per-workflow reclaim predicate, and prefix verification with `Dbos.Recovery.adopt/3`.
 
 ## Whole-application determinism checker
 
-`Mix.Tasks.Compile.Dbos` ships phases 1-3 and 5 of `notes/determinism-tracer-design.md`: the
+`Mix.Tasks.Compile.Dbos` ships every phase of `notes/determinism-tracer-design.md`: the
 tracer, the ETS state and manifest, entry points from the macros, forward BFS with witness
-chains, `@dbos_deterministic` and the project `trusted:` list. The Credo check is gone.
-
-Phase 4 remains: the `:on_module` abstract-code scan for `receive` and other special forms, which
-the macro AST walk currently catches only when written literally in a body.
+chains, the `:on_module` abstract-code scan for `receive`, `@dbos_deterministic` and the project
+`trusted:` list. The Credo check is gone.
 
 Two gaps are recorded in §8 of the design note: this repo cannot trace a compile run that also
 recompiles the tracer's own modules, and a stale or missing manifest under-reports until the next

@@ -691,3 +691,9 @@ CREATE TABLE "dbos".executor_leases (
 );
 
 INSERT INTO "dbos".extension_migrations (version) VALUES (1);
+
+-- extension migration 2: executor capabilities
+
+ALTER TABLE "dbos".executor_leases ADD COLUMN IF NOT EXISTS ex_capabilities JSONB;
+
+UPDATE "dbos".extension_migrations SET version = 2;

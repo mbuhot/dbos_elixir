@@ -54,6 +54,54 @@ defaults, 75 on average.
 `DBOS__VMID` in a Kubernetes-style deployment is typically a pod name that changes every deploy, so
 the old pod's `PENDING` rows are recovered by the sweep once its lease lapses.
 
+## The lease row
+
+| Column | Meaning |
+|---|---|
+| `executor_id` | Primary key: which executor this lease belongs to. |
+| `application_version` | The deployment this executor is running. |
+| `node` | Its Erlang node name, for a human reading the table. |
+| `lease_expires_epoch_ms` | The lease is live while this is in the future. |
+| `renewed_at_epoch_ms` | When it last heartbeat. |
+| `ex_capabilities` | JSONB array of `{"name", "version"}` — every workflow name this executor has registered, paired with its `application_version`. |
+
+`ex_capabilities` is what makes the fleet-wide question answerable from the database alone: "can
+any live executor claim this row?" is a join, not a poll of every node. It is republished on every
+renewal, so it tracks a registry that grows at runtime.
+
+The column is nullable, and `NULL` means "this executor has not published its capabilities",
+which every consumer reads as *unknown* — an executor mid-upgrade is never assumed to run nothing.
+
+## Orphan detection
+
+An orphan is a non-queued `PENDING` row that no live executor can claim: no live lease advertises
+its workflow name, or some advertise the name but none at the row's `application_version`. A row
+whose own executor still holds a live lease is not an orphan — it is being run.
+
+`Dbos.Recovery.orphans/1` returns one entry per `{name, application_version}` group, with a count,
+the oldest row's age, one example id, and the reason. `GET /dbos-orphans` and `mix dbos.orphans`
+serve the same query, and each group also emits `[:dbos, :recovery, :orphaned]`.
+
+```sql
+SELECT ws.name, ws.application_version, count(*)
+  FROM workflow_status ws
+ WHERE ws.status = 'PENDING' AND ws.queue_name IS NULL
+   AND NOT EXISTS (SELECT 1 FROM live WHERE live.executor_id = ws.executor_id)
+   AND NOT EXISTS (SELECT 1 FROM caps
+                    WHERE caps.name = ws.name
+                      AND caps.version IS NOT DISTINCT FROM ws.application_version)
+ GROUP BY 1, 2
+```
+
+While any live executor's `ex_capabilities` is `NULL`, the query reports nothing: an unknown
+capability set could cover anything, and a false orphan during a rolling upgrade is worse than a
+late one.
+
+The scan covers every `PENDING` row through `idx_workflow_status_pending`; the fleet's
+capabilities are expanded out of JSONB once into a CTE and anti-joined. Cost grows with in-flight
+work rather than with history — 50,000 `PENDING` rows against a 20-executor fleet measures around
+300 ms — so it belongs on an operator's command or a slow poll, not in a sweep loop.
+
 ## Capability-aware reclaim
 
 A reclaim only reassigns rows whose workflow `name` this engine has registered, and whose

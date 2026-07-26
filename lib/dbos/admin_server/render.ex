@@ -48,6 +48,18 @@ defmodule Dbos.AdminServer.Render do
     }
   end
 
+  @doc "Renders one `Dbos.Recovery.orphan/0` group as a JSON-safe map."
+  def orphan(orphan) do
+    %{
+      "name" => orphan.name,
+      "application_version" => orphan.application_version,
+      "reason" => Atom.to_string(orphan.reason),
+      "count" => orphan.count,
+      "oldest_created_at_epoch_ms" => stringify(orphan.oldest_created_at_epoch_ms),
+      "example_workflow_id" => orphan.example_workflow_id
+    }
+  end
+
   @doc "Renders a `Dbos.Queue` as a JSON-safe map."
   def queue(%Dbos.Queue{} = q) do
     %{

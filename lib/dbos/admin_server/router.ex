@@ -34,6 +34,10 @@ defmodule Dbos.AdminServer.Router do
     json(200, Enum.map([internal_queue() | queues], &Render.queue/1))
   end
 
+  defp dispatch(engine, :get, ["dbos-orphans"], _body) do
+    json(200, Enum.map(Dbos.Recovery.orphans(engine), &Render.orphan/1))
+  end
+
   defp dispatch(engine, :post, ["dbos-garbage-collect"], body) do
     config = Dbos.config(engine)
     params = decode(body)

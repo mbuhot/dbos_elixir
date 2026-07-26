@@ -43,6 +43,24 @@ defmodule Dbos.LeaseTest do
     assert lease.lease_expires_epoch_ms > System.os_time(:millisecond)
   end
 
+  test "the lease publishes the workflows this executor can run and at which version" do
+    name = start_engine(application_version: "v1")
+    config = Dbos.config(name)
+
+    lease = SystemDb.get_executor_lease(config, config.executor_id)
+
+    assert lease.capabilities == [%{name: "add/2", version: "v1"}]
+  end
+
+  test "an executor that has never published its capabilities reports none rather than an empty set" do
+    name = start_engine()
+    config = Dbos.config(name)
+
+    SystemDb.renew_lease(%{config | executor_id: "exec-legacy"}, 60_000)
+
+    assert SystemDb.get_executor_lease(config, "exec-legacy").capabilities == nil
+  end
+
   test "the lease is renewed on the configured interval" do
     name = start_engine(lease: [ttl_ms: 200, renew_interval_ms: 20])
     config = Dbos.config(name)

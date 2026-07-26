@@ -615,19 +615,27 @@ defmodule Dbos.SystemDb do
   `Dbos.LeaseSweep` consults for automatic reclaim: renewed over the same connection this
   executor needs to checkpoint, so an executor that cannot renew also cannot write conflicting
   checkpoints.
+
+  `opts[:capabilities]` publishes what this executor can run as a JSON array of
+  `{"name", "version"}` objects — every registered workflow name paired with this executor's
+  `application_version` — so `list_orphan_pending_workflow_groups/1` can answer "can any live
+  executor claim this row?" for the whole fleet. Omitted, the column is written `NULL`, which
+  reads as "capabilities unknown" rather than "runs nothing".
   """
-  def renew_lease(%Config{} = config, ttl_ms) do
+  def renew_lease(%Config{} = config, ttl_ms, opts \\ []) do
     now = System.os_time(:millisecond)
 
     sql = """
     INSERT INTO #{table(config, "executor_leases")}
-        (executor_id, application_version, node, lease_expires_epoch_ms, renewed_at_epoch_ms)
-    VALUES ($1, $2, $3, $4, $5)
+        (executor_id, application_version, node, lease_expires_epoch_ms, renewed_at_epoch_ms,
+         ex_capabilities)
+    VALUES ($1, $2, $3, $4, $5, $6::text::jsonb)
     ON CONFLICT (executor_id) DO UPDATE SET
         application_version = EXCLUDED.application_version,
         node = EXCLUDED.node,
         lease_expires_epoch_ms = EXCLUDED.lease_expires_epoch_ms,
-        renewed_at_epoch_ms = EXCLUDED.renewed_at_epoch_ms
+        renewed_at_epoch_ms = EXCLUDED.renewed_at_epoch_ms,
+        ex_capabilities = EXCLUDED.ex_capabilities
     """
 
     params = [
@@ -635,11 +643,20 @@ defmodule Dbos.SystemDb do
       config.application_version,
       to_string(node()),
       now + ttl_ms,
-      now
+      now,
+      encoded_capabilities(config, Keyword.get(opts, :capabilities))
     ]
 
     query(config, sql, params)
     :ok
+  end
+
+  defp encoded_capabilities(_config, nil), do: nil
+
+  defp encoded_capabilities(config, names) do
+    names
+    |> Enum.map(&%{"name" => &1, "version" => config.application_version})
+    |> JSON.encode!()
   end
 
   @doc """
@@ -663,7 +680,8 @@ defmodule Dbos.SystemDb do
   @doc "The current lease row for `executor_id`, or `nil` if it has never renewed one."
   def get_executor_lease(%Config{} = config, executor_id) do
     sql = """
-    SELECT executor_id, application_version, node, lease_expires_epoch_ms, renewed_at_epoch_ms
+    SELECT executor_id, application_version, node, lease_expires_epoch_ms, renewed_at_epoch_ms,
+           ex_capabilities::text
     FROM #{table(config, "executor_leases")}
     WHERE executor_id = $1
     """
@@ -671,18 +689,103 @@ defmodule Dbos.SystemDb do
     {:ok, result} = query(config, sql, [executor_id])
 
     case result.rows do
-      [[executor_id, application_version, node, expires_at, renewed_at]] ->
+      [[executor_id, application_version, node, expires_at, renewed_at, capabilities]] ->
         %{
           executor_id: executor_id,
           application_version: application_version,
           node: node,
           lease_expires_epoch_ms: expires_at,
-          renewed_at_epoch_ms: renewed_at
+          renewed_at_epoch_ms: renewed_at,
+          capabilities: decode_capabilities(capabilities)
         }
 
       [] ->
         nil
     end
+  end
+
+  defp decode_capabilities(nil), do: nil
+
+  defp decode_capabilities(json) do
+    json
+    |> JSON.decode!()
+    |> Enum.map(&%{name: &1["name"], version: &1["version"]})
+  end
+
+  @doc """
+  Every non-queued `PENDING` row no live executor in the fleet can claim, grouped by
+  `{name, application_version}` with a count, the oldest `created_at`, one example id, and
+  whether any live executor advertises that workflow name at all.
+
+  A lease counts as live when it expires after now. Its `ex_capabilities` is the `(name, version)`
+  set that executor accepts; a `NULL` there means the executor has not published its capabilities
+  yet, and is read as "could claim anything" so a fleet mid-upgrade reports no orphans rather than
+  false ones. A row whose own executor holds a live lease is excluded — it is being run, not
+  waiting for a claimant.
+
+  Also returns the number of live leases, so a caller can tell an empty fleet apart from a fleet
+  that runs the wrong code.
+
+  Aggregating in Postgres keeps one row per group on the wire however large the orphaned
+  population grows.
+
+  Cost is one index scan of `idx_workflow_status_pending` plus three anti-joins against the
+  fleet's published capabilities, expanded out of JSONB once into a materialized CTE rather than
+  per candidate row. It scales with in-flight work, so it is an operator-facing call, not a
+  sweep-loop one.
+  """
+  def list_orphan_pending_workflow_groups(%Config{} = config) do
+    now = System.os_time(:millisecond)
+
+    sql = """
+    WITH live AS MATERIALIZED (
+      SELECT executor_id, ex_capabilities
+      FROM #{table(config, "executor_leases")}
+      WHERE lease_expires_epoch_ms > $2
+    ),
+    caps AS MATERIALIZED (
+      SELECT DISTINCT cap.name, cap.version
+      FROM live, jsonb_to_recordset(live.ex_capabilities) AS cap(name text, version text)
+      WHERE live.ex_capabilities IS NOT NULL
+    )
+    SELECT ws.name, ws.application_version,
+           EXISTS (SELECT 1 FROM caps WHERE caps.name = ws.name) AS name_advertised,
+           count(*), min(ws.created_at), min(ws.workflow_uuid),
+           (SELECT count(*) FROM live) AS live_executors
+    FROM #{table(config, "workflow_status")} ws
+    WHERE ws.status = $1 AND ws.queue_name IS NULL
+      AND NOT EXISTS (SELECT 1 FROM live WHERE live.ex_capabilities IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM live WHERE live.executor_id = ws.executor_id)
+      AND NOT EXISTS (
+        SELECT 1 FROM caps
+        WHERE caps.name = ws.name
+          AND caps.version IS NOT DISTINCT FROM ws.application_version
+      )
+    GROUP BY 1, 2, 3, 7
+    ORDER BY 4 DESC
+    """
+
+    {:ok, result} = query(config, sql, [Status.to_string(:pending), now])
+
+    Enum.map(result.rows, fn [
+                               name,
+                               application_version,
+                               name_advertised,
+                               count,
+                               oldest_created_at,
+                               example_id,
+                               live_executors
+                             ] ->
+      %{
+        name: name,
+        application_version: application_version,
+        name_advertised: name_advertised,
+        count: count,
+        oldest_created_at_epoch_ms: oldest_created_at,
+        example_workflow_id: example_id,
+        live_executors: live_executors
+      }
+    end)
   end
 
   @doc """

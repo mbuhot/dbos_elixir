@@ -416,8 +416,8 @@ Trade-offs:
 - Post-expansion, so a `receive` produced by a user macro is caught. The reported line will be
   the macro's, which is the same behaviour `boundary` has for macro-generated references.
 
-This is phase 3. Phases 1 and 2 ship without it and the in-macro AST walk continues to catch
-literal `receive` in a workflow body, which is the overwhelmingly common case.
+§8.2 records what was built, including the synchronous scan and the synthetic
+`Kernel.SpecialForms.receive/1` node that carries the finding into the ordinary call graph.
 
 ### 3.5 Reachability
 
@@ -1025,11 +1025,42 @@ Two mitigations, both built:
 The consequence for this repository: `mix compile --force` never produces a determinism report.
 An ordinary `mix compile` does.
 
-### 8.2 Phase 4 is not built
+### 8.2 Phase 4: the special form is one edge, not a parallel report
 
-`receive` is caught only where the macro AST walk sees it — written literally in a workflow body.
-The `:on_module` abstract-code scan of §3.4 is not implemented, and there is no special-forms
-table.
+`Dbos.Compiler.SpecialForms.scan/1` runs synchronously in the tracer on every `:on_module` event,
+walks the abstract code for `{:receive, anno, clauses}` and
+`{:receive, anno, clauses, timeout, after_body}`, and records each occurrence as an ordinary edge
+in the calls table:
+
+```
+{enclosing_module, name, arity}  →  {Kernel.SpecialForms, :receive, 1}   file, line
+```
+
+`Kernel.SpecialForms` is a real module that no application owns, so the edge is matched by
+`Rules.match_mfa/4` like any other banned target, is never descended into, and reaches the report
+through the same witness chain. `Dbos.Compiler.Analysis` renders it as `receive/1`. Storage,
+invalidation and the manifest need no special case, so incrementality holds: editing only a leaf
+helper re-reports the unchanged workflow that reaches it.
+
+**`receive` is the only form scanned for.** Every other construct the rule table bans —
+`:rand.*`, `DateTime.utc_now`, `NaiveDateTime.utc_now`, `Date.utc_today`, the four `System`
+functions, `Process.sleep`, `send/2`, `make_ref/0`, `spawn`/`spawn_link`/`spawn_monitor`, the
+`Task` functions, and a direct repo call — is a function call that the tracer already resolves.
+The `after` timeout is part of the `receive` form and shares its line.
+
+Scope follows the rule table: `receive` is banned under `:workflow` and permitted under `:step`,
+matching the macro AST walk and the documented contract that a step may block.
+
+The scan is synchronous rather than the pooled task §3.4 proposed. Measured over 181 modules
+(`dbos` plus `ecto`), `scan/1` costs **0.47 ms per module**, 85 ms for all of them serially — and
+the compiler runs one tracer per file, concurrently, over only the modules recompiled in the run.
+
+A module compiled without debug info yields no abstract code. The scan fails open and records an
+`:unscannable` entry row; the analysis turns that into one `:hint`, and only when the walk
+actually reaches a function of that module.
+
+The shim of §8.1 now treats any absent `Dbos.Compiler.*` module as a purge-window miss, so adding
+a module to the compiler no longer breaks the next incremental compile of this repository.
 
 ### 8.3 New rules held back
 
