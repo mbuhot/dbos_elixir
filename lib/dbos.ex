@@ -7,8 +7,9 @@ defmodule Dbos do
   them, awaiting their results, cancelling, resuming, retrying and forking them, and the messaging, event
   and stream primitives a workflow uses to communicate.
 
-  Every function takes an engine name, defaulting to `Dbos`; `config/1` resolves that name to the
-  running engine's `Dbos.Config`.
+  Every function takes an engine name; `config/1` resolves that name to the running engine's
+  `Dbos.Config`. A call that names none resolves one from the calling process — see
+  `put_engine/1` — and falls back to `Dbos`.
   """
 
   alias Dbos.Client
@@ -27,6 +28,8 @@ defmodule Dbos do
   alias Dbos.WorkflowHandle
   alias Dbos.WorkflowStatus
   alias Dbos.WorkflowSup
+
+  @engine_key :dbos_engine
 
   @doc """
   Brings in `defstep/2`, `deftransaction/2`, and `defworkflow/2` — see `Dbos.Macros`. `opts`:
@@ -60,7 +63,7 @@ defmodule Dbos do
       {name, mfa} = resolve_workflow(config.name, name_or_capture)
       start_child_workflow(config, config.name, name, mfa, args, opts)
     else
-      engine = Keyword.get(opts, :engine, Dbos)
+      engine = engine(opts)
       config = config(engine)
       {name, mfa} = resolve_workflow(engine, name_or_capture)
       start_root_workflow(config, engine, name, mfa, args, opts)
@@ -541,8 +544,40 @@ defmodule Dbos do
     end
   end
 
-  @doc "The resolved config for the default engine (`Dbos`). Raises `Dbos.NotStartedError` if it has not started."
-  def config, do: config(Dbos)
+  @doc "The resolved config for this process's engine. Raises `Dbos.NotStartedError` if it has not started."
+  def config, do: config(current_engine())
+
+  @doc """
+  Points this process at `engine`, so every later call that does not name one uses it.
+
+  A call resolves its engine in three steps: an explicit `opts[:engine]`, then this
+  process-local setting, then `Dbos`. Processes this one spawns inherit it through
+  `$callers`, the same path `Ecto.Adapters.SQL.Sandbox` uses to find a connection owner, so
+  a `Task` started mid-call reaches the same engine.
+
+  A deployment with one engine never needs this. It is for a host that runs several — and
+  for tests, where it lets each one own an engine and still call application code that names
+  none, so those tests can be `async: true`.
+
+  Returns the engine previously set for this process, or `nil`.
+  """
+  @spec put_engine(atom()) :: atom() | nil
+  def put_engine(engine) when is_atom(engine), do: Process.put(@engine_key, engine)
+
+  @doc "The engine this process resolves to when a call does not name one."
+  @spec current_engine() :: atom()
+  def current_engine do
+    Process.get(@engine_key) || inherited_engine() || Dbos
+  end
+
+  defp inherited_engine do
+    Enum.find_value(Process.get(:"$callers", []), fn pid ->
+      case Process.info(pid, :dictionary) do
+        {:dictionary, dictionary} -> Keyword.get(dictionary, @engine_key)
+        nil -> nil
+      end
+    end)
+  end
 
   @doc "The resolved config for the engine named `name`. Raises `Dbos.NotStartedError` if it has not started."
   def config(name) do
@@ -576,7 +611,7 @@ defmodule Dbos do
     opts |> engine() |> config() |> Client.result(workflow_id)
   end
 
-  defp engine(opts), do: Keyword.get(opts, :engine, Dbos)
+  defp engine(opts), do: Keyword.get(opts, :engine) || current_engine()
   defp config_key(name), do: {__MODULE__, :config, name}
 
   defp resolve_workflow(engine, name) when is_binary(name) do

@@ -63,7 +63,8 @@ defmodule Dbos.Testing do
     end
   end
 
-  defp engine_config(opts), do: opts |> Keyword.get(:engine, Dbos) |> Dbos.config()
+  defp engine_config(opts),
+    do: (Keyword.get(opts, :engine) || Dbos.current_engine()) |> Dbos.config()
 
   defp fetch_queue!(config, queue_name) do
     Enum.find(config.queues, &(&1.name == queue_name)) ||
