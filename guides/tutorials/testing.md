@@ -164,6 +164,10 @@ test "recovering a workflow does not re-run its already-checkpointed steps", %{e
 end
 ```
 
+A workflow that was *enqueued* is recovered back to `ENQUEUED` for its queue to redistribute, so
+follow `recover_pending/1` with `Dbos.Testing.drain_queue/2` before asserting on a terminal status.
+The example above starts its workflow directly, which is redispatched and run in the same call.
+
 The counter staying at `3` after recovery is the assertion that matters: proof the replayed steps
 returned their recorded output without re-executing.
 

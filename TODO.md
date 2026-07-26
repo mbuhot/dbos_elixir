@@ -1,46 +1,65 @@
 # TODO
 
-Known gaps, ordered by how much they matter. Each entry says what is wrong, why it matters, and
-what fixing it involves. Items resolved should be deleted, not ticked.
+The work queue. Each entry is something we intend to do. Resolved items are deleted, not ticked.
 
-## Correctness
+## Remove the clustering angle
 
-### The checker sees one module at a time
-`Credo.Check.Warning.DbosDeterminism` follows local calls out of a workflow body, so a violation
-in a same-module helper is caught. A helper in *another* module, a call through `apply/3`, and a
-call through an unresolvable function value all remain invisible. Repo-call detection is also
-absent from the Credo path, since it needs a `Macro.Env`.
+`Dbos.Cluster` and `Dbos.Cluster.NodeWatcher` exist to shorten dead-executor detection by
+scheduling a sweep when `:nodedown` fires. Lease TTL is 60s and the orphan sweep interval is 300s,
+so the saving is real but it applies only where distributed Erlang is running.
 
-### External side effects are at-least-once
-A step that performs an effect and crashes before its checkpoint commits runs that effect again.
-Leases narrow the window; nothing closes it. Documented in `docs/determinism.md` and the README.
-Listed here so it is not mistaken for an oversight — a step that must never repeat needs an
-idempotency key of its own.
+Dropping `orphan_sweep.interval_ms` to 15-30s buys the same latency for every topology, including
+one-pod-per-deployment where `:nodedown` never fires at all. Delete `Dbos.Cluster`,
+`Dbos.Cluster.NodeWatcher`, the `cluster:` supervisor option and `cluster_group` config; keep
+leases and the sweep; rename `Dbos.Cluster.OrphanSweep` once the namespace goes.
 
-## Operational
+Touches `guides/production-checklist.md`, which currently tells the reader to weigh
+`cluster.enabled`, and `docs/clustering.md`.
 
-### Fencing tokens
-A reclaim does not invalidate the previous owner's writes. The lease makes a false verdict
-self-limiting for durable state, since an executor that cannot renew also cannot checkpoint, but a
-fencing token would reject a stale execution's checkpoint outright at its next attempt. Worth it
-only if lease expiry proves too coarse in practice.
+## Per-workflow application version
 
-### Admin server has no authentication
-Documented in the production checklist. Deliberate, and it means the port must never be exposed.
+`SystemDb.reclaim_pending_workflows/4` filters `AND application_version = $n`, so a version
+mismatch reclaims nothing and logs nothing — the workflow is orphaned permanently and silently.
+`DBOS__APPVERSION` is commonly a git SHA, and even the computed default digests every workflow
+module together, so changing one workflow strands in-flight instances of all of them.
 
-## Housekeeping
+Version each workflow by a digest of its own reachable code and match reclaim on that. "Reachable"
+is the hard part: a digest over the entry module alone misses a helper change that breaks replay.
+The call graph in the determinism checker below is the same index.
 
-### Suite time
-About 53 seconds for 529 tests, nearly all of it sequential. Several tests use fixed sleeps where
-polling would do; the scheduler and fork tests dominate. Some sleeps are load-bearing — durable
-sleep resuming with only the remainder, rate limiting over a window, a parked wait that must
-outlast its own setup — and must stay.
+Needs a design pass before implementation — it changes a column and the reclaim contract.
 
-### `docs_config.js`
-ex_doc always emits a `<script src="docs_config.js">` tag that only HexDocs supplies. An empty
-file is shipped through the `assets` option to silence the 404. Revisit if ex_doc stops emitting
-it.
+## Whole-application determinism checker
 
-### Sample app dependencies
-Each of the ten sample apps vendors its own `deps/` and `_build/`. Both are gitignored, so this
-costs disk rather than repository size.
+`notes/determinism-tracer-design.md` has the design: a `Mix.Task.Compiler` that installs a
+compilation tracer, builds a function-level call graph, and reports transitive violations as
+warnings. Keeps the macro AST walk as the hard failure, deletes the Credo check.
+
+Phase 0 is a gate: confirm `env.function` attributes calls inside a `defworkflow` body captured
+with `Macro.escape/1` and re-injected at `@before_compile`, and that line metadata survives the
+round trip. A no answer invalidates the design.
+
+## Drop `priority_enabled` from the queue options
+
+It gates nothing. Dequeue orders `priority ASC, created_at ASC` unconditionally; the flag is only
+persisted and rendered by the admin server. Take it out of `Dbos.Queue.new/2` and the docs, keep
+the column so the schema stays at migration version 42.
+
+## Primitives the Phoenix integration wanted
+
+Surfaced building `sample_apps/live_approvals`:
+
+- `Dbos.Notifications.subscribe_event/3` and `subscribe_stream/3` are keyed on
+  `(workflow_id, key)`, so bridging progress to `Phoenix.PubSub` needs one registration per
+  in-flight workflow. An engine-wide subscription would make a single bridge process viable.
+- Blocking waits emit no telemetry span. `[:dbos, :step, :stop]` covers step execution, so a
+  telemetry-driven UI cannot observe a workflow parked on a human, which is the state a
+  human-in-the-loop UI most needs.
+- `Dbos.resume/2` is a no-op on `SUCCESS`/`ERROR`, so a workflow that errored while parked has no
+  public route back. The only way through is a raw `UPDATE` to `PENDING`.
+
+## Integration suite fails under local Docker
+
+Four tests fail on an arm64 Mac: a stale-image `Dbos.Version` `MatchError`, then `:badrpc` and ETS
+lookup failures between node1, node2 and the runner after a clean rebuild. Unknown whether this is
+local-only. The nightly workflow added in `.github/workflows/integration.yml` will report on it.

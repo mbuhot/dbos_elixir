@@ -221,6 +221,7 @@ Runnable applications live in [`sample_apps/`](https://github.com/mbuhot/dbos_el
 | [customer_service_agent](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/customer_service_agent) | An agent with a refund tool that runs exactly once |
 | [s3_mirror](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/s3_mirror) | Resumable bulk copy with live progress |
 | [deploy_slackbot](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/deploy_slackbot) | Exactly-once notifications from a deploy feed |
+| [live_approvals](https://github.com/mbuhot/dbos_elixir/tree/main/sample_apps/live_approvals) | Phoenix LiveView and Dbos bridged in both directions |
 
 ## Comparisons
 
