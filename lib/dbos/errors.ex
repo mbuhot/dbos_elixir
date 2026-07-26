@@ -253,6 +253,32 @@ defmodule Dbos.TestingModeWaitError do
   end
 end
 
+defmodule Dbos.TestingModeAwaitError do
+  @moduledoc """
+  Raised when `Dbos.await/2` under an `:inline`/`:manual` testing-mode engine reaches a workflow
+  it cannot drive to completion itself. An `ENQUEUED` child is claimed and run inline; a
+  `DELAYED` one whose delay has not elapsed, or a `PENDING` one, has no process that will finish
+  it.
+  """
+
+  defexception [:workflow_id, :status]
+
+  @impl true
+  def message(%__MODULE__{workflow_id: workflow_id, status: :delayed}) do
+    "workflow #{workflow_id} is DELAYED until a time that has not arrived, and a testing-mode " <>
+      "engine has no scheduler to release it; enqueue it without :delay_ms to await it here"
+  end
+
+  def message(%__MODULE__{workflow_id: workflow_id, status: :pending}) do
+    "workflow #{workflow_id} is PENDING with no process running it — a testing-mode engine " <>
+      "runs every workflow in its caller, so nothing will complete it"
+  end
+
+  def message(%__MODULE__{workflow_id: workflow_id, status: status}) do
+    "workflow #{workflow_id} is #{status} and a testing-mode engine cannot drive it to completion"
+  end
+end
+
 defmodule Dbos.MaxStepRetriesExceededError do
   @moduledoc "Raised when a step exhausts its configured retry budget, wrapping the last underlying failure."
 

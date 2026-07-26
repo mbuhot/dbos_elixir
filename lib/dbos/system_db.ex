@@ -1882,6 +1882,19 @@ defmodule Dbos.SystemDb do
     Enum.reverse(claimed)
   end
 
+  @doc """
+  Claims the single `ENQUEUED` workflow `workflow_id` for this executor, transitioning it to
+  `PENDING`, ignoring its queue's concurrency and rate limits. Returns `%{workflow_id:, name:,
+  inputs:, config_name:}`, or `nil` if the row was not `ENQUEUED`.
+
+  For a testing-mode engine driving one named workflow, where the limits describe contention
+  that a single serial caller cannot create. `dequeue_workflows/3` is the queue-ordered,
+  limit-respecting path.
+  """
+  def claim_enqueued_workflow(%Config{} = config, workflow_id) do
+    claim_one(config, workflow_id, false)
+  end
+
   defp claim_one(config, workflow_id, rate_limited) do
     now = System.os_time(:millisecond)
 

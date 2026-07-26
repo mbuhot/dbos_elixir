@@ -305,6 +305,27 @@ defmodule Dbos.TestingModeTest do
       assert {:ok, 42} = Dbos.await(handle, engine: name)
     end
 
+    test "a workflow that enqueues a child and awaits it runs the child inline" do
+      name = Module.concat(__MODULE__, :"ChildEngine#{System.unique_integer([:positive])}")
+
+      start_supervised!(
+        {Dbos.Supervisor,
+         name: name,
+         db: {Dbos.DB.Ecto, Dbos.SandboxRepo},
+         executor_id: "sandbox-child-exec",
+         migrations: :skip,
+         testing: :manual,
+         workflows: [Dbos.CheckoutWorkflow],
+         queues: [Queue.new("children")]},
+        id: name
+      )
+
+      {:ok, handle} =
+        Dbos.start("parent_flow_queueing_child", ["ord_inline_child"], engine: name)
+
+      assert {:ok, %{charge_id: "ch_ord_inline_child"}} = Dbos.await(handle, engine: name)
+    end
+
     test "a queue with concurrency and rate limits drains under the sandbox" do
       name = Module.concat(__MODULE__, :"LimitedEngine#{System.unique_integer([:positive])}")
 

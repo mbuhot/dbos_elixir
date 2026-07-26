@@ -99,6 +99,19 @@ workflow on that queue, and returns how many ran (`0` when there's nothing to cl
 `Dbos.Testing.drain_all/1` does the same across every declared queue, including the internal one
 `Dbos.resume/2` and `Dbos.fork/3` target by default.
 
+A workflow that puts a child on a queue and waits for its result needs no drain at all. The wait
+claims that child and runs it inline, so a parent like this completes on its own:
+
+```elixir
+defworkflow settle(payment_id), name: "settle" do
+  capture(payment_id, queue_name: "gateway")
+end
+```
+
+`Dbos.await/2` raises `Dbos.TestingModeAwaitError` for a child it cannot finish itself — one
+still `DELAYED` behind a `:delay_ms` that has not elapsed, since these modes start no scheduler
+to release it.
+
 ## Testing an approval flow: send before drain, then run
 
 Under `:inline`/`:manual`, `recv_message/2` and `get_event/4` consume whatever is already there,

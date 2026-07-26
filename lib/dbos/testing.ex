@@ -37,6 +37,32 @@ defmodule Dbos.Testing do
     |> Enum.reduce(0, fn queue_name, total -> total + drain_queue(queue_name, opts) end)
   end
 
+  @doc """
+  Claims and runs `workflow_id` synchronously in the caller, whatever queue it sits on and
+  regardless of that queue's limits. Returns `true` if it ran, `false` if the row was no longer
+  `ENQUEUED`.
+
+  This is what an in-workflow `Dbos.await/2` uses to resolve an enqueued child under a
+  testing-mode engine, where no queue runner exists to pick it up.
+  """
+  def run_enqueued(config, workflow_id) do
+    case SystemDb.claim_enqueued_workflow(config, workflow_id) do
+      nil ->
+        false
+
+      claimed ->
+        dispatch(config, claimed, queue_name_of(config, workflow_id), nil)
+        true
+    end
+  end
+
+  defp queue_name_of(config, workflow_id) do
+    case SystemDb.get_workflow_status(config, workflow_id) do
+      {:ok, %{queue_name: queue_name}} -> queue_name
+      _other -> nil
+    end
+  end
+
   defp engine_config(opts), do: opts |> Keyword.get(:engine, Dbos) |> Dbos.config()
 
   defp fetch_queue!(config, queue_name) do

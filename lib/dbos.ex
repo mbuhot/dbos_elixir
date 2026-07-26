@@ -713,11 +713,39 @@ defmodule Dbos do
          %Dbos.MaxRecoveryAttemptsExceededError{workflow_id: workflow_id, attempts: attempts}}
 
       {:ok, %WorkflowStatus{status: status}} when status in [:pending, :enqueued, :delayed] ->
-        wait_or_timeout(config, engine, workflow_id, poll_interval_ms, deadline)
+        if config.testing in [:inline, :manual] do
+          run_for_testing(config, engine, workflow_id, status, poll_interval_ms, deadline)
+        else
+          wait_or_timeout(config, engine, workflow_id, poll_interval_ms, deadline)
+        end
 
       {:error, :not_found} ->
         wait_or_timeout(config, engine, workflow_id, poll_interval_ms, deadline)
     end
+  end
+
+  defp run_for_testing(config, engine, workflow_id, :delayed, poll_interval_ms, deadline) do
+    SystemDb.transition_delayed_workflows(config)
+
+    case SystemDb.get_workflow_status(config, workflow_id) do
+      {:ok, %WorkflowStatus{status: :delayed}} ->
+        raise Dbos.TestingModeAwaitError, workflow_id: workflow_id, status: :delayed
+
+      _other ->
+        poll_for_outcome(config, engine, workflow_id, poll_interval_ms, deadline)
+    end
+  end
+
+  defp run_for_testing(config, engine, workflow_id, :enqueued, poll_interval_ms, deadline) do
+    if Dbos.Testing.run_enqueued(config, workflow_id) do
+      poll_for_outcome(config, engine, workflow_id, poll_interval_ms, deadline)
+    else
+      raise Dbos.TestingModeAwaitError, workflow_id: workflow_id, status: :enqueued
+    end
+  end
+
+  defp run_for_testing(_config, _engine, workflow_id, :pending, _poll_interval_ms, _deadline) do
+    raise Dbos.TestingModeAwaitError, workflow_id: workflow_id, status: :pending
   end
 
   defp wait_or_timeout(config, engine, workflow_id, poll_interval_ms, deadline) do
