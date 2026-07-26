@@ -34,15 +34,15 @@ dispatched by whichever worker process is free, up to `worker_concurrency` at a 
 
 ## Running it
 
-Requires a local Postgres reachable with `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`
-(all optional — they default to `localhost`/`5432`/your OS user/no password/`queue_worker_dev`).
-The database itself must already exist; the schema is created automatically
-(`migrations: :create_if_absent`).
+Requires a local Postgres reachable with `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`
+(all optional — they default to `localhost`/`5432`/your OS user/no password), and a database
+named `queue_worker_dev` (override with `QUEUE_WORKER_DATABASE`).
 
 ```sh
 cd sample_apps/queue_worker
 mix deps.get
 createdb queue_worker_dev
+mix ecto.migrate
 mix queue_worker.run 20
 ```
 

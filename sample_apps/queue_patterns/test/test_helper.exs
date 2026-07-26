@@ -1,11 +1,21 @@
-schema_path = Application.app_dir(:dbos, "priv/schema/dbos_schema.sql")
+database = System.get_env("QUEUE_PATTERNS_DATABASE", "queue_patterns_test")
 
-{_output, 0} = System.cmd("dropdb", ["--if-exists", "queue_patterns_test"])
-{_output, 0} = System.cmd("createdb", ["queue_patterns_test"])
+{_output, 0} = System.cmd("dropdb", ["--if-exists", database])
+{_output, 0} = System.cmd("createdb", [database])
 
-{_output, 0} =
-  System.cmd("psql", ["-v", "ON_ERROR_STOP=1", "-d", "queue_patterns_test", "-f", schema_path])
+Application.put_env(:queue_patterns, QueuePatterns.Repo,
+  database: database,
+  hostname: System.get_env("PGHOST", "localhost"),
+  port: System.get_env("PGPORT", "5432") |> String.to_integer(),
+  username: System.get_env("PGUSER", System.get_env("USER", "postgres")),
+  password: System.get_env("PGPASSWORD"),
+  pool_size: 5,
+  log: false
+)
 
-{:ok, _pid} = Postgrex.start_link(name: QueuePatterns.Repo, database: "queue_patterns_test")
+{:ok, _pid} = QueuePatterns.Repo.start_link()
+
+migrations_path = Path.join([__DIR__, "..", "priv", "repo", "migrations"])
+Ecto.Migrator.run(QueuePatterns.Repo, migrations_path, :up, all: true)
 
 ExUnit.start()

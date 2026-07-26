@@ -24,6 +24,7 @@ defmodule QueueWorker.MixProject do
   defp deps do
     [
       {:dbos, path: "../.."},
+      {:ecto_sql, "~> 3.13"},
       {:postgrex, "~> 0.21"}
     ]
   end

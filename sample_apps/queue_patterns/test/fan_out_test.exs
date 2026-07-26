@@ -6,11 +6,11 @@ defmodule QueuePatterns.FanOutTest do
   setup do
     start_supervised!(
       {Dbos.Supervisor,
-       db: {Dbos.DB.Postgrex, QueuePatterns.Repo},
+       db: {Dbos.DB.Ecto, QueuePatterns.Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [FanOut],
        queues: [Dbos.Queue.new("fan_out", worker_concurrency: 5, base_polling_interval_ms: 20)],
-       migrations: :skip}
+       migrations: :verify}
     )
 
     Dbos.Recovery.await_boot_recovery(Dbos)

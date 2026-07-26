@@ -7,11 +7,11 @@ defmodule QueueWorkerTest do
   setup do
     start_supervised!(
       {Dbos.Supervisor,
-       db: {Dbos.DB.Postgrex, QueueWorker.Repo},
+       db: {Dbos.DB.Ecto, QueueWorker.Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Tasks],
        queues: [Dbos.Queue.new("tasks", worker_concurrency: 2)],
-       migrations: :skip}
+       migrations: :verify}
     )
 
     Dbos.Recovery.await_boot_recovery(Dbos)
@@ -50,8 +50,7 @@ defmodule QueueWorkerTest do
     config = Dbos.config()
 
     %{rows: [[success_count]]} =
-      Postgrex.query!(
-        QueueWorker.Repo,
+      QueueWorker.Repo.query!(
         "SELECT count(*) FROM \"dbos\".workflow_status WHERE status = 'SUCCESS' AND workflow_uuid LIKE $1",
         ["#{batch_id}-%"]
       )

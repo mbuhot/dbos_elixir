@@ -25,7 +25,10 @@ defmodule Mix.Tasks.QueueWorker.Run do
 
     kill_one_worker(handles)
 
-    Mix.shell().info("Recovering this executor's pending workflows (a restarted worker does this at boot)...")
+    Mix.shell().info(
+      "Recovering this executor's pending workflows (a restarted worker does this at boot)..."
+    )
+
     Dbos.Recovery.recover_pending(Dbos)
 
     Mix.shell().info("Awaiting completion (checkpointed tasks are not re-run)...")
@@ -64,14 +67,16 @@ defmodule Mix.Tasks.QueueWorker.Run do
 
   defp verify(batch_id, count, results) do
     %{rows: [[success_count]]} =
-      Postgrex.query!(
-        QueueWorker.Repo,
+      QueueWorker.Repo.query!(
         "SELECT count(*) FROM \"dbos\".workflow_status WHERE status = 'SUCCESS' AND workflow_uuid LIKE $1",
         ["#{batch_id}-%"]
       )
 
-    claim_counts = for task_number <- 1..count, do: Tasks.execution_count(:claim_task, batch_id, task_number)
-    work_counts = for task_number <- 1..count, do: Tasks.execution_count(:do_work, batch_id, task_number)
+    claim_counts =
+      for task_number <- 1..count, do: Tasks.execution_count(:claim_task, batch_id, task_number)
+
+    work_counts =
+      for task_number <- 1..count, do: Tasks.execution_count(:do_work, batch_id, task_number)
 
     Mix.shell().info("#{success_count}/#{count} tasks SUCCESS in dbos.workflow_status")
     Mix.shell().info("Collected #{length(results)} results")

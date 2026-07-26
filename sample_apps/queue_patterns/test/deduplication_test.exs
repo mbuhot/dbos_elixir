@@ -6,11 +6,11 @@ defmodule QueuePatterns.DeduplicationTest do
   setup do
     start_supervised!(
       {Dbos.Supervisor,
-       db: {Dbos.DB.Postgrex, QueuePatterns.Repo},
+       db: {Dbos.DB.Ecto, QueuePatterns.Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Deduplication],
        queues: [Dbos.Queue.new("dedup_queue", base_polling_interval_ms: 20)],
-       migrations: :skip}
+       migrations: :verify}
     )
 
     Dbos.Recovery.await_boot_recovery(Dbos)

@@ -2,6 +2,7 @@ defmodule AgentInbox.ApprovalsTest do
   use ExUnit.Case, async: false
 
   alias AgentInbox.Approvals
+  alias AgentInbox.Repo
 
   @tables ~w(
     workflow_status
@@ -21,10 +22,10 @@ defmodule AgentInbox.ApprovalsTest do
 
     start_supervised!(
       {Dbos.Supervisor,
-       db: {Dbos.DB.Postgrex, AgentInbox.TestConn},
+       db: {Dbos.DB.Ecto, Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Approvals],
-       migrations: :create_if_absent}
+       migrations: :verify}
     )
 
     Dbos.Recovery.await_boot_recovery(Dbos)
@@ -95,7 +96,7 @@ defmodule AgentInbox.ApprovalsTest do
 
   defp truncate_tables do
     tables = Enum.map_join(@tables, ", ", &"dbos.#{&1}")
-    Postgrex.query!(AgentInbox.TestConn, "TRUNCATE TABLE #{tables} CASCADE", [])
+    Repo.query!("TRUNCATE TABLE #{tables} CASCADE", [])
   rescue
     Postgrex.Error -> :ok
   end

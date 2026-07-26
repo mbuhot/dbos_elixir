@@ -1,34 +1,18 @@
 defmodule QueuePatterns.Application do
-  @moduledoc "Boots the Postgres pool and the Dbos engine backing every pattern module."
+  @moduledoc "Boots this app's Ecto repo and the Dbos engine backing every pattern module."
 
   use Application
-
-  alias QueuePatterns.Debouncing
-  alias QueuePatterns.Deduplication
-  alias QueuePatterns.FanOut
-  alias QueuePatterns.Priority
-  alias QueuePatterns.RateLimitedApi
-  alias QueuePatterns.SerializedPerKey
-  alias QueuePatterns.TenantFairness
 
   @impl true
   def start(_type, _args) do
     children = [
-      {Postgrex, postgrex_opts()},
+      QueuePatterns.Repo,
       {Dbos.Supervisor,
        name: Dbos,
-       db: {Dbos.DB.Postgrex, QueuePatterns.Repo},
-       workflows: [
-         FanOut,
-         RateLimitedApi,
-         TenantFairness,
-         Priority,
-         Deduplication,
-         Debouncing,
-         SerializedPerKey
-       ],
+       db: {Dbos.DB.Ecto, QueuePatterns.Repo},
+       otp_app: :queue_patterns,
        queues: queues(),
-       migrations: :create_if_absent}
+       migrations: :verify}
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: QueuePatterns.Supervisor)
@@ -60,18 +44,6 @@ defmodule QueuePatterns.Application do
         worker_concurrency: 1,
         base_polling_interval_ms: 200
       )
-    ]
-  end
-
-  defp postgrex_opts do
-    [
-      name: QueuePatterns.Repo,
-      hostname: System.get_env("PGHOST", "localhost"),
-      port: System.get_env("PGPORT", "5432") |> String.to_integer(),
-      username: System.get_env("PGUSER", System.get_env("USER", "postgres")),
-      password: System.get_env("PGPASSWORD"),
-      database: System.get_env("PGDATABASE", "queue_patterns_dev"),
-      pool_size: 10
     ]
   end
 end

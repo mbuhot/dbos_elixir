@@ -31,18 +31,19 @@ suite uses short timeouts (milliseconds) only so it runs fast, not because the m
 ```sh
 mix deps.get
 createdb agent_inbox_dev   # or set AGENT_INBOX_DATABASE
+mix ecto.migrate
 ```
 
 ```elixir
 iex -S mix
 
 iex> children = [
-...>   AgentInbox.Db,
+...>   AgentInbox.Repo,
 ...>   {Dbos.Supervisor,
 ...>    name: Dbos,
-...>    db: {Dbos.DB.Postgrex, AgentInbox.Db.pool_name()},
+...>    db: {Dbos.DB.Ecto, AgentInbox.Repo},
 ...>    workflows: [AgentInbox.Approvals],
-...>    migrations: :create_if_absent}
+...>    migrations: :verify}
 ...> ]
 iex> Supervisor.start_link(children, strategy: :one_for_one)
 
@@ -95,3 +96,6 @@ Covers all four documented outcomes:
   listing pending workflows and sending one message need only a `Dbos.Config` and a database
   connection, not the engine's registry, workflow supervisor, or recovery pass. See
   `AgentInbox.Cli`.
+- The schema is installed by `priv/repo/migrations/20260101000001_add_dbos.exs`, an ordinary Ecto
+  migration that calls `Dbos.Migration.up/0`. This sample keeps no tables of its own, so it's the
+  only migration in the sequence.

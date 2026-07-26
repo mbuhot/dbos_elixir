@@ -6,7 +6,7 @@ defmodule QueuePatterns.PriorityTest do
   alias QueuePatterns.Priority
 
   test "a lower priority number runs before requests already waiting, ties broken by arrival" do
-    raw_config = %Dbos.Config{db: Dbos.DB.Postgrex, conn: QueuePatterns.Repo}
+    raw_config = %Dbos.Config{db: Dbos.DB.Ecto, conn: QueuePatterns.Repo}
 
     {:ok, normal_1_id} =
       SystemDb.insert_enqueued_workflow(raw_config, %{
@@ -38,7 +38,7 @@ defmodule QueuePatterns.PriorityTest do
 
     start_supervised!(
       {Dbos.Supervisor,
-       db: {Dbos.DB.Postgrex, QueuePatterns.Repo},
+       db: {Dbos.DB.Ecto, QueuePatterns.Repo},
        executor_id: "test-#{System.unique_integer([:positive])}",
        workflows: [Priority],
        queues: [
@@ -48,7 +48,7 @@ defmodule QueuePatterns.PriorityTest do
            base_polling_interval_ms: 20
          )
        ],
-       migrations: :skip}
+       migrations: :verify}
     )
 
     Dbos.Recovery.await_boot_recovery(Dbos)

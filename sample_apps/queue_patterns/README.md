@@ -6,14 +6,15 @@ to Elixir. Each pattern below is its own module, backed by its own declared queu
 
 ## Running it
 
-Requires a local Postgres reachable with `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`
-(defaults: `localhost`/`5432`/your OS user/no password/`queue_patterns_dev`). The database itself
-must already exist; the schema is created automatically (`migrations: :create_if_absent`).
+Requires a local Postgres reachable with `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`
+(defaults: `localhost`/`5432`/your OS user/no password), and a database named
+`queue_patterns_dev` (override with `QUEUE_PATTERNS_DATABASE`).
 
 ```sh
 cd sample_apps/queue_patterns
 mix deps.get
 createdb queue_patterns_dev
+mix ecto.migrate
 iex -S mix
 ```
 
