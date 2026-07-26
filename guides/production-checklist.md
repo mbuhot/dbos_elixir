@@ -13,6 +13,14 @@ every item lives in the rest of the guides.
       at boot on either mismatch. Apply the migration before rolling the new build out, so the
       old build keeps running against a schema it still understands.
 
+## Determinism
+
+- [ ] Add `compilers: [:dbos] ++ Mix.compilers()` to `mix.exs`, in `:dev` and `:test`.
+- [ ] Run CI with `mix compile --warnings-as-errors`, so a workflow that reaches a
+      nondeterministic call through a helper fails the build.
+- [ ] Review the `dbos: [trusted: [...]]` list in `mix.exs`. An entry that suppresses nothing is
+      reported as a hint.
+
 ## Identity
 
 | Setting | Env var | What to set it to |

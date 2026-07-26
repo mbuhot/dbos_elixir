@@ -15,6 +15,20 @@ end
 `Dbos` needs a Postgres connection, and reuses your application's own — a bare `Postgrex`
 pool (`Dbos.DB.Postgrex`) or an `Ecto.Repo` (`Dbos.DB.Ecto`). This guide uses `Ecto.Repo`.
 
+Turn on the determinism compiler in the same file. It walks your whole application and warns
+when a workflow reaches a nondeterministic call through a helper function:
+
+```elixir
+def project do
+  [
+    compilers: [:dbos] ++ Mix.compilers(),
+    ...
+  ]
+end
+```
+
+See `docs/determinism.md` for what it checks and how to silence a finding.
+
 ## 2. Write a workflow
 
 ```elixir
