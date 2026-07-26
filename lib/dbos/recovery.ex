@@ -15,6 +15,14 @@ defmodule Dbos.Recovery do
   A recovered workflow replays from its checkpoints. A queued one is handed back to its queue
   rather than re-invoked directly. One workflow failing to redispatch is isolated and logged; the
   pass continues with the rest of the batch.
+
+  ## Declined workflows
+
+  A reclaim pass that drains its batch reports what it left behind: every `PENDING` row still
+  owned by a dead executor, grouped by name, the row's `application_version` and a
+  `t:decline_reason/0`. Each group logs one warning and emits one `[:dbos, :recovery, :declined]`
+  event measuring `%{count: n}`, so a population no live executor can claim is a steady signal
+  rather than silence.
   """
 
   use GenServer
@@ -28,6 +36,13 @@ defmodule Dbos.Recovery do
 
   @rescan_passes 5
   @rescan_base_delay_ms 50
+
+  @typedoc """
+  Why a reclaim pass left a `PENDING` row where it was: this executor has no workflow registered
+  under that name, the row's `application_version` differs from this executor's, or the row was
+  claimable and another transaction held it.
+  """
+  @type decline_reason :: :name_not_registered | :version_mismatch | :locked_elsewhere
 
   @doc "Starts recovery for the engine named `opts[:name]`, scanning once in a `handle_continue` so `start_link` returns promptly."
   def start_link(opts) do
@@ -65,7 +80,7 @@ defmodule Dbos.Recovery do
       queued_ids = SystemDb.list_queued_pending_workflow_ids(config, dead_executor_ids)
       Enum.each(queued_ids, &clear_one(config, &1))
 
-      queued_ids ++
+      {ids, handled, outcome} =
         reclaim_passes(
           engine_name,
           config,
@@ -75,6 +90,10 @@ defmodule Dbos.Recovery do
           MapSet.new(),
           1
         )
+
+      report_declined(outcome, engine_name, config, dead_executor_ids, registered_names, handled)
+
+      queued_ids ++ ids
     end)
   end
 
@@ -114,26 +133,33 @@ defmodule Dbos.Recovery do
     ids = Enum.map(reclaimed, & &1.workflow_uuid)
     handled = Enum.into(ids, handled)
 
-    if rescan?(config, dead_executor_ids, registered_names, opts, handled, reclaimed, pass) do
-      Process.sleep(@rescan_base_delay_ms * Integer.pow(2, pass - 1))
+    cond do
+      batch_exhausted?(opts, reclaimed) ->
+        {ids, handled, :batch_exhausted}
 
-      ids ++
-        reclaim_passes(
-          engine_name,
-          config,
-          dead_executor_ids,
-          registered_names,
-          opts,
-          handled,
-          pass + 1
-        )
-    else
-      ids
+      rescan?(config, dead_executor_ids, registered_names, handled, pass) ->
+        Process.sleep(@rescan_base_delay_ms * Integer.pow(2, pass - 1))
+
+        {rest, handled, outcome} =
+          reclaim_passes(
+            engine_name,
+            config,
+            dead_executor_ids,
+            registered_names,
+            opts,
+            handled,
+            pass + 1
+          )
+
+        {ids ++ rest, handled, outcome}
+
+      true ->
+        {ids, handled, :drained}
     end
   end
 
-  defp rescan?(config, dead_executor_ids, registered_names, opts, handled, reclaimed, pass) do
-    pass < @rescan_passes and not batch_exhausted?(opts, reclaimed) and
+  defp rescan?(config, dead_executor_ids, registered_names, handled, pass) do
+    pass < @rescan_passes and
       Enum.any?(
         SystemDb.list_reclaimable_pending_workflow_ids(
           config,
@@ -149,6 +175,46 @@ defmodule Dbos.Recovery do
       nil -> false
       batch_size -> length(reclaimed) >= batch_size
     end
+  end
+
+  defp report_declined(:batch_exhausted, _engine, _config, _dead_ids, _names, _handled), do: :ok
+
+  defp report_declined(:drained, engine_name, config, dead_executor_ids, names, handled) do
+    config
+    |> SystemDb.list_unclaimed_pending_workflow_groups(
+      dead_executor_ids,
+      names,
+      MapSet.to_list(handled)
+    )
+    |> Enum.each(&report_declined_group(engine_name, config, names, &1))
+  end
+
+  defp report_declined_group(engine_name, config, registered_names, group) do
+    reason = decline_reason(group, registered_names)
+
+    Logger.warning(
+      "dbos: leaving #{group.count} PENDING workflow(s) named #{inspect(group.name)} " <>
+        "(version #{inspect(group.application_version)}, this executor " <>
+        "#{inspect(config.application_version)}) unclaimed: #{reason}; " <>
+        "for example #{group.example_workflow_id}"
+    )
+
+    Telemetry.declined_reclaim(
+      %{
+        engine: engine_name,
+        name: group.name,
+        row_version: group.application_version,
+        executor_version: config.application_version,
+        reason: reason
+      },
+      group.count
+    )
+  end
+
+  defp decline_reason(%{claimable: true}, _registered_names), do: :locked_elsewhere
+
+  defp decline_reason(%{name: name}, registered_names) do
+    if name in registered_names, do: :version_mismatch, else: :name_not_registered
   end
 
   defp clear_one(config, workflow_id) do

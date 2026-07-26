@@ -1,6 +1,8 @@
 defmodule Dbos.RecoveryTest do
   use Dbos.Case, async: false
 
+  import ExUnit.CaptureLog
+
   require Logger
 
   alias Dbos.Recovery
@@ -375,6 +377,158 @@ defmodule Dbos.RecoveryTest do
 
     {:ok, status} = SystemDb.get_workflow_status(config, "wf-dead-dlq")
     assert status.status == :max_recovery_attempts_exceeded
+  end
+
+  test "reports how many workflows were left behind because nothing here is registered under their name",
+       %{config: config, name: name} do
+    Enum.each(1..3, fn index ->
+      insert_owned_by(config, "exec-dead", %{
+        workflow_id: "wf-unknown-#{index}",
+        status: :pending,
+        name: "unknown_workflow/1",
+        inputs: [index]
+      })
+    end)
+
+    watch_declined()
+
+    log = capture_log(fn -> Recovery.reclaim(name, ["exec-dead"]) end)
+
+    assert log =~ "3 PENDING workflow(s) named \"unknown_workflow/1\""
+    assert log =~ "name_not_registered"
+    assert log =~ "wf-unknown-1"
+
+    assert_received {:declined, %{count: 3}, metadata}
+    assert metadata.name == "unknown_workflow/1"
+    assert metadata.reason == :name_not_registered
+    refute_received {:declined, _, _}
+  end
+
+  test "reports the workflows left behind by an application version this executor does not run",
+       %{
+         config: config,
+         name: name
+       } do
+    Dbos.put_config(%{config | application_version: "v2"})
+
+    insert_owned_by(config, "exec-dead", %{
+      workflow_id: "wf-old-version",
+      status: :pending,
+      name: "add/2",
+      inputs: [1, 2],
+      application_version: "v1"
+    })
+
+    watch_declined()
+
+    log = capture_log(fn -> Recovery.reclaim(name, ["exec-dead"]) end)
+
+    assert log =~ "1 PENDING workflow(s) named \"add/2\" (version \"v1\", this executor \"v2\")"
+    assert log =~ "version_mismatch"
+    assert log =~ "wf-old-version"
+
+    assert_received {:declined, %{count: 1}, metadata}
+    assert metadata.row_version == "v1"
+    assert metadata.executor_version == "v2"
+    assert metadata.reason == :version_mismatch
+
+    {:ok, status} = SystemDb.get_workflow_status(config, "wf-old-version")
+    assert status.executor_id == "exec-dead"
+  end
+
+  test "reports a workflow it could have run but another transaction was holding", %{
+    config: config,
+    name: name
+  } do
+    insert_owned_by(config, "exec-dead", %{
+      workflow_id: "wf-held",
+      status: :pending,
+      name: "add/2",
+      inputs: [1, 2]
+    })
+
+    holder = hold_row_lock("wf-held")
+    watch_declined()
+
+    log = capture_log(fn -> Recovery.reclaim(name, ["exec-dead"]) end)
+
+    release_row_lock(holder)
+
+    assert log =~ "1 PENDING workflow(s) named \"add/2\""
+    assert log =~ "locked_elsewhere"
+    assert log =~ "wf-held"
+
+    assert_received {:declined, %{count: 1}, metadata}
+    assert metadata.reason == :locked_elsewhere
+  end
+
+  test "says nothing about workflows it reclaimed and redispatched itself", %{
+    config: config,
+    name: name
+  } do
+    insert_owned_by(config, "exec-dead", %{
+      workflow_id: "wf-quiet",
+      status: :pending,
+      name: "add/2",
+      inputs: [1, 2]
+    })
+
+    watch_declined()
+
+    log = capture_log(fn -> Recovery.reclaim(name, ["exec-dead"]) end)
+
+    refute log =~ "unclaimed"
+    refute_received {:declined, _, _}
+  end
+
+  defp watch_declined do
+    test_pid = self()
+    handler_id = {__MODULE__, System.unique_integer([:positive])}
+
+    :telemetry.attach(
+      handler_id,
+      [:dbos, :recovery, :declined],
+      fn _event, measurements, metadata, _config ->
+        send(test_pid, {:declined, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  defp hold_row_lock(workflow_id) do
+    {:ok, conn} = Postgrex.start_link(database: Application.get_env(:dbos, :test_database))
+    test_pid = self()
+
+    task =
+      Task.async(fn ->
+        Postgrex.transaction(
+          conn,
+          fn tx ->
+            Postgrex.query!(
+              tx,
+              "SELECT workflow_uuid FROM dbos.workflow_status WHERE workflow_uuid = $1 FOR UPDATE",
+              [workflow_id]
+            )
+
+            send(test_pid, :row_locked)
+
+            receive do
+              :release -> :ok
+            end
+          end,
+          timeout: 30_000
+        )
+      end)
+
+    assert_receive :row_locked, 5_000
+    task
+  end
+
+  defp release_row_lock(task) do
+    send(task.pid, :release)
+    Task.await(task)
   end
 
   defp insert_owned_by(config, executor_id, attrs) do

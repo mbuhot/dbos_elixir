@@ -28,6 +28,15 @@ defmodule Dbos.Telemetry do
   end
 
   @doc """
+  Reports one group of `PENDING` workflows a reclaim pass left behind:
+  `[:dbos, :recovery, :declined]`, measuring `%{count: n}`. Emitted once per
+  `{name, version, reason}` group per pass.
+  """
+  def declined_reclaim(metadata, count) do
+    :telemetry.execute([:dbos, :recovery, :declined], %{count: count}, metadata)
+  end
+
+  @doc """
   Spans one blocking wait — sleep, recv, or get_event: `[:dbos, :wait, ...]`. `fun` returns
   `{result, outcome}` and `outcome` (`:resolved` or `:timeout`) is merged into the `:stop`
   metadata. A `Dbos.Waits.Parked` unwinding the wait stops the span with `outcome: :parked` and

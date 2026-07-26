@@ -60,6 +60,18 @@ process is running it.
    executor whose own `config.application_version` matches the row's
    (`reclaim_pending_workflows/4` filters on it when set). If every live executor is running a
    different version than the one that started this workflow, nothing will ever pick it up.
+   Every reclaim pass that finishes its batch says so, one warning per name and version:
+
+   ```
+   [warning] dbos: leaving 12 PENDING workflow(s) named "process_order/1"
+   (version "v1", this executor "v2") unclaimed: version_mismatch; for example 018f...
+   ```
+
+   The same groups arrive as `[:dbos, :recovery, :declined]`, measuring `%{count: n}` with
+   `%{engine:, name:, row_version:, executor_version:, reason:}`. `:reason` is one of
+   `:name_not_registered` (cause 1 above), `:version_mismatch` (this cause), or
+   `:locked_elsewhere` (a peer held the row — transient). The count is a gauge: a population
+   nothing can claim re-reports on every lease sweep until an operator moves it.
 3. **It's actually running, just slow or blocked.** A step body that's genuinely long-running, or
    a `defworkflow` blocked in `Dbos.sleep/1`/`Dbos.recv_message/2` with a long remaining wait,
    looks identical to "stuck" from the status alone — check `operation_outputs` for that

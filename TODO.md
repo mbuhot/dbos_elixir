@@ -5,15 +5,20 @@ The work queue. Each entry is something we intend to do. Resolved items are dele
 ## Per-workflow application version
 
 `SystemDb.reclaim_pending_workflows/4` filters `AND application_version = $n`, so a version
-mismatch reclaims nothing and logs nothing — the workflow is orphaned permanently and silently.
-`DBOS__APPVERSION` is commonly a git SHA, and even the computed default digests every workflow
-module together, so changing one workflow strands in-flight instances of all of them.
+mismatch reclaims nothing — the workflow is orphaned permanently. `DBOS__APPVERSION` is commonly a
+git SHA, and even the computed default digests every workflow module together, so changing one
+workflow strands in-flight instances of all of them.
 
-Version each workflow by a digest of its own reachable code and match reclaim on that. "Reachable"
-is the hard part: a digest over the entry module alone misses a helper change that breaks replay.
-The call graph in the determinism checker below is the same index.
+`notes/per-workflow-version-design.md` has the design and its phasing.
 
-Needs a design pass before implementation — it changes a column and the reclaim contract.
+**Phase 0 is done**: a drained reclaim pass reports every row it left behind — one
+`Logger.warning` and one `[:dbos, :recovery, :declined]` event per `{name, version, reason}`
+group, with `reason` in `:name_not_registered | :version_mismatch | :locked_elsewhere`. Folding
+that event into `Dbos.Telemetry` and `docs/telemetry.md` is outstanding.
+
+**Phases 1-5 remain**: the `ex_workflow_version` column and `ex_capabilities` on leases,
+`Dbos.Recovery.orphans/1` and `mix dbos.orphans`, the workflow-skeleton digest, the per-workflow
+reclaim predicate, and prefix verification with `Dbos.Recovery.adopt/3`.
 
 ## Whole-application determinism checker
 

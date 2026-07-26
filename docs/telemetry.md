@@ -1,6 +1,6 @@
 # Telemetry
 
-Five spans. Attach your own handler (`:telemetry.attach/4`, `:telemetry.attach_many/4`) and bridge
+Five spans and one standalone event. Attach your own handler (`:telemetry.attach/4`, `:telemetry.attach_many/4`) and bridge
 to whatever backend you use.
 
 Every span emits the standard triple: `[..., :start]`, `[..., :stop]`, and `[..., :exception]` on a
@@ -15,6 +15,8 @@ units); `:stop`/`:exception` measurements carry `duration` (native units, conver
 | `[:dbos, :wait]` | one blocking wait: `Dbos.sleep/1`, `Dbos.recv_message/3`, `Dbos.get_event/4` |
 | `[:dbos, :queue, :dequeue]` | one dequeue poll of one queue/partition pair |
 | `[:dbos, :recovery]` | one `Dbos.Recovery.reclaim/2,3` pass |
+
+`[:dbos, :recovery, :declined]` is a standalone event rather than a span — see below.
 
 `kind`, `reason`, and `stacktrace` are present on every `:exception` event and are omitted from
 the tables below.
@@ -101,6 +103,23 @@ reclaim, and the `POST /dbos-workflow-recovery` admin route all go through it.
 |---|---|
 | `engine` | The engine name. |
 | `executor_ids` | The executor ids this pass is reclaiming. |
+
+## `[:dbos, :recovery, :declined]`
+
+A standalone event, emitted once per `{name, version, reason}` group by a reclaim pass that left
+`PENDING` rows behind. Measures `%{count: n}`. A population nothing in the fleet can claim
+re-reports on every lease sweep, so the count reads as a gauge.
+
+| Metadata | Meaning |
+|---|---|
+| `engine` | The engine name. |
+| `name` | The workflow name of the rows left behind. |
+| `row_version` | The `application_version` recorded on those rows. |
+| `executor_version` | This executor's own `application_version`. |
+| `reason` | `:name_not_registered`, `:version_mismatch`, or `:locked_elsewhere`. |
+
+`:locked_elsewhere` is transient — a peer held the row's lock during this pass. The other two
+persist until an operator acts.
 
 ## Attaching a handler
 

@@ -469,7 +469,7 @@ defmodule Dbos.SystemDb do
 
   def reclaim_pending_workflows(%Config{} = config, dead_executor_ids, registered_names, opts) do
     batch_size = Keyword.get(opts, :batch_size)
-    {version_clause, version_params, next_index} = application_version_clause(config, 5)
+    {version_predicate, version_params, next_index} = application_version_predicate(config, 5)
     {limit_clause, limit_params} = reclaim_limit_clause(batch_size, next_index)
 
     sql = """
@@ -477,8 +477,8 @@ defmodule Dbos.SystemDb do
         SET executor_id = $1
         WHERE workflow_uuid IN (
           SELECT workflow_uuid FROM #{table(config, "workflow_status")}
-          WHERE executor_id = ANY($2) AND status = $3 AND queue_name IS NULL AND name = ANY($4)
-            #{version_clause}
+          WHERE #{reclaim_scope_predicate(2)}
+            AND #{capability_predicate(4, version_predicate)}
           ORDER BY created_at ASC
           #{limit_clause}
           FOR UPDATE SKIP LOCKED
@@ -487,8 +487,9 @@ defmodule Dbos.SystemDb do
     """
 
     params =
-      [config.executor_id, dead_executor_ids, Status.to_string(:pending), registered_names] ++
-        version_params ++ limit_params
+      [config.executor_id] ++
+        reclaim_scope_params(dead_executor_ids) ++
+        [registered_names] ++ version_params ++ limit_params
 
     {:ok, result} = query(config, sql, params)
     Enum.map(result.rows, &WorkflowStatus.from_row/1)
@@ -497,10 +498,21 @@ defmodule Dbos.SystemDb do
   defp reclaim_limit_clause(nil, _index), do: {"", []}
   defp reclaim_limit_clause(batch_size, index), do: {"LIMIT $#{index}", [batch_size]}
 
-  defp application_version_clause(%{application_version: nil}, index), do: {"", [], index}
+  defp application_version_predicate(%{application_version: nil}, index), do: {nil, [], index}
 
-  defp application_version_clause(%{application_version: version}, index),
-    do: {"AND application_version = $#{index}", [version], index + 1}
+  defp application_version_predicate(%{application_version: version}, index),
+    do: {"application_version = $#{index}", [version], index + 1}
+
+  defp reclaim_scope_predicate(index),
+    do: "executor_id = ANY($#{index}) AND status = $#{index + 1} AND queue_name IS NULL"
+
+  defp capability_predicate(names_index, nil), do: "name = ANY($#{names_index})"
+
+  defp capability_predicate(names_index, version_predicate),
+    do: "name = ANY($#{names_index}) AND #{version_predicate}"
+
+  defp reclaim_scope_params(dead_executor_ids),
+    do: [dead_executor_ids, Status.to_string(:pending)]
 
   @doc """
   The ids of non-queued `PENDING` rows still owned by any of `dead_executor_ids` — the same set
@@ -519,17 +531,66 @@ defmodule Dbos.SystemDb do
         dead_executor_ids,
         registered_names
       ) do
-    {version_clause, version_params, _next_index} = application_version_clause(config, 4)
+    {version_predicate, version_params, _next_index} = application_version_predicate(config, 4)
 
     sql = """
     SELECT workflow_uuid FROM #{table(config, "workflow_status")}
-    WHERE executor_id = ANY($1) AND status = $2 AND queue_name IS NULL AND name = ANY($3)
-      #{version_clause}
+    WHERE #{reclaim_scope_predicate(1)}
+      AND #{capability_predicate(3, version_predicate)}
     """
 
-    params = [dead_executor_ids, Status.to_string(:pending), registered_names] ++ version_params
+    params = reclaim_scope_params(dead_executor_ids) ++ [registered_names] ++ version_params
     {:ok, result} = query(config, sql, params)
     Enum.map(result.rows, fn [id] -> id end)
+  end
+
+  @doc """
+  Every non-queued `PENDING` row owned by any of `dead_executor_ids` that a reclaim pass left
+  behind, grouped by `{name, application_version, claimable}` with a count and one example id.
+
+  The unfiltered sibling of `list_reclaimable_pending_workflow_ids/3`: it scans exactly the rows
+  `reclaim_pending_workflows/4` scans, drops the `registered_names` and `config.application_version`
+  filters from the `WHERE` clause, and reports them as the `claimable` boolean instead — the same
+  predicate the two claiming queries apply, so a row reported as `claimable` is one this executor
+  could have taken. `handled_workflow_ids` are excluded, so rows the caller just reclaimed and
+  redispatched are not reported against themselves.
+
+  Aggregating in Postgres keeps one row per group on the wire however large the left-behind
+  population grows.
+  """
+  def list_unclaimed_pending_workflow_groups(
+        %Config{} = config,
+        dead_executor_ids,
+        registered_names,
+        handled_workflow_ids
+      ) do
+    {version_predicate, version_params, next_index} = application_version_predicate(config, 4)
+
+    sql = """
+    SELECT name, application_version,
+           COALESCE(#{capability_predicate(3, version_predicate)}, false) AS claimable,
+           count(*), min(workflow_uuid)
+    FROM #{table(config, "workflow_status")}
+    WHERE #{reclaim_scope_predicate(1)}
+      AND NOT (workflow_uuid = ANY($#{next_index}))
+    GROUP BY 1, 2, 3
+    """
+
+    params =
+      reclaim_scope_params(dead_executor_ids) ++
+        [registered_names] ++ version_params ++ [handled_workflow_ids]
+
+    {:ok, result} = query(config, sql, params)
+
+    Enum.map(result.rows, fn [name, application_version, claimable, count, example_id] ->
+      %{
+        name: name,
+        application_version: application_version,
+        claimable: claimable,
+        count: count,
+        example_workflow_id: example_id
+      }
+    end)
   end
 
   @doc """
