@@ -23,7 +23,7 @@ defmodule LiveApprovals.Reviews do
 
     with {:ok, request} <- Approvals.submit_request(attrs) do
       {:ok, _handle} =
-        Dbos.enqueue(&ReviewWorkflow.review/1, [request.id],
+        ReviewWorkflow.review(request.id,
           queue_name: ReviewWorkflow.queue_name(),
           workflow_id: request.id,
           engine: engine(opts)

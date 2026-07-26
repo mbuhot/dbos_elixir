@@ -45,11 +45,7 @@ defmodule CustomerServiceAgent.Support do
         %{status: "error", message: "order #{order_id} not found"}
 
       %{amount: amount} = purchase when amount > @refund_approval_threshold ->
-        {:ok, handle} =
-          Dbos.start("approval_workflow", [purchase], workflow_id: approval_workflow_id(order_id))
-
-        {:ok, result} = Dbos.await(handle)
-        result
+        approval_workflow(purchase, workflow_id: approval_workflow_id(order_id))
 
       _purchase ->
         update_purchase_status_step(order_id, :refunded)
@@ -130,7 +126,9 @@ defmodule CustomerServiceAgent.Support do
   end
 
   defp tool_use_blocks(calls) do
-    Enum.map(calls, fn call -> %{type: "tool_use", id: call.id, name: call.name, input: call.input} end)
+    Enum.map(calls, fn call ->
+      %{type: "tool_use", id: call.id, name: call.name, input: call.input}
+    end)
   end
 
   defp last_assistant_text(messages) do

@@ -47,8 +47,8 @@ iex> children = [
 ...> ]
 iex> Supervisor.start_link(children, strategy: :one_for_one)
 
-iex> Dbos.start("request_approval",
-...>   ["req-1", "refund over $500", "customer disputes a charge", :timer.hours(72), 0],
+iex> AgentInbox.Approvals.request_approval(
+...>   "req-1", "refund over $500", "customer disputes a charge", :timer.hours(72), 0,
 ...>   workflow_id: "req-1"
 ...> )
 ```

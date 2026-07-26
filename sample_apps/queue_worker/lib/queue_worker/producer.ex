@@ -2,6 +2,9 @@ defmodule QueueWorker.Producer do
   @moduledoc """
   Enqueues a batch of tasks onto the `"tasks"` queue and reports on their progress and results —
   the "one place enqueues, workers elsewhere execute" side of the sample.
+
+  Enqueueing goes through `Dbos.enqueue/3` by registered workflow name: a producer needs the
+  workflow's name and its queue, and can run on a node that never loads `QueueWorker.Tasks`.
   """
 
   alias Dbos.WorkflowHandle

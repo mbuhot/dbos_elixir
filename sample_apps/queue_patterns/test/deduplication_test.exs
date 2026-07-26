@@ -19,13 +19,13 @@ defmodule QueuePatterns.DeduplicationTest do
 
   test "a second submission for the same report is rejected while the first is in flight" do
     {:ok, first} =
-      Dbos.enqueue(&Deduplication.generate_report/1, ["report-42"],
+      Deduplication.generate_report("report-42",
         queue_name: "dedup_queue",
         deduplication_id: "report-42"
       )
 
     assert_raise Dbos.QueueDeduplicatedError, fn ->
-      Dbos.enqueue(&Deduplication.generate_report/1, ["report-42"],
+      Deduplication.generate_report("report-42",
         queue_name: "dedup_queue",
         deduplication_id: "report-42"
       )

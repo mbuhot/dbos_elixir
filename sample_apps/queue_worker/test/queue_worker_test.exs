@@ -25,7 +25,7 @@ defmodule QueueWorkerTest do
     handles =
       for task_number <- 1..count do
         {:ok, handle} =
-          Dbos.enqueue(&Tasks.process_task/2, [batch_id, task_number],
+          Tasks.process_task(batch_id, task_number,
             queue_name: "tasks",
             workflow_id: "#{batch_id}-#{task_number}"
           )

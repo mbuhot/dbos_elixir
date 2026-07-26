@@ -26,7 +26,7 @@ defmodule Mix.Tasks.WidgetStore.Demo do
     seed_product()
 
     {:ok, _handle} =
-      Dbos.start("checkout", [@order_id, @product_id, @quantity], workflow_id: @order_id)
+      WidgetStore.Checkout.checkout(@order_id, @product_id, @quantity, workflow_id: @order_id)
 
     Process.sleep(1_000)
 

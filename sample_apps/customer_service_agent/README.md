@@ -45,9 +45,8 @@ exactly what "a refund runs exactly once" requires.
 ### The escalation wait
 
 `process_refund/1` starts `approval_workflow/1` under a **deterministic** workflow id
-(`"approval-<order_id>"`, computed from the order id alone — no randomness) rather than the
-bare, auto-derived one, using `Dbos.start/3` and `Dbos.await/2` directly instead of a bare
-function call. That id is what a human approver's decision targets:
+(`"approval-<order_id>"`, computed from the order id alone — no randomness), passed as a
+`workflow_id:` option on the call. That id is what a human approver's decision targets:
 
 ```elixir
 Dbos.send_message("approval-202", "approval_decision", "approve")
@@ -72,14 +71,14 @@ iex -S mix
 ```
 
 ```elixir
-iex> {:ok, handle} = Dbos.start("customer_request", ["cust-1", "Please refund order 101"], workflow_id: "demo-1")
+iex> {:ok, handle} = CustomerServiceAgent.Support.handle_request("cust-1", "Please refund order 101", workflow_id: "demo-1")
 iex> Dbos.await(handle)
 ```
 
 Order `101` is $29.99 (refunds immediately). Order `202` is $1299.00 (escalates).
 
 ```elixir
-iex> {:ok, handle} = Dbos.start("customer_request", ["cust-2", "Please refund order 202"], workflow_id: "demo-2")
+iex> {:ok, handle} = CustomerServiceAgent.Support.handle_request("cust-2", "Please refund order 202", workflow_id: "demo-2")
 ```
 
 Watch the console for the approval instructions the `send_approval_email_step` log line prints,

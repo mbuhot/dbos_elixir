@@ -23,12 +23,7 @@ defmodule QueuePatterns.TenantFairness do
   use Dbos
 
   defworkflow route_job(tenant_id, job_id), name: "route_job" do
-    {:ok, handle} = Dbos.enqueue(&do_job/2, [tenant_id, job_id], queue_name: "global_jobs")
-
-    case Dbos.await(handle) do
-      {:ok, result} -> result
-      {:error, exception} -> raise exception
-    end
+    do_job(tenant_id, job_id, queue_name: "global_jobs")
   end
 
   defworkflow do_job(tenant_id, job_id), name: "do_job" do

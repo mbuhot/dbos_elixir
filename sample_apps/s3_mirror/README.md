@@ -55,7 +55,7 @@ for i <- 1..20, do: File.write!(Path.join(source.root, "object-#{i}.txt"), "payl
 alias S3Mirror.ObjectStore.Local
 
 {:ok, handle} =
-  Dbos.start("mirror_bucket", [Local, source, Local, dest, ""], workflow_id: "demo-mirror")
+  S3Mirror.Workflows.mirror_bucket(Local, source, Local, dest, "", workflow_id: "demo-mirror")
 
 for chunk <- Dbos.read_stream("demo-mirror", "progress") do
   IO.inspect(chunk, label: "progress")

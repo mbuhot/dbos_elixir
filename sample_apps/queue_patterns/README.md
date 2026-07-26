@@ -29,7 +29,7 @@ Every snippet below assumes that `iex` session.
 awaits every handle and collects the results — fan-out to spread work, fan-in to reassemble it.
 
 ```elixir
-iex> {:ok, handle} = Dbos.start("process_batch", ["batch-1", [1, 2, 3, 4, 5]])
+iex> {:ok, handle} = QueuePatterns.FanOut.process_batch("batch-1", [1, 2, 3, 4, 5])
 iex> Dbos.await(handle)
 {:ok, [%{item: 1, result: 1, ...}, %{item: 2, result: 4, ...}, ...]}
 ```
@@ -48,7 +48,7 @@ workflow starts leave the queue per second, globally, across every enqueuer.
 
 ```elixir
 iex> handles = for i <- 1..10, do: (
-...>   {:ok, h} = Dbos.enqueue(&QueuePatterns.RateLimitedApi.call_api/1, [i], queue_name: "rate_limited_api")
+...>   {:ok, h} = QueuePatterns.RateLimitedApi.call_api(i, queue_name: "rate_limited_api")
 ...>   h
 ...> )
 iex> Enum.map(handles, fn h -> {:ok, r} = Dbos.await(h); r.called_at end)
@@ -71,9 +71,9 @@ second, non-partitioned queue with `global_concurrency: 3` capping the combined 
 tenant — and awaiting it.
 
 ```elixir
-iex> {:ok, h1} = Dbos.enqueue(&QueuePatterns.TenantFairness.route_job/2, ["tenant-a", "job-1"],
+iex> {:ok, h1} = QueuePatterns.TenantFairness.route_job("tenant-a", "job-1",
 ...>   queue_name: "tenant_jobs", partition_key: "tenant-a")
-iex> {:ok, h2} = Dbos.enqueue(&QueuePatterns.TenantFairness.route_job/2, ["tenant-b", "job-1"],
+iex> {:ok, h2} = QueuePatterns.TenantFairness.route_job("tenant-b", "job-1",
 ...>   queue_name: "tenant_jobs", partition_key: "tenant-b")
 iex> Dbos.await(h1)
 iex> Dbos.await(h2)
@@ -94,9 +94,9 @@ on-call alert) need to jump ahead of whatever is already waiting.
 enqueue order. `priority: 0` (the default) sorts before anything positive.
 
 ```elixir
-iex> {:ok, normal} = Dbos.enqueue(&QueuePatterns.Priority.handle_request/1, ["normal"],
+iex> {:ok, normal} = QueuePatterns.Priority.handle_request("normal",
 ...>   queue_name: "priority_queue", priority: 10)
-iex> {:ok, urgent} = Dbos.enqueue(&QueuePatterns.Priority.handle_request/1, ["urgent"],
+iex> {:ok, urgent} = QueuePatterns.Priority.handle_request("urgent",
 ...>   queue_name: "priority_queue", priority: 0)
 ```
 
@@ -113,9 +113,9 @@ submission is still enqueued or in flight.
 **Code**: `:deduplication_id` reserves one slot per `(queue_name, deduplication_id)` pair.
 
 ```elixir
-iex> {:ok, first} = Dbos.enqueue(&QueuePatterns.Deduplication.generate_report/1, ["report-42"],
+iex> {:ok, first} = QueuePatterns.Deduplication.generate_report("report-42",
 ...>   queue_name: "dedup_queue", deduplication_id: "report-42")
-iex> Dbos.enqueue(&QueuePatterns.Deduplication.generate_report/1, ["report-42"],
+iex> QueuePatterns.Deduplication.generate_report("report-42",
 ...>   queue_name: "dedup_queue", deduplication_id: "report-42")
 ** (Dbos.QueueDeduplicatedError) ...
 ```
@@ -155,7 +155,7 @@ should still run in parallel for throughput.
 
 ```elixir
 iex> for i <- 1..5 do
-...>   {:ok, h} = Dbos.enqueue(&QueuePatterns.SerializedPerKey.update_account/2, ["acct-1", i],
+...>   {:ok, h} = QueuePatterns.SerializedPerKey.update_account("acct-1", i,
 ...>     queue_name: "serial_per_key", partition_key: "acct-1")
 ...>   h
 ...> end

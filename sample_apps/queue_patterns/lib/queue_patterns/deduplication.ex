@@ -7,9 +7,9 @@ defmodule QueuePatterns.Deduplication do
   first submission is still enqueued or in flight.
 
   **Solution**: `:deduplication_id` reserves a single slot per `(queue_name, deduplication_id)`
-  pair. A second `Dbos.enqueue/3` call with the same pair, while the first is still enqueued or
-  running, raises `Dbos.QueueDeduplicatedError` (carrying the id of whichever workflow already
-  holds the slot) instead of inserting a second row.
+  pair. A second enqueue with the same pair, while the first is still enqueued or running, raises
+  `Dbos.QueueDeduplicatedError` carrying the id of whichever workflow already holds the slot, and
+  inserts no row.
 
   **Observe**: enqueue `generate_report/1` for a given `report_id` with
   `deduplication_id: "report-\#{report_id}"`, then immediately try to enqueue it again with the

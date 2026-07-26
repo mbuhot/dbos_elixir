@@ -32,7 +32,7 @@ defmodule QueuePatterns.TenantFairnessTest do
         job_id = "#{tenant_id}-job-#{job_number}"
 
         {:ok, handle} =
-          Dbos.enqueue(&TenantFairness.route_job/2, [tenant_id, job_id],
+          TenantFairness.route_job(tenant_id, job_id,
             queue_name: "tenant_jobs",
             partition_key: tenant_id
           )

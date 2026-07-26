@@ -62,7 +62,7 @@ iex -S mix
 ```
 
 ```elixir
-iex> {:ok, handle} = Dbos.start("hn_research", ["durable execution", 3], workflow_id: "demo-1")
+iex> {:ok, handle} = HackerNewsAgent.Research.research("durable execution", 3, workflow_id: "demo-1")
 iex> Dbos.await(handle)
 ```
 

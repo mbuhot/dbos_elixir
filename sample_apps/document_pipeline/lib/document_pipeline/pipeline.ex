@@ -26,7 +26,7 @@ defmodule DocumentPipeline.Pipeline do
   def ingest_batch(documents) do
     Enum.map(documents, fn {document_id, source} ->
       {:ok, handle} =
-        Dbos.enqueue("ingest_document", [document_id, source],
+        ingest_document(document_id, source,
           queue_name: @queue_name,
           workflow_id: document_id
         )

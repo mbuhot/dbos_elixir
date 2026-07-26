@@ -88,7 +88,7 @@ Within 30 seconds `poll_deployments` fires and you'll see two lines printed:
 Or trigger it immediately instead of waiting for the schedule:
 
 ```elixir
-{:ok, handle} = Dbos.start("poll_deployments", [System.os_time(:millisecond), nil])
+{:ok, handle} = DeploySlackbot.Workflows.poll_deployments(System.os_time(:millisecond), nil)
 Dbos.await(handle)
 ```
 
@@ -109,8 +109,8 @@ mix test
 
 `test/deploy_slackbot/notify_test.exs` covers both properties directly:
 
-- Calling `Dbos.start("notify_deployment", ...)` twice for the same deployment id (simulating a
-  repeated detection) asserts exactly one `{"Deploying...", "Deployed..."}` pair was posted.
+- Calling `notify_deployment/2` twice under the same `workflow_id:` (simulating a repeated
+  detection) asserts exactly one `{"Deploying...", "Deployed..."}` pair was posted.
 - Starting a workflow, waiting until its first post is checkpointed, killing its process, and
   recovering asserts the completion post still only happens once — the checkpointed first post
   is never repeated.
