@@ -2,21 +2,41 @@ defmodule Dbos.NotificationsTest do
   use Dbos.Case, async: false
 
   alias Dbos.Notifications
+  alias Dbos.SampleWorkflows
 
   defp start_engine(extra_opts \\ []) do
     name = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
 
     opts =
-      [
-        name: name,
-        db: {Dbos.DB.Postgrex, Dbos.TestConn},
-        executor_id: "exec-#{System.unique_integer([:positive])}",
-        migrations: :skip,
-        workflows: []
-      ] ++ extra_opts
+      Keyword.merge(
+        [
+          name: name,
+          db: {Dbos.DB.Postgrex, Dbos.TestConn},
+          executor_id: "exec-#{System.unique_integer([:positive])}",
+          migrations: :skip,
+          workflows: []
+        ],
+        extra_opts
+      )
 
     start_supervised!({Dbos.Supervisor, opts}, id: name)
     name
+  end
+
+  defp start_listening_engine(extra_opts \\ []) do
+    engine =
+      start_engine(
+        Keyword.merge(
+          [
+            notifications: :listen,
+            notifications_conn_opts: [database: Application.fetch_env!(:dbos, :test_database)]
+          ],
+          extra_opts
+        )
+      )
+
+    wait_until(fn -> Notifications.mode(engine) == :listen end)
+    engine
   end
 
   test "subscribe_recv succeeds once and conflicts for a second concurrent receiver" do
@@ -136,6 +156,80 @@ defmodule Dbos.NotificationsTest do
 
     assert Task.await(task, 5000) == :found
     assert :counters.get(counter, 1) >= 2
+  end
+
+  test "an engine-wide subscriber learns which workflow finished without naming it in advance" do
+    engine =
+      start_engine(
+        notifications: :poll,
+        workflows: [{"add/2", {SampleWorkflows, :add, 2}}]
+      )
+
+    :ok = Notifications.subscribe_all(engine, [:status])
+    {:ok, handle} = Dbos.start("add/2", [1, 2], engine: engine)
+    assert {:ok, 3} = Dbos.await(handle)
+
+    workflow_id = handle.workflow_id
+    assert_receive {:dbos_notification, :status, ^workflow_id, nil}, 2_000
+  end
+
+  test "an engine-wide subscriber receives the events, stream writes and messages of workflows it never named" do
+    engine =
+      start_listening_engine(workflows: [{"announcer/2", {SampleWorkflows, :announcer, 2}}])
+
+    :ok = Notifications.subscribe_all(engine)
+    {:ok, handle} = Dbos.start("announcer/2", ["progress", :ready], engine: engine)
+    assert {:ok, :ok} = Dbos.await(handle)
+
+    workflow_id = handle.workflow_id
+    assert_receive {:dbos_notification, :event, ^workflow_id, "progress"}, 2_000
+    assert_receive {:dbos_notification, :stream, ^workflow_id, "progress"}, 2_000
+
+    :ok = Dbos.send_message(workflow_id, "decision", :approved, engine: engine)
+    assert_receive {:dbos_notification, :recv, ^workflow_id, "decision"}, 2_000
+  end
+
+  test "an engine-wide subscription stops delivering once released" do
+    engine =
+      start_listening_engine(workflows: [{"announcer/2", {SampleWorkflows, :announcer, 2}}])
+
+    :ok = Notifications.subscribe_all(engine)
+    :ok = Notifications.unsubscribe_all(engine)
+
+    {:ok, handle} = Dbos.start("announcer/2", ["progress", :ready], engine: engine)
+    assert {:ok, :ok} = Dbos.await(handle)
+
+    refute_receive {:dbos_notification, _kind, _workflow_id, _key}, 300
+  end
+
+  test "engine-wide subscription to messages, events or streams is refused on a polling engine" do
+    engine = start_engine(notifications: :poll)
+
+    assert_raise ArgumentError, ~r/requires the LISTEN transport/, fn ->
+      Notifications.subscribe_all(engine, [:status, :event])
+    end
+
+    assert :ok = Notifications.subscribe_all(engine, [:status])
+  end
+
+  test "an unknown engine-wide notification kind is rejected" do
+    engine = start_engine(notifications: :poll)
+
+    assert_raise ArgumentError, ~r/unknown engine-wide notification kind/, fn ->
+      Notifications.subscribe_all(engine, [:progress])
+    end
+  end
+
+  test "an engine-wide subscriber is told to resync after the listener connection drops and comes back" do
+    engine = start_listening_engine()
+
+    :ok = Notifications.subscribe_all(engine)
+
+    listener_pid = :sys.get_state(Notifications.process_name(engine)).listener
+    Process.exit(listener_pid, :kill)
+
+    assert_receive {:dbos_notification, :reconnect, nil, nil}, 5_000
+    refute_receive {:dbos_notification, :reconnect, nil, nil}, 200
   end
 
   defp wait_until(fun, attempts \\ 100)

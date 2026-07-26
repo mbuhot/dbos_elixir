@@ -84,11 +84,12 @@ At boot `Dbos.Supervisor` verifies the schema is at the version it expects. It s
 
 ## 4. Start the workflow with an id you control
 
-`MyApp.Checkout.process_order(order_id, amount)` mints a random workflow id. Pin the id with
-`Dbos.start/3` so you can look the workflow up from a fresh `iex` session after the crash:
+`MyApp.Checkout.process_order(order_id, amount)` mints a random workflow id. `defworkflow` also
+generates a dispatcher one arity higher, taking options — pin the id there so you can look the
+workflow up from a fresh `iex` session after the crash:
 
 ```elixir
-iex> {:ok, handle} = Dbos.start("process_order", ["order-1", 4999], workflow_id: "order-1")
+iex> {:ok, handle} = MyApp.Checkout.process_order("order-1", 4999, workflow_id: "order-1")
 {:ok, %Dbos.WorkflowHandle{engine: Dbos, workflow_id: "order-1"}}
 ```
 

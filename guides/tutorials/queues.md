@@ -53,13 +53,21 @@ onto.
 
 ## Enqueueing
 
+A `queue_name:` on a workflow call puts it on that queue:
+
 ```elixir
-{:ok, handle} = Dbos.enqueue(&MyApp.Reports.generate/1, [report_id], queue_name: "reports")
+{:ok, handle} = MyApp.Reports.generate(report_id, queue_name: "reports")
 {:ok, result} = Dbos.await(handle)
 ```
 
-The first argument is a registered workflow name or a `&Mod.fun/n` capture. `Dbos.enqueue/3`
-accepts:
+`Dbos.enqueue/3` does the same by registered workflow name or `&Mod.fun/n` capture, for code with
+no workflow function to call:
+
+```elixir
+{:ok, handle} = Dbos.enqueue(&MyApp.Reports.generate/1, [report_id], queue_name: "reports")
+```
+
+Both accept:
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -73,11 +81,14 @@ accepts:
 | `:timeout_ms` | `nil` | Durable deadline for the workflow once it starts. |
 | `:application_version` | the engine's own | Which version's workers may claim this row. |
 
-`:deduplication_id` and `:partition_key` are mutually exclusive — passing both raises
-`ArgumentError`.
+`:deduplication_id` and `:partition_key` are mutually exclusive, and an unrecognised key is
+refused; both raise `Dbos.InvalidWorkflowOptionError`.
 
-Called from inside a workflow, `enqueue/3` consumes a step id and checkpoints the call, so
-replaying the parent after a crash enqueues nothing further.
+Inside a workflow the two call forms differ in what they wait for. A workflow call with a
+`queue_name:` queues the child and blocks for its result. `Dbos.enqueue/3` returns a handle as
+soon as the row is inserted, leaving the parent free to carry on and `Dbos.await/2` it later.
+Either way the enqueue consumes a step id and checkpoints, so replaying the parent after a crash
+queues nothing further.
 
 ## Worker concurrency vs. global concurrency
 
@@ -95,7 +106,7 @@ the smaller.
 ## Priority
 
 ```elixir
-Dbos.enqueue(&MyApp.Reports.generate/1, [report_id], queue_name: "reports", priority: 1)
+MyApp.Reports.generate(report_id, queue_name: "reports", priority: 1)
 ```
 
 Candidates are claimed in `priority ASC, created_at ASC` order: a lower `:priority` number runs
@@ -121,7 +132,7 @@ Dbos.Queue.new("tenant_jobs",
   rate_limit: %{limit: 50, period_ms: 60_000}
 )
 
-Dbos.enqueue(&MyApp.Tenant.run_job/1, [job_id], queue_name: "tenant_jobs", partition_key: tenant_id)
+MyApp.Tenant.run_job(job_id, queue_name: "tenant_jobs", partition_key: tenant_id)
 ```
 
 A partitioned queue runs one independent copy of every flow-control check per distinct
@@ -152,12 +163,7 @@ defmodule MyApp.TenantJobs do
   use Dbos
 
   defworkflow route_job(tenant_id, job_id), name: "route_job" do
-    {:ok, handle} = Dbos.enqueue(&do_job/2, [tenant_id, job_id], queue_name: "global_jobs")
-
-    case Dbos.await(handle) do
-      {:ok, result} -> result
-      {:error, exception} -> raise exception
-    end
+    do_job(tenant_id, job_id, queue_name: "global_jobs")
   end
 
   defworkflow do_job(tenant_id, job_id), name: "do_job" do
@@ -167,21 +173,21 @@ end
 ```
 
 ```elixir
-Dbos.enqueue(&MyApp.TenantJobs.route_job/2, [tenant_id, job_id],
+MyApp.TenantJobs.route_job(tenant_id, job_id,
   queue_name: "tenant_jobs",
   partition_key: tenant_id
 )
 ```
 
 Each tenant gets up to 50 jobs/minute of their own on `tenant_jobs`; `global_jobs` caps the
-combined total at 20 concurrent / 200 per minute. `route_job` blocks on `Dbos.await/2` for the
-job's full duration, holding its slot on `tenant_jobs` the whole time — size `tenant_jobs`'
-concurrency with that in mind.
+combined total at 20 concurrent / 200 per minute. `route_job` blocks for the job's full duration,
+holding its slot on `tenant_jobs` the whole time — size `tenant_jobs`' concurrency with that in
+mind.
 
 ## Delayed start
 
 ```elixir
-Dbos.enqueue(&MyApp.Reminders.send/1, [user_id], queue_name: "reminders", delay_ms: 3_600_000)
+MyApp.Reminders.send(user_id, queue_name: "reminders", delay_ms: 3_600_000)
 ```
 
 `:delay_ms` inserts the row as `DELAYED`. Every runner's poll tick begins by promoting every
@@ -191,7 +197,7 @@ normal dequeue candidate on the next pass.
 ## Deduplication
 
 ```elixir
-Dbos.enqueue(&MyApp.Reports.generate/1, [report_id],
+MyApp.Reports.generate(report_id,
   queue_name: "reports",
   deduplication_id: "report-#{report_id}"
 )

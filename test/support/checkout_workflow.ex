@@ -17,6 +17,11 @@ defmodule Dbos.CheckoutWorkflow do
     child_flow(order_id, workflow_id: child_workflow_id)
   end
 
+  defworkflow parent_flow_queueing_child(order_id), name: "parent_flow_queueing_child" do
+    result = child_flow(order_id, queue_name: "children")
+    charge_card(result, 1)
+  end
+
   defworkflow child_flow(order_id), name: "child_flow" do
     order_id
   end

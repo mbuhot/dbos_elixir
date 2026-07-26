@@ -87,6 +87,125 @@ defmodule Dbos.TelemetryTest do
     assert count >= 0
   end
 
+  test "a durable sleep is spanned as a wait that resolves" do
+    attach([[:dbos, :wait, :start], [:dbos, :wait, :stop]])
+
+    engine = start_engine([{"sleeper/1", {SampleWorkflows, :sleeper, 1}}])
+    {:ok, handle} = Dbos.start("sleeper/1", [50], engine: engine)
+    assert {:ok, :woke} = Dbos.await(handle, timeout_ms: 5_000)
+
+    workflow_id = handle.workflow_id
+
+    assert_receive {[:dbos, :wait, :start], _ref, %{system_time: _},
+                    %{kind: :sleep, workflow_id: ^workflow_id, timeout_ms: 50}},
+                   2_000
+
+    assert_receive {[:dbos, :wait, :stop], _ref, %{duration: duration},
+                    %{kind: :sleep, workflow_id: ^workflow_id, outcome: :resolved}},
+                   2_000
+
+    assert is_integer(duration)
+  end
+
+  test "a workflow waiting for a message is spanned until the message arrives" do
+    attach([[:dbos, :wait, :stop]])
+
+    engine =
+      start_engine([{"receiver/2", {SampleWorkflows, :receiver, 2}}],
+        notifications: :listen,
+        notifications_conn_opts: [database: Application.fetch_env!(:dbos, :test_database)]
+      )
+
+    {:ok, handle} = Dbos.start("receiver/2", ["decision", 10_000], engine: engine)
+    Process.sleep(100)
+    :ok = Dbos.send_message(handle.workflow_id, "decision", :approved, engine: engine)
+
+    assert {:ok, :approved} = Dbos.await(handle, timeout_ms: 5_000)
+
+    workflow_id = handle.workflow_id
+
+    assert_receive {[:dbos, :wait, :stop], _ref, %{duration: _},
+                    %{
+                      kind: :recv,
+                      workflow_id: ^workflow_id,
+                      key: "decision",
+                      timeout_ms: 10_000,
+                      outcome: :resolved
+                    }},
+                   2_000
+  end
+
+  test "a message that never arrives is spanned as a wait that timed out" do
+    attach([[:dbos, :wait, :stop]])
+
+    engine = start_engine([{"receiver/2", {SampleWorkflows, :receiver, 2}}])
+    {:ok, handle} = Dbos.start("receiver/2", ["decision", 100], engine: engine)
+    assert {:error, _exception} = Dbos.await(handle, timeout_ms: 5_000)
+
+    assert_receive {[:dbos, :wait, :stop], _ref, %{duration: _},
+                    %{kind: :recv, key: "decision", outcome: :timeout}},
+                   2_000
+  end
+
+  test "waiting on another workflow's event names the workflow being watched" do
+    attach([[:dbos, :wait, :stop]])
+
+    engine =
+      start_engine(
+        [
+          {"event_waiter/3", {SampleWorkflows, :event_waiter, 3}},
+          {"announcer/2", {SampleWorkflows, :announcer, 2}}
+        ],
+        notifications: :listen,
+        notifications_conn_opts: [database: Application.fetch_env!(:dbos, :test_database)]
+      )
+
+    {:ok, publisher} = Dbos.start("announcer/2", ["progress", :ready], engine: engine)
+    assert {:ok, :ok} = Dbos.await(publisher)
+
+    {:ok, waiter} =
+      Dbos.start("event_waiter/3", [publisher.workflow_id, "progress", 5_000], engine: engine)
+
+    assert {:ok, :ready} = Dbos.await(waiter, timeout_ms: 5_000)
+
+    watched = publisher.workflow_id
+    waiter_id = waiter.workflow_id
+
+    assert_receive {[:dbos, :wait, :stop], _ref, %{duration: _},
+                    %{
+                      kind: :event,
+                      workflow_id: ^waiter_id,
+                      target_workflow_id: ^watched,
+                      key: "progress",
+                      outcome: :resolved
+                    }},
+                   2_000
+  end
+
+  test "a wait long enough to release the workflow process is spanned as parked, and its resumption starts a new wait" do
+    attach([[:dbos, :wait, :start], [:dbos, :wait, :stop]])
+
+    engine =
+      start_engine([{"sleeper/1", {SampleWorkflows, :sleeper, 1}}], park_exit_threshold_ms: 50)
+
+    {:ok, handle} = Dbos.start("sleeper/1", [400], engine: engine)
+    workflow_id = handle.workflow_id
+
+    assert_receive {[:dbos, :wait, :start], _ref, %{system_time: _},
+                    %{kind: :sleep, workflow_id: ^workflow_id}},
+                   2_000
+
+    assert_receive {[:dbos, :wait, :stop], _ref, %{duration: _},
+                    %{kind: :sleep, workflow_id: ^workflow_id, outcome: :parked}},
+                   2_000
+
+    assert {:ok, :woke} = Dbos.await(handle, timeout_ms: 5_000)
+
+    assert_receive {[:dbos, :wait, :start], _ref, %{system_time: _},
+                    %{kind: :sleep, workflow_id: ^workflow_id}},
+                   2_000
+  end
+
   test "recovery span fires around a boot recovery pass" do
     attach([[:dbos, :recovery, :start], [:dbos, :recovery, :stop]])
 

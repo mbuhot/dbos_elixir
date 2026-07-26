@@ -12,12 +12,26 @@ defmodule Dbos.Macros do
   every form has pushed onto a real `@attr`, once compile-time side effects across all of the
   module's top-level forms are guaranteed visible.
 
-  A bare call to a `defworkflow`-defined function is durable, but its return type depends on
-  where it's called from: inside another workflow it's a child workflow, and the call blocks for
-  and returns the child's result; called from ordinary code (a controller, a test, an `iex`
-  session) it starts a root workflow and returns `{:ok, %Dbos.WorkflowHandle{}}` immediately,
-  without blocking the caller for however long the workflow takes to finish — await it explicitly
-  with `Dbos.await/2` when the result is needed.
+  A call to a `defworkflow`-defined function is durable, but its return type depends on where it's
+  called from: inside another workflow it's a child workflow, and the call blocks for and returns
+  the child's result; called from ordinary code (a controller, a test, an `iex` session) it starts
+  a root workflow and returns `{:ok, %Dbos.WorkflowHandle{}}` immediately, without blocking the
+  caller for however long the workflow takes to finish — await it explicitly with `Dbos.await/2`
+  when the result is needed.
+
+  `defworkflow review(id)` generates both `review/1` and `review/2`, the second taking a trailing
+  keyword list. That is the call form to reach for:
+
+      review(id)
+      review(id, workflow_id: "review-\#{id}")
+      review(id, queue_name: "reviews")
+      review(id, queue_name: "reviews", delay_ms: 60_000, priority: 1)
+
+  A `:queue_name` routes the dispatch through `Dbos.enqueue/3`, everything else through
+  `Dbos.start/3`; `Dbos.Options` lists the keys, and anything outside them raises
+  `Dbos.InvalidWorkflowOptionError`. Inside a workflow the queued form enqueues the child and
+  blocks for its result, the same as the bare call it varies; `Dbos.enqueue/3` by name is how a
+  workflow enqueues a child and carries on without waiting.
 
   `use Dbos` options: `:repo` — the module direct calls to which are banned inside a workflow
   body (see `docs/determinism.md`); `:warn_cross_module_calls` (default `true`) — set `false` to
@@ -105,9 +119,10 @@ defmodule Dbos.Macros do
   functions: the workflow body (run by the engine, under a generated internal name), a public
   dispatcher under `call`'s own name/arity, and a second public dispatcher at one arity higher,
   taking every declared argument explicitly (no default-argument skipping) plus a trailing
-  options keyword list — `:workflow_id`, `:priority`, `:deduplication_id`,
-  `:application_version` outside a workflow; `:workflow_id`, `:application_version` for the child
-  call this becomes inside one. A pinned `:workflow_id` is the usual way to make a start
+  options keyword list. A `:queue_name` in that list routes the dispatch through
+  `Dbos.enqueue/3` and admits the queue options (`:delay_ms`, `:partition_key`); without one it
+  routes through `Dbos.start/3`. `Dbos.Options` lists the keys, and anything outside them raises
+  `Dbos.InvalidWorkflowOptionError`. A pinned `:workflow_id` is the usual way to make a dispatch
   idempotent. Both dispatchers' return type depends on where they're called from — this
   asymmetry is deliberate: inside a workflow they start a child workflow, await it, and return
   the unwrapped result (the same value the call would have produced as a plain function); outside
@@ -141,21 +156,34 @@ defmodule Dbos.Macros do
   end
 
   @doc """
-  Runtime support for a bare workflow call. Inside a workflow context: starts `name` with `args`
-  (and `opts`) as a child workflow, blocks for its result, and returns the unwrapped value or
-  re-raises the recorded exception. Outside a workflow context: starts `name` with `args` (and
-  `opts`) as a root workflow and returns `{:ok, %Dbos.WorkflowHandle{}}` immediately, without
-  awaiting it. With the engine not started, `Dbos.start/3` raises `Dbos.NotStartedError` on
-  either path.
+  Runtime support for a generated workflow dispatcher. `opts` carrying a `:queue_name` enqueues
+  `name` with `args` through `Dbos.enqueue/3`; otherwise it starts through `Dbos.start/3`.
+  Validated against `Dbos.Options`, raising `Dbos.InvalidWorkflowOptionError` on an unknown key,
+  a queue-only key with no `:queue_name`, or `:deduplication_id` alongside `:partition_key`.
+
+  Inside a workflow context the dispatch becomes a child workflow: this blocks for its result and
+  returns the unwrapped value, or re-raises the recorded exception. Outside a workflow context it
+  returns `{:ok, %Dbos.WorkflowHandle{}}` immediately, without awaiting it. With the engine not
+  started, this raises `Dbos.NotStartedError` on either path.
   """
   def dispatch_workflow(name, args, opts \\ []) do
+    Dbos.Options.validate_dispatch!(name, opts)
+
     if Dbos.Runtime.in_workflow?() do
-      {:ok, handle} = Dbos.start(name, args, opts)
+      {:ok, handle} = dispatch(name, args, opts)
 
       case Dbos.await(handle) do
         {:ok, value} -> value
         {:error, exception} -> raise exception
       end
+    else
+      dispatch(name, args, opts)
+    end
+  end
+
+  defp dispatch(name, args, opts) do
+    if Keyword.has_key?(opts, :queue_name) do
+      Dbos.enqueue(name, args, opts)
     else
       Dbos.start(name, args, opts)
     end

@@ -86,6 +86,21 @@ defmodule Dbos.InvalidQueueOptionError do
   def message(%__MODULE__{reason: reason}), do: "invalid queue configuration: #{reason}"
 end
 
+defmodule Dbos.InvalidWorkflowOptionError do
+  @moduledoc """
+  Raised when a workflow is dispatched with an option the target call cannot honour: an
+  unrecognised key, a queue-only key with no queue, or two keys that exclude each other. See
+  `Dbos.Options` for the keys each dispatch entry point accepts.
+  """
+
+  defexception [:workflow_name, :option, :reason]
+
+  @impl true
+  def message(%__MODULE__{workflow_name: workflow_name, option: option, reason: reason}) do
+    "workflow #{inspect(workflow_name)}: option #{inspect(option)} #{reason}"
+  end
+end
+
 defmodule Dbos.QueueDeduplicatedError do
   @moduledoc "Raised when an enqueue's deduplication id already has a live holder on the same queue."
 

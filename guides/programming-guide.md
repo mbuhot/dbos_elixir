@@ -167,7 +167,10 @@ a time, however many orders are enqueued. Use `global_concurrency:` for a ceilin
 the whole cluster.
 
 `Dbos.enqueue/3` is itself a checkpointed step when called from inside a workflow — a replay of
-`process_order` finds the enqueue already recorded and skips it.
+`process_order` finds the enqueue already recorded and skips it. Here it hands back a handle and
+lets `process_order` finish while the shipment waits its turn. Write `ship_order(order_id,
+queue_name: "shipping")` instead when the order is not done until the carrier call is: that queues
+the child the same way and blocks for its result.
 
 For bursty work where only the last call matters, `Dbos.debounce/3` collapses repeated enqueues
 of the same key into one delayed workflow.
@@ -201,8 +204,10 @@ that id at start time so the sender knows it:
 Dbos.send_message("order-1", "approval", :approved)
 ```
 
-Every `defworkflow` gets a second dispatcher at one arity higher that takes this trailing
-options list.
+Every `defworkflow` gets a second dispatcher at one arity higher taking this trailing options
+list. It covers the whole dispatch surface: `workflow_id:` to pin the id, `queue_name:` to route
+the workflow onto a queue, `delay_ms:`, `priority:`, `timeout_ms:`. An option the dispatch cannot
+honour raises `Dbos.InvalidWorkflowOptionError` at the call.
 
 ## Crash and resume
 

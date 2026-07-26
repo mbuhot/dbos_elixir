@@ -280,6 +280,20 @@ defmodule Dbos.SampleWorkflows do
   end
 
   @doc """
+  Dispatches `Dbos.CheckoutWorkflow.child_flow/2` onto the `"children"` queue and waits for its
+  result, then dies, but only the first time it runs: a replay after recovery finds the enqueue
+  and the wait already checkpointed and does not queue a second child.
+  """
+  def queue_child_and_die(table, order_id) do
+    result = Dbos.CheckoutWorkflow.child_flow(order_id, queue_name: "children")
+
+    case :ets.insert_new(table, {:crashed_once, true}) do
+      true -> Process.exit(self(), :kill)
+      false -> result
+    end
+  end
+
+  @doc """
   Forks `target_workflow_id` from `start_step`, then dies, but only the first time it runs: a
   replay after recovery finds the fork already checkpointed and does not fork a second time, for
   crash-and-recover idempotency tests.
@@ -357,6 +371,13 @@ defmodule Dbos.SampleWorkflows do
     Dbos.step("flaky step", [max_retries: max_retries, base_interval_ms: 1], fn ->
       raise "boom"
     end)
+  end
+
+  @doc "Publishes `value` under `key` as both an event and a stream entry."
+  def announcer(key, value) do
+    Dbos.set_event(key, value)
+    Dbos.write_stream(key, value)
+    :ok
   end
 
   @doc "Writes `items` to stream `key` in order, then closes it."

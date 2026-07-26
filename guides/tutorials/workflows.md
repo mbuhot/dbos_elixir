@@ -51,7 +51,7 @@ end
 
 ## Starting a workflow
 
-A bare call to a `defworkflow`-defined function is already durable. Its return type depends on
+A call to a `defworkflow`-defined function is already durable. Its return type depends on
 where you call it from:
 
 | Call site | What happens | Return value |
@@ -65,19 +65,43 @@ where you call it from:
 {:ok, result} = Dbos.await(handle)
 ```
 
-`Dbos.start/3` does the same thing by workflow name (or a `&Mod.fun/n` capture), and accepts
-`:workflow_id`, `:engine`, `:deduplication_id`, `:priority`, `:timeout_ms`,
-`:application_version`:
+### Dispatch options
+
+`defworkflow process_order(order_id, amount)` also generates `process_order/3`, taking a trailing
+keyword list. That is the call form to reach for once a dispatch needs anything beyond the
+defaults:
+
+```elixir
+process_order("order-1", 4999, workflow_id: "checkout-order-1")
+process_order("order-1", 4999, queue_name: "orders")
+process_order("order-1", 4999, queue_name: "orders", delay_ms: 60_000, priority: 1)
+```
+
+| Option | Effect |
+|---|---|
+| `:workflow_id` | Pins the id — the idempotency key for the dispatch |
+| `:queue_name` | Places the workflow on that queue for later dispatch |
+| `:delay_ms` | Holds a queued workflow back for this long before it becomes runnable |
+| `:partition_key` | The partition a queued workflow belongs to |
+| `:deduplication_id` | Collapses live dispatches sharing this id into one |
+| `:priority` | Dispatch order within a priority-enabled queue, lower first |
+| `:timeout_ms` | Deadline for the whole workflow |
+| `:engine` | Which engine to dispatch on, defaulting to `Dbos` |
+| `:application_version` | Pins the code version allowed to run it |
+
+A `:queue_name` routes the dispatch onto that named queue, subject to its concurrency, rate limit
+and priority rules — see `guides/tutorials/queues.md`. `:delay_ms` and `:partition_key` apply to a
+queued workflow, so each requires a `:queue_name`; `:deduplication_id` and `:partition_key` are
+mutually exclusive. An unrecognised key, or either of those combinations, raises
+`Dbos.InvalidWorkflowOptionError` at the call.
+
+`Dbos.start/3` and `Dbos.enqueue/3` take the same options and dispatch by workflow name (or a
+`&Mod.fun/n` capture) — what you reach for when the dispatching code has no function to call:
 
 ```elixir
 {:ok, handle} =
   Dbos.start("process_order", ["order-1", 4999], workflow_id: "checkout-order-1")
-```
 
-`Dbos.enqueue/3` starts a workflow by placing it on a named queue for later dispatch, subject to
-that queue's concurrency, rate limit, and priority rules — see `guides/tutorials/queues.md`.
-
-```elixir
 {:ok, handle} =
   Dbos.enqueue("ship_order", [order_id], queue_name: "shipping", priority: 1)
 ```
@@ -111,9 +135,9 @@ again.
 
 ## Child workflows
 
-A bare call, or `Dbos.start/3`, made from inside a workflow body is a **child workflow**: it
-starts as its own row, is awaited inline, and its unwrapped result comes back as an ordinary
-return value.
+A call to a workflow function, or `Dbos.start/3`, made from inside a workflow body is a **child
+workflow**: it starts as its own row, is awaited inline, and its unwrapped result comes back as an
+ordinary return value.
 
 ```elixir
 defworkflow parent_flow(order_id), name: "parent_flow" do
@@ -124,6 +148,18 @@ end
 A child's id defaults to `"<parent_id>-<parent_step_id>"`, derived from the parent's own id and
 the step position the child started at, so replaying the parent finds the same child id already
 recorded and reuses it.
+
+A `queue_name:` on that call puts the child on the queue and waits there for its result, so the
+parent parks until the queue dispatches it:
+
+```elixir
+defworkflow parent_flow(order_id), name: "parent_flow" do
+  process_order(order_id, 4999, queue_name: "orders")
+end
+```
+
+`Dbos.enqueue/3` is how a workflow queues a child and carries on without waiting for it. It
+returns a handle, which the parent can `Dbos.await/2` later, or never.
 
 ## The determinism contract, in summary
 
@@ -156,7 +192,8 @@ different number of ids is the classic way to break this invisibly.
 | `Dbos.start/3` | 1 |
 | `Dbos.await/2` | 1 |
 | `Dbos.status/2`, `Dbos.cancel/2`, `Dbos.resume/2`, `Dbos.fork/3` | 1 |
-| Bare call to another `defworkflow` (child workflow) | 2 (start + `DBOS.getResult`) |
+| Call to another `defworkflow` (child workflow) | 2 (start + `DBOS.getResult`) |
+| The same call with `queue_name:` | 2 (`DBOS.enqueue` + `DBOS.getResult`) |
 | `Dbos.patch/1` | 0 or 1, decided at runtime |
 
 ## `mix dbos.explain`

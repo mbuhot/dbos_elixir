@@ -67,8 +67,8 @@ broadcast. No timer, no `Process.send_after`, no re-query loop.
 | Option | What it looks like | Verdict |
 |---|---|---|
 | Broadcast inside a durable step (**chosen**) | the step body writes the row and publishes | the message is a stage name the domain already understands, emitted at the same instant the durable state changes |
-| A bridge process on `Dbos.Notifications` | a `GenServer` calling `subscribe_event/3` or `subscribe_stream/3`, republishing onto PubSub | those registrations are keyed on `(workflow_id, key)`, so a global bridge needs one subscription per in-flight review, torn up and down as reviews come and go |
-| A bridge process on telemetry | attach to `[:dbos, :step, :stop]`, republish | genuinely global and needs no workflow code, but the payload is a step name rather than a domain stage, and the state a UI needs most — *now parked on a human* — is a `recv_message` wait, which emits no span |
+| A bridge process on `Dbos.Notifications` | a `GenServer` calling `subscribe_all/2`, republishing onto PubSub | one registration covers every review, and it carries the workflow id and the key that changed — but a bridge is the wrong place to name a domain stage, and the notification is a wake-up the bridge must then read back |
+| A bridge process on telemetry | attach to `[:dbos, :step, :stop]` and `[:dbos, :wait, :stop]`, republish | genuinely global and needs no workflow code, but the payload is a step name rather than a domain stage |
 
 The deciding factor is the **late joiner**. A broadcast only reaches whoever is subscribed at that
 instant. Anyone opening a claim page after the fact needs the state to still exist somewhere.
@@ -180,7 +180,8 @@ The `Dbos` schema is installed as an explicit migration in this app's own sequen
 
 `LiveApprovalsWeb.Telemetry` defines summaries over the engine's spans alongside the Phoenix and
 repo metrics: `dbos.workflow.stop.duration` (tagged `name`, `replay`),
-`dbos.step.stop.duration` (tagged `function_name`), and `dbos.queue.dequeue.stop.duration`. No
+`dbos.step.stop.duration` (tagged `function_name`), and `dbos.queue.dequeue.stop.duration`.
+`[:dbos, :wait, :stop]` reports a review's park on a human, tagged `kind` and `outcome`. No
 reporter is attached — add one, or `Telemetry.Metrics.ConsoleReporter`, to see them.
 
 Telemetry is not used to drive the UI. See the outbound table above for the reasoning.

@@ -15,12 +15,18 @@ defmodule Dbos.Notifications do
   A subscription is a wake-up, never a payload — the notification carries no value, so a woken
   process re-reads the current state. `mode/1` reports the transport actually in effect: `:listen`,
   or `:poll` when no dedicated connection could be established.
+
+  `subscribe_all/2` is the engine-wide form: one registration covers every workflow on the engine,
+  including workflows that did not exist when the subscription was made. See its documentation for
+  the message shape and the transport it requires.
   """
 
   use GenServer
   require Logger
 
   alias Dbos.Config
+
+  @engine_wide_kinds [:status, :recv, :event, :stream]
 
   @notifications_channel "dbos_notifications_channel"
   @workflow_events_channel "dbos_workflow_events_channel"
@@ -120,6 +126,89 @@ defmodule Dbos.Notifications do
   @doc "Wakes every waiter registered via `subscribe_status/2` for `workflow_id`."
   def notify_status(engine, workflow_id) do
     broadcast(wait_registry_name(engine), {:status, workflow_id}, :status, workflow_id)
+    notify_all(engine, :status, workflow_id, nil)
+  end
+
+  @doc "The kinds `subscribe_all/2` accepts: `#{inspect(@engine_wide_kinds)}`."
+  def engine_wide_kinds, do: @engine_wide_kinds
+
+  @doc """
+  Registers the caller for every notification of each kind in `kinds` on `engine`, for every
+  workflow, with no workflow id known in advance. One registration serves a long-lived bridge
+  process — a `Phoenix.PubSub` republisher, a dashboard — for the lifetime of the engine.
+
+  Each notification arrives as `{:dbos_notification, kind, workflow_id, key}`:
+
+  | `kind` | Fires when | `key` |
+  |---|---|---|
+  | `:status` | a workflow reaches a terminal status | `nil` |
+  | `:recv` | a message is sent to a workflow | the topic |
+  | `:event` | a workflow sets an event key | the event key |
+  | `:stream` | a workflow appends to a stream | the stream key |
+
+  `{:dbos_notification, :reconnect, nil, nil}` arrives when the `LISTEN` connection dropped and
+  came back; notifications in the gap were lost, so a subscriber that holds derived state resyncs
+  it from the database. The four kinds carry an identifier and a change, never a value: a
+  subscriber reads the current state with `Dbos.status/2`, `Dbos.get_event/4` or
+  `Dbos.read_stream/3`.
+
+  ## Transport
+
+  `:recv`, `:event` and `:stream` ride Postgres `LISTEN`/`NOTIFY` and require `mode/1` to be
+  `:listen`; subscribing to any of them raises `ArgumentError` under `:poll`. `:status` is an
+  in-process signal fired by this engine instance, available under both transports, and covers
+  only workflows this instance finished — a workflow completed on another node reaches no
+  `:status` subscriber here.
+
+  ## Cost
+
+  Every notification on the engine is delivered to every engine-wide subscriber of that kind: one
+  `Registry.dispatch/3` plus one `send/2` per subscriber, all from the single `Dbos.Notifications`
+  process. A subscriber therefore receives the engine's whole notification volume rather than one
+  workflow's, and slow subscribers accumulate mailbox rather than blocking the dispatcher. Keep
+  the count of engine-wide subscribers small — one bridge per engine — and narrow `kinds` to what
+  the bridge acts on.
+  """
+  def subscribe_all(engine, kinds \\ @engine_wide_kinds) do
+    kinds = validate_kinds!(kinds)
+    require_listen!(engine, kinds)
+
+    Enum.each(kinds, fn kind ->
+      {:ok, _owner} = Registry.register(wait_registry_name(engine), {:all, kind}, nil)
+    end)
+
+    :ok
+  end
+
+  @doc "Releases a `subscribe_all/2` registration for each kind in `kinds`."
+  def unsubscribe_all(engine, kinds \\ @engine_wide_kinds) do
+    kinds
+    |> validate_kinds!()
+    |> Enum.each(&release(wait_registry_name(engine), {:all, &1}))
+  end
+
+  defp validate_kinds!(kinds) do
+    kinds = List.wrap(kinds)
+
+    case kinds -- @engine_wide_kinds do
+      [] ->
+        kinds
+
+      unknown ->
+        raise ArgumentError,
+              "unknown engine-wide notification kind(s) #{inspect(unknown)}; expected any of #{inspect(@engine_wide_kinds)}"
+    end
+  end
+
+  defp require_listen!(engine, kinds) do
+    listen_only = kinds -- [:status]
+
+    if listen_only != [] and mode(engine) == :poll do
+      raise ArgumentError,
+            "engine-wide subscription to #{inspect(listen_only)} on #{inspect(engine)} requires the LISTEN transport, and this engine is in :poll mode; subscribe to [:status] only, or configure a dedicated notifications connection"
+    end
+
+    :ok
   end
 
   @doc """
@@ -225,9 +314,17 @@ defmodule Dbos.Notifications do
 
   defp wake_all(registry) do
     if Process.whereis(registry) do
-      registry
-      |> Registry.select([{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2"}}]}])
-      |> Enum.each(fn {_key, pid} -> send(pid, {:dbos_notify, :reconnect, nil}) end)
+      {engine_wide, per_workflow} =
+        registry
+        |> Registry.select([{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2"}}]}])
+        |> Enum.split_with(&match?({{:all, _kind}, _pid}, &1))
+
+      Enum.each(per_workflow, fn {_key, pid} -> send(pid, {:dbos_notify, :reconnect, nil}) end)
+
+      engine_wide
+      |> Enum.map(fn {_key, pid} -> pid end)
+      |> Enum.uniq()
+      |> Enum.each(&send(&1, {:dbos_notification, :reconnect, nil, nil}))
     end
 
     :ok
@@ -276,19 +373,42 @@ defmodule Dbos.Notifications do
 
   defp dispatch_notification(engine, @notifications_channel, payload) do
     broadcast(recv_registry_name(engine), payload, :recv, payload)
+    notify_all_from_payload(engine, :recv, payload)
   end
 
   defp dispatch_notification(engine, @workflow_events_channel, payload) do
     broadcast(wait_registry_name(engine), {:event, payload}, :event, payload)
+    notify_all_from_payload(engine, :event, payload)
   end
 
   defp dispatch_notification(engine, @streams_channel, payload) do
     broadcast(wait_registry_name(engine), {:stream, payload}, :stream, payload)
+    notify_all_from_payload(engine, :stream, payload)
+  end
+
+  defp notify_all_from_payload(engine, kind, payload) do
+    case String.split(payload, "::", parts: 2) do
+      [workflow_id, key] -> notify_all(engine, kind, workflow_id, key)
+      _other -> :ok
+    end
+  end
+
+  defp notify_all(engine, kind, workflow_id, key) do
+    dispatch(wait_registry_name(engine), {:all, kind}, {
+      :dbos_notification,
+      kind,
+      workflow_id,
+      key
+    })
   end
 
   defp broadcast(registry, key, keyspace, payload) do
+    dispatch(registry, key, {:dbos_notify, keyspace, payload})
+  end
+
+  defp dispatch(registry, key, message) do
     Registry.dispatch(registry, key, fn entries ->
-      for {pid, _owner} <- entries, do: send(pid, {:dbos_notify, keyspace, payload})
+      for {pid, _owner} <- entries, do: send(pid, message)
     end)
 
     :ok

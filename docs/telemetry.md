@@ -1,17 +1,18 @@
 # Telemetry
 
-Four `:telemetry.span/3` spans. Attach your own handler (`:telemetry.attach/4`,
-`:telemetry.attach_many/4`) and bridge to whatever backend you use.
+Five spans. Attach your own handler (`:telemetry.attach/4`, `:telemetry.attach_many/4`) and bridge
+to whatever backend you use.
 
-Every span emits the standard `:telemetry.span/3` triple: `[..., :start]`, `[..., :stop]`, and
-`[..., :exception]` on a raised or thrown error, which is then re-raised. `:start` measurements
-carry `system_time` (native units); `:stop`/`:exception` measurements carry `duration` (native
-units, convert with `System.convert_time_unit(duration, :native, :millisecond)`).
+Every span emits the standard triple: `[..., :start]`, `[..., :stop]`, and `[..., :exception]` on a
+raised or thrown error, which is then re-raised. `:start` measurements carry `system_time` (native
+units); `:stop`/`:exception` measurements carry `duration` (native units, convert with
+`System.convert_time_unit(duration, :native, :millisecond)`).
 
 | Event prefix | One span per |
 |---|---|
 | `[:dbos, :workflow]` | one execution of a workflow body |
 | `[:dbos, :step]` | one execution of a step body |
+| `[:dbos, :wait]` | one blocking wait: `Dbos.sleep/1`, `Dbos.recv_message/3`, `Dbos.get_event/4` |
 | `[:dbos, :queue, :dequeue]` | one dequeue poll of one queue/partition pair |
 | `[:dbos, :recovery]` | one `Dbos.Recovery.reclaim/2,3` pass |
 
@@ -40,6 +41,41 @@ checkpointed emits nothing on replay — only real invocations are spanned.
 |---|---|
 | `function_name` | The step's name (`"name/arity"`, or a `name:` override). |
 | `workflow_id` | The owning workflow's id, `nil` for a step called outside a workflow. |
+
+## `[:dbos, :wait, :start | :stop | :exception]`
+
+Wraps one blocking wait inside `Dbos.sleep/1`, `Dbos.recv_message/3` or `Dbos.get_event/4` — the
+state a human-in-the-loop UI watches. `Dbos.get_event/4` called outside a workflow is spanned too,
+with a `nil` `workflow_id`. A wait already satisfied when it is reached still emits the pair, with
+a near-zero duration and `outcome: :resolved`.
+
+| Metadata | Meaning |
+|---|---|
+| `engine` | The engine name. |
+| `workflow_id` | The waiting workflow's id, `nil` for a wait outside a workflow. |
+| `kind` | `:sleep`, `:recv`, or `:event`. |
+| `key` | The `recv` topic, or the `get_event` key. `nil` for `:sleep`. |
+| `target_workflow_id` | The workflow whose event is being watched. `nil` for `:sleep` and `:recv`. |
+| `timeout_ms` | The requested timeout, or the requested sleep duration. |
+| `outcome` | `:stop` only — `:resolved`, `:timeout`, or `:parked`. |
+
+A workflow cancelled mid-wait raises, so cancellation arrives as `[:dbos, :wait, :exception]`.
+
+### Parking
+
+A wait longer than the engine's `park_exit_threshold_ms` releases the workflow process
+entirely, so one `:telemetry.span/3` cannot cover the whole wait. The span closes at the
+moment the process is released, with `outcome: :parked` and a duration measuring only the resident
+portion.
+
+The resumption is a separate span. When the deadline fires or a message wakes the wait, the
+workflow is replayed from its checkpoints, reaches the same call site, and emits a fresh
+`[:dbos, :wait, :start]` — from a different process, after a restart possibly on a different node,
+minutes or days later. `workflow_id` plus `kind` and `key` are the only link between the two; there
+is no shared span id, and no single handler invocation sees both ends.
+
+To measure how long a workflow was parked, pair the `:parked` stop with the next `:start` for the
+same `workflow_id`, or read `workflow_status` from the database.
 
 ## `[:dbos, :queue, :dequeue, :start | :stop | :exception]`
 

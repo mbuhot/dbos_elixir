@@ -16,6 +16,7 @@ defmodule Dbos do
   alias Dbos.Debouncer
   alias Dbos.Messaging
   alias Dbos.Notifications
+  alias Dbos.Options
   alias Dbos.Queue
   alias Dbos.Registry
   alias Dbos.Runtime
@@ -44,10 +45,16 @@ defmodule Dbos do
   consumes a step id, defaults the child's id to `"<parent_id>-<parent_step_id>"`, and replaying
   the parent does not start the child a second time.
 
+  Reach for this to dispatch a workflow by name; a `defworkflow`'s generated options dispatcher
+  (`Dbos.Macros`) is the call form for dispatching by function.
+
   `opts`: `:workflow_id`, `:engine` (default `Dbos`), `:deduplication_id`, `:priority`,
-  `:application_version`.
+  `:application_version`, `:timeout_ms`. Any other key raises
+  `Dbos.InvalidWorkflowOptionError`.
   """
   def start(name_or_capture, args, opts \\ []) do
+    Options.validate_start!(name_or_capture, opts)
+
     if Runtime.in_workflow?() do
       config = Runtime.current_config()
       {name, mfa} = resolve_workflow(config.name, name_or_capture)
@@ -66,9 +73,14 @@ defmodule Dbos do
   `ENQUEUED` once it elapses) and the queue's runner
   claims and dispatches it later. `opts`: `:queue_name` (required), `:engine` (default `Dbos`),
   `:workflow_id`, `:priority` (default `0`, lower runs first), `:deduplication_id`,
-  `:partition_key`, `:delay_ms`, `:application_version`. `:deduplication_id` and `:partition_key`
-  are mutually exclusive. Raises `Dbos.QueueDeduplicatedError` if `:deduplication_id` is already
-  held by another workflow on the same queue.
+  `:partition_key`, `:delay_ms`, `:application_version`, `:timeout_ms`. `:deduplication_id` and
+  `:partition_key` are mutually exclusive, and any other key raises
+  `Dbos.InvalidWorkflowOptionError`. Raises `Dbos.QueueDeduplicatedError` if `:deduplication_id`
+  is already held by another workflow on the same queue.
+
+  Reach for this to enqueue a workflow by name, and inside a workflow to enqueue a child and carry
+  on without waiting for it; a `defworkflow`'s generated options dispatcher (`Dbos.Macros`) is the
+  call form for dispatching by function.
 
   Called from inside a workflow, this consumes a step id and checkpoints a `"DBOS.enqueue"` step,
   so replaying the parent does not enqueue a second copy. Outside a workflow, no id is allocated
@@ -80,9 +92,7 @@ defmodule Dbos do
   runs until `Dbos.Testing.drain_queue/2` or `Dbos.Testing.drain_all/1` is called.
   """
   def enqueue(name_or_capture, args, opts \\ []) do
-    if Keyword.has_key?(opts, :deduplication_id) and Keyword.has_key?(opts, :partition_key) do
-      raise ArgumentError, "deduplication_id and partition_key cannot be used together"
-    end
+    Options.validate_enqueue!(name_or_capture, opts)
 
     {engine, config} = engine_and_config(opts)
     {name, _mfa} = resolve_workflow(engine, name_or_capture)

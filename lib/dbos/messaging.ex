@@ -10,6 +10,7 @@ defmodule Dbos.Messaging do
   alias Dbos.Serialization
   alias Dbos.StepNames
   alias Dbos.SystemDb
+  alias Dbos.Telemetry
   alias Dbos.Waits
 
   @doc "The sentinel topic a no-topic `send`/`recv` uses."
@@ -76,38 +77,46 @@ defmodule Dbos.Messaging do
 
       :ok ->
         try do
-          already_pending = SystemDb.notification_pending?(config, workflow_id, topic)
+          metadata = wait_metadata(config, workflow_id, :recv, timeout_ms, topic)
 
           timeout_occurred =
-            if already_pending do
-              false
-            else
-              deadline_ms =
-                Runtime.run_step_at(sleep_step_id, StepNames.sleep(), [], fn ->
-                  System.os_time(:millisecond) + timeout_ms
-                end)
-
-              remaining_ms = deadline_ms - System.os_time(:millisecond)
-
-              if Waits.should_park?(config, remaining_ms, Runtime.current_step_id()) do
-                Notifications.unsubscribe_recv(engine, workflow_id, topic)
-                Waits.park(config, workflow_id, {:recv, topic}, deadline_ms)
-              end
-
-              result =
-                Notifications.wait_until(engine, deadline_ms, fn ->
-                  SystemDb.notification_pending?(config, workflow_id, topic) or
-                    SystemDb.workflow_cancelled?(config, workflow_id)
-                end)
-
-              raise_if_cancelled!(config, workflow_id)
-              result == :timeout
-            end
+            Telemetry.span_wait(metadata, fn ->
+              await_notification(config, workflow_id, topic, sleep_step_id, timeout_ms)
+            end)
 
           consume_recv(config, workflow_id, topic, step_id, timeout_occurred)
         after
           Notifications.unsubscribe_recv(engine, workflow_id, topic)
         end
+    end
+  end
+
+  defp await_notification(config, workflow_id, topic, sleep_step_id, timeout_ms) do
+    engine = config.name
+
+    if SystemDb.notification_pending?(config, workflow_id, topic) do
+      {false, :resolved}
+    else
+      deadline_ms =
+        Runtime.run_step_at(sleep_step_id, StepNames.sleep(), [], fn ->
+          System.os_time(:millisecond) + timeout_ms
+        end)
+
+      remaining_ms = deadline_ms - System.os_time(:millisecond)
+
+      if Waits.should_park?(config, remaining_ms, Runtime.current_step_id()) do
+        Notifications.unsubscribe_recv(engine, workflow_id, topic)
+        Waits.park(config, workflow_id, {:recv, topic}, deadline_ms)
+      end
+
+      result =
+        Notifications.wait_until(engine, deadline_ms, fn ->
+          SystemDb.notification_pending?(config, workflow_id, topic) or
+            SystemDb.workflow_cancelled?(config, workflow_id)
+        end)
+
+      raise_if_cancelled!(config, workflow_id)
+      {result == :timeout, wait_outcome(result)}
     end
   end
 
@@ -175,28 +184,12 @@ defmodule Dbos.Messaging do
         :ok = Notifications.subscribe_event(engine, target_workflow_id, key)
 
         try do
-          already_present = event_present?(config, target_workflow_id, key)
+          metadata =
+            wait_metadata(config, workflow_id, :event, timeout_ms, key, target_workflow_id)
 
-          unless already_present do
-            deadline_ms =
-              Runtime.run_step_at(sleep_step_id, StepNames.sleep(), [], fn ->
-                System.os_time(:millisecond) + timeout_ms
-              end)
-
-            remaining_ms = deadline_ms - System.os_time(:millisecond)
-
-            if Waits.should_park?(config, remaining_ms, Runtime.current_step_id()) do
-              Notifications.unsubscribe_event(engine, target_workflow_id, key)
-              Waits.park(config, workflow_id, {:event, target_workflow_id, key}, deadline_ms)
-            end
-
-            Notifications.wait_until(engine, deadline_ms, fn ->
-              event_present?(config, target_workflow_id, key) or
-                SystemDb.workflow_cancelled?(config, workflow_id)
-            end)
-
-            raise_if_cancelled!(config, workflow_id)
-          end
+          Telemetry.span_wait(metadata, fn ->
+            await_event(config, workflow_id, target_workflow_id, key, sleep_step_id, timeout_ms)
+          end)
 
           Runtime.run_step_at(step_id, StepNames.get_event(), [], fn ->
             case SystemDb.get_event_value(config, target_workflow_id, key) do
@@ -207,6 +200,35 @@ defmodule Dbos.Messaging do
         after
           Notifications.unsubscribe_event(engine, target_workflow_id, key)
         end
+    end
+  end
+
+  defp await_event(config, workflow_id, target_workflow_id, key, sleep_step_id, timeout_ms) do
+    engine = config.name
+
+    if event_present?(config, target_workflow_id, key) do
+      {:ok, :resolved}
+    else
+      deadline_ms =
+        Runtime.run_step_at(sleep_step_id, StepNames.sleep(), [], fn ->
+          System.os_time(:millisecond) + timeout_ms
+        end)
+
+      remaining_ms = deadline_ms - System.os_time(:millisecond)
+
+      if Waits.should_park?(config, remaining_ms, Runtime.current_step_id()) do
+        Notifications.unsubscribe_event(engine, target_workflow_id, key)
+        Waits.park(config, workflow_id, {:event, target_workflow_id, key}, deadline_ms)
+      end
+
+      result =
+        Notifications.wait_until(engine, deadline_ms, fn ->
+          event_present?(config, target_workflow_id, key) or
+            SystemDb.workflow_cancelled?(config, workflow_id)
+        end)
+
+      raise_if_cancelled!(config, workflow_id)
+      {:ok, wait_outcome(result)}
     end
   end
 
@@ -239,10 +261,17 @@ defmodule Dbos.Messaging do
     :ok = Notifications.subscribe_event(engine, target_workflow_id, key)
 
     try do
-      deadline_ms = timeout_ms && System.os_time(:millisecond) + timeout_ms
+      metadata = wait_metadata(config, nil, :event, timeout_ms, key, target_workflow_id)
 
-      Notifications.wait_until(engine, deadline_ms, fn ->
-        event_present?(config, target_workflow_id, key)
+      Telemetry.span_wait(metadata, fn ->
+        deadline_ms = timeout_ms && System.os_time(:millisecond) + timeout_ms
+
+        result =
+          Notifications.wait_until(engine, deadline_ms, fn ->
+            event_present?(config, target_workflow_id, key)
+          end)
+
+        {:ok, wait_outcome(result)}
       end)
 
       case SystemDb.get_event_value(config, target_workflow_id, key) do
@@ -374,7 +403,9 @@ defmodule Dbos.Messaging do
     if config.testing in [:inline, :manual] do
       raise_if_cancelled!(config, workflow_id)
     else
-      wait_for_deadline(config, workflow_id, deadline_ms)
+      Telemetry.span_wait(wait_metadata(config, workflow_id, :sleep, ms), fn ->
+        wait_for_deadline(config, workflow_id, deadline_ms)
+      end)
     end
   end
 
@@ -391,7 +422,21 @@ defmodule Dbos.Messaging do
         SystemDb.workflow_cancelled?(config, workflow_id)
     end)
 
-    raise_if_cancelled!(config, workflow_id)
+    {raise_if_cancelled!(config, workflow_id), :resolved}
+  end
+
+  defp wait_outcome(:found), do: :resolved
+  defp wait_outcome(:timeout), do: :timeout
+
+  defp wait_metadata(config, workflow_id, kind, timeout_ms, key \\ nil, target_workflow_id \\ nil) do
+    %{
+      engine: config.name,
+      workflow_id: workflow_id,
+      kind: kind,
+      key: key,
+      target_workflow_id: target_workflow_id,
+      timeout_ms: timeout_ms
+    }
   end
 
   defp raise_if_cancelled!(config, workflow_id) do

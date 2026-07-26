@@ -225,7 +225,7 @@ defmodule Dbos.SystemDbRetryTest do
 
     FaultyDB.inject_connection_error(["ORDER BY priority ASC"], times: 3)
 
-    {:ok, handle} = Dbos.start("add/2", [7, 8], engine: engine, queue: "retry-queue")
+    {:ok, handle} = Dbos.enqueue("add/2", [7, 8], engine: engine, queue_name: "retry-queue")
 
     assert {:ok, 15} = Dbos.await(handle, timeout_ms: 10_000)
     assert status_of(live, handle.workflow_id).status == :success
