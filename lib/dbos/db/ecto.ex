@@ -4,6 +4,11 @@ if Code.ensure_loaded?(Ecto) do
     `Dbos.DB` adapter over a host application's Ecto repo. Transactions open with
     `Repo.transaction/2`, never `Postgrex.transaction/3` on the underlying pool, so a user's own
     `Repo` calls made inside a transactional step enlist on the same connection.
+
+    A repo pooled on `Ecto.Adapters.SQL.Sandbox` skips `SET TRANSACTION ISOLATION LEVEL`, which
+    Postgres accepts only as a transaction's first statement and the sandbox holds one open for
+    the whole test. A sandbox runs serially, so the `:repeatable_read` that queue claiming asks
+    for protects against a concurrent claimer that cannot exist there.
     """
 
     @behaviour Dbos.DB
@@ -26,8 +31,10 @@ if Code.ensure_loaded?(Ecto) do
 
     @impl Dbos.DB
     def transaction(repo, opts, fun) do
+      sandboxed? = sandboxed?(repo)
+
       repo.transaction(fn ->
-        set_isolation_level(repo, opts[:isolation])
+        set_isolation_level(repo, opts[:isolation], sandboxed?)
         fun.(repo)
       end)
     end
@@ -38,9 +45,13 @@ if Code.ensure_loaded?(Ecto) do
     @impl Dbos.DB
     def rollback(repo, reason), do: repo.rollback(reason)
 
-    defp set_isolation_level(_repo, nil), do: :ok
+    defp sandboxed?(repo), do: repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox
 
-    defp set_isolation_level(repo, isolation) do
+    defp set_isolation_level(_repo, nil, _sandboxed?), do: :ok
+
+    defp set_isolation_level(_repo, _isolation, true), do: :ok
+
+    defp set_isolation_level(repo, isolation, false) do
       query!(repo, Isolation.sql(isolation), [])
     end
   end

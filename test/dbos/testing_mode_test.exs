@@ -304,5 +304,32 @@ defmodule Dbos.TestingModeTest do
       assert Testing.drain_queue("sandbox_queue", engine: name) == 1
       assert {:ok, 42} = Dbos.await(handle, engine: name)
     end
+
+    test "a queue with concurrency and rate limits drains under the sandbox" do
+      name = Module.concat(__MODULE__, :"LimitedEngine#{System.unique_integer([:positive])}")
+
+      start_supervised!(
+        {Dbos.Supervisor,
+         name: name,
+         db: {Dbos.DB.Ecto, Dbos.SandboxRepo},
+         executor_id: "sandbox-limited-exec",
+         migrations: :skip,
+         testing: :manual,
+         workflows: @workflows,
+         queues: [
+           Queue.new("limited_queue",
+             global_concurrency: 5,
+             worker_concurrency: 5,
+             rate_limit: %{limit: 60, period_ms: 60_000}
+           )
+         ]},
+        id: name
+      )
+
+      {:ok, handle} = Dbos.enqueue("add/2", [1, 2], queue_name: "limited_queue", engine: name)
+
+      assert Testing.drain_queue("limited_queue", engine: name) == 1
+      assert {:ok, 3} = Dbos.await(handle, engine: name)
+    end
   end
 end
