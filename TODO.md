@@ -58,6 +58,18 @@ Surfaced building `sample_apps/live_approvals`:
 - `Dbos.resume/2` is a no-op on `SUCCESS`/`ERROR`, so a workflow that errored while parked has no
   public route back. The only way through is a raw `UPDATE` to `PENDING`.
 
+## `Dbos.Migration` disappears when Ecto arrives after Dbos
+
+`lib/dbos/migration.ex` is wrapped in `if Code.ensure_loaded?(Ecto.Migration)`, evaluated when
+`dbos` compiles. An application that adds `dbos` first and `ecto_sql` second has a compiled `dbos`
+with no `Dbos.Migration` in it, and `mix ecto.migrate` fails with `UndefinedFunctionError` on a
+migration that looks correct. `mix deps.compile dbos --force` fixes it.
+
+Hit three times converting the sample apps. Every new user installing `dbos` into an app that
+already has Ecto is fine; the trap is the other order, and the error names the wrong culprit.
+Options: make the module unconditional and raise a clear message at call time, or detect the
+condition in `mix dbos.gen.migration` and say what to run.
+
 ## Integration suite fails under local Docker
 
 Four tests fail on an arm64 Mac: a stale-image `Dbos.Version` `MatchError`, then `:badrpc` and ETS
