@@ -63,7 +63,7 @@ the whole-application compiler.
 
 ## Storage
 
-Extension migration 3 adds one column:
+An extension migration adds one column:
 
 ```sql
 ALTER TABLE "dbos".operation_outputs ADD COLUMN IF NOT EXISTS ex_compensation TEXT;
