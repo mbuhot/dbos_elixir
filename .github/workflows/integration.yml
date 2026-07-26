@@ -21,6 +21,10 @@ jobs:
       - name: Run integration suite
         run: docker compose run --rm test-runner
 
+      - name: Dump node logs
+        if: failure()
+        run: docker compose logs --no-color node1 node2
+
       - name: Tear down integration stack
         if: always()
         run: docker compose down -v

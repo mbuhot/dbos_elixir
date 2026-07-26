@@ -36,9 +36,3 @@ Surfaced building `sample_apps/live_approvals`:
 
 - `Dbos.resume/2` is a no-op on `SUCCESS`/`ERROR`, so a workflow that errored while parked has no
   public route back. The only way through is a raw `UPDATE` to `PENDING`.
-
-## Integration suite fails under local Docker
-
-Four tests fail on an arm64 Mac: a stale-image `Dbos.Version` `MatchError`, then `:badrpc` and ETS
-lookup failures between node1, node2 and the runner after a clean rebuild. Unknown whether this is
-local-only. The nightly workflow added in `.github/workflows/integration.yml` will report on it.

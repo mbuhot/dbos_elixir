@@ -1,5 +1,7 @@
 FROM hexpm/elixir:1.19.5-erlang-28.1.1-debian-bookworm-20260713-slim
 
+ARG TARGETARCH=amd64
+
 ENV MIX_ENV=test
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -8,7 +10,7 @@ RUN apt-get update && \
       build-essential git curl ca-certificates postgresql-client docker.io && \
     mkdir -p /root/.docker/cli-plugins && \
     curl -fsSL \
-      https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 \
+      "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-$(case "$TARGETARCH" in arm64) echo aarch64 ;; *) echo x86_64 ;; esac)" \
       -o /root/.docker/cli-plugins/docker-compose && \
     chmod +x /root/.docker/cli-plugins/docker-compose && \
     rm -rf /var/lib/apt/lists/*

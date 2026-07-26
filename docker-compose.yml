@@ -1,11 +1,12 @@
 name: dbos_integration
 
-x-pg-env: &pg_env
+x-node-env: &node_env
   PGHOST: postgres
   PGPORT: "5432"
   PGUSER: postgres
   PGPASSWORD: postgres
   PGDATABASE: dbos_integration
+  DBOS__APPVERSION: integration
 
 services:
   postgres:
@@ -25,7 +26,7 @@ services:
   migrate:
     build: .
     environment:
-      <<: *pg_env
+      <<: *node_env
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,8 +36,9 @@ services:
     build: .
     hostname: node1
     environment:
-      <<: *pg_env
+      <<: *node_env
       DBOS__VMID: node1
+      DBOS_HOST_EXCLUSIVE_WORKFLOW: "true"
       RELEASE_COOKIE: dbos_integration_secret
     depends_on:
       postgres:
@@ -50,7 +52,7 @@ services:
     build: .
     hostname: node2
     environment:
-      <<: *pg_env
+      <<: *node_env
       DBOS__VMID: node2
       RELEASE_COOKIE: dbos_integration_secret
     depends_on:
@@ -65,7 +67,7 @@ services:
     build: .
     hostname: test-runner
     environment:
-      <<: *pg_env
+      <<: *node_env
       RELEASE_COOKIE: dbos_integration_secret
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

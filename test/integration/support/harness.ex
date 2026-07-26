@@ -1,9 +1,14 @@
 defmodule Dbos.Integration.Harness do
   @moduledoc """
-  Drives the `docker-compose.yml` stack for the integration suite: bringing services up,
-  waiting for them to become reachable, killing a node without a graceful shutdown, reassigning
-  a dead executor's rows (there is no engine API for this yet — see `reassign_executor!/2`), and
+  Drives the `docker-compose.yml` stack for the integration suite: bringing services up, waiting
+  for each node's engine to finish booting, killing a node without a graceful shutdown, and
   querying the shared system database directly with Postgrex.
+
+  Readiness means the engine is serving, not merely that distributed Erlang answers. A node's VM
+  accepts connections seconds before `test/integration/node_runtime.exs` has compiled and started
+  `Dbos.Supervisor`, and an RPC landing in that window raises `:undef` or
+  `Dbos.NotStartedError`. `node_runtime.exs` registers `:dbos_integration_ready` once
+  `Dbos.Supervisor.start_link/1` has returned, and `up!/0`/`start!/1` block on that name.
 
   Runs from inside the `test-runner` container, which has the Docker CLI and the `docker
   compose` plugin installed and the host's Docker socket mounted, so `docker compose` here
@@ -31,9 +36,9 @@ defmodule Dbos.Integration.Harness do
     )
   end
 
-  @doc "Brings up `postgres`, `migrate`, `node1`, `node2` and waits for the two nodes to answer distributed Erlang."
+  @doc "Brings up `postgres`, `migrate`, `node1`, `node2` and waits for both engines to finish booting."
   def up! do
-    compose!(["up", "-d", "--build", "postgres", "migrate", "node1", "node2"])
+    compose!(["up", "-d", "postgres", "migrate", "node1", "node2"])
     wait_for_node!(:node1)
     wait_for_node!(:node2)
     :ok
@@ -51,7 +56,7 @@ defmodule Dbos.Integration.Harness do
     :ok
   end
 
-  @doc "Starts a previously killed service back up and waits for it to answer distributed Erlang again."
+  @doc "Starts a previously killed service back up and waits for its engine to finish booting again."
   def start!(service) do
     compose!(["start", Atom.to_string(service)])
     wait_for_node!(service)
@@ -65,12 +70,6 @@ defmodule Dbos.Integration.Harness do
     node = node_name(service)
     true = Node.connect(node)
     :rpc.call(node, module, function, args)
-  end
-
-  @doc "A `Dbos.Config` for querying the shared system database directly, over its own Postgrex connection."
-  def system_db_config do
-    {:ok, conn} = Postgrex.start_link(postgrex_opts())
-    %Dbos.Config{db: Dbos.DB.Postgrex, conn: conn, executor_id: "test-runner"}
   end
 
   @doc "A bare Postgrex connection to the shared database, for the `execution_log`/`execution_attempts`/`release_signals` tables."
@@ -126,23 +125,16 @@ defmodule Dbos.Integration.Harness do
     Enum.map(rows, fn [function_id] -> function_id end)
   end
 
-  @doc """
-  Reassigns a `PENDING` workflow's `executor_id` directly, standing in for the ops action a real
-  deployment would take to hand a dead executor's rows to a live one (`Dbos.Recovery` only ever
-  scans for its *own* `config.executor_id`, per its `@moduledoc` — there is no public API for
-  claiming another executor's rows, see the integration suite's report for why that gap matters).
-  Once reassigned, the target engine's own `Dbos.Recovery.recover_pending/1` will pick the row up
-  on its next scan.
-  """
-  def reassign_executor!(conn, workflow_id, new_executor_id) do
-    {:ok, _result} =
-      Postgrex.query(
+  @doc "The `executor_id` and status currently recorded for `workflow_id`, read straight from `dbos.workflow_status`."
+  def owner_and_status(conn, workflow_id) do
+    %{rows: [[executor_id, status, recovery_attempts]]} =
+      Postgrex.query!(
         conn,
-        ~s(UPDATE "dbos".workflow_status SET executor_id = $1 WHERE workflow_uuid = $2 AND status = 'PENDING'),
-        [new_executor_id, workflow_id]
+        ~s(SELECT executor_id, status, recovery_attempts FROM "dbos".workflow_status WHERE workflow_uuid = $1),
+        [workflow_id]
       )
 
-    :ok
+    %{executor_id: executor_id, status: status, recovery_attempts: recovery_attempts}
   end
 
   @doc "Polls `fun.()` until it returns a truthy value, or raises after `attempts` (default 150, ~15s at the default 100ms poll)."
@@ -159,19 +151,26 @@ defmodule Dbos.Integration.Harness do
     end
   end
 
-  defp wait_for_node!(service, attempts \\ 100)
+  defp wait_for_node!(service, attempts \\ 240)
 
   defp wait_for_node!(service, 0) do
-    raise "#{service}'s node (#{node_name(service)}) never became reachable"
+    raise "#{service}'s engine (#{node_name(service)}) never finished booting"
   end
 
   defp wait_for_node!(service, attempts) do
-    if Node.connect(node_name(service)) == true do
+    if engine_ready?(service) do
       :ok
     else
       Process.sleep(500)
       wait_for_node!(service, attempts - 1)
     end
+  end
+
+  defp engine_ready?(service) do
+    node = node_name(service)
+
+    Node.connect(node) == true and
+      is_pid(:rpc.call(node, Process, :whereis, [:dbos_integration_ready]))
   end
 
   defp postgrex_opts do

@@ -2,13 +2,15 @@ Code.require_file("support/harness.ex", __DIR__)
 
 defmodule Dbos.Integration.RecoveryOwnershipTest do
   @moduledoc """
-  Node1 dies while holding two in-flight workflows. Only one of them gets reassigned to node2 —
-  the ops action a real deployment would take to hand a dead executor's rows to a live one (see
-  `Dbos.Integration.Harness.reassign_executor!/3`). Node2's own `Dbos.Recovery.recover_pending/1`
-  then recovers exactly the workflow reassigned to it, and never touches its still-node1-owned
-  peer: `Dbos.Recovery.recover_pending/1` only ever scans for rows matching its own
-  `config.executor_id`, so an un-reassigned row is invisible to it by construction. This test
-  makes that boundary observable end to end.
+  Node1 dies while holding two in-flight workflows, and only one of them is a workflow node2 can
+  run: `"exclusive_workflow/1"` is registered on node1 alone (`DBOS_HOST_EXCLUSIVE_WORKFLOW` in
+  `docker-compose.yml`), standing in for the heterogeneous deployment where not every executor
+  implements every workflow.
+
+  Reclaim is capability-filtered, so node2's `Dbos.LeaseSweep` takes over the shared workflow and
+  leaves the node1-only one exactly where it is — still `PENDING`, still owned by node1, its
+  recovery attempts untouched — waiting for an executor that implements it. This test makes that
+  boundary observable end to end across two real nodes.
   """
 
   use ExUnit.Case, async: false
@@ -16,64 +18,69 @@ defmodule Dbos.Integration.RecoveryOwnershipTest do
   alias Dbos.Integration.Harness
 
   @moduletag :integration
-  @moduletag timeout: 120_000
+  @moduletag timeout: 180_000
 
   setup_all do
     Harness.up!()
-    {:ok, conn: Harness.conn(), system_db: Harness.system_db_config()}
+    {:ok, conn: Harness.conn()}
   end
 
-  test "node2 recovers only the workflow reassigned to it, leaving node1's other row untouched",
-       %{conn: conn, system_db: system_db} do
-    reassigned_id = "ownership-reassigned-#{System.unique_integer([:positive])}"
-    untouched_id = "ownership-untouched-#{System.unique_integer([:positive])}"
+  setup do
+    on_exit(fn -> Harness.start!(:node1) end)
+    :ok
+  end
 
-    {:ok, _handle} =
+  test "the surviving node takes over the dead node's workflow it can run and leaves the one it cannot",
+       %{conn: conn} do
+    shared_id = "ownership-shared-#{System.unique_integer([:positive])}"
+    exclusive_id = "ownership-exclusive-#{System.unique_integer([:positive])}"
+
+    {:ok, _shared_handle} =
       Harness.rpc(:node1, Dbos, :start, [
         "hard_kill_workflow/1",
         [:ignored],
-        [workflow_id: reassigned_id]
+        [workflow_id: shared_id]
       ])
 
-    {:ok, _handle} =
+    {:ok, _exclusive_handle} =
       Harness.rpc(:node1, Dbos, :start, [
-        "hard_kill_workflow/1",
+        "exclusive_workflow/1",
         [:ignored],
-        [workflow_id: untouched_id]
+        [workflow_id: exclusive_id]
       ])
 
-    Harness.wait_until(fn -> Harness.execution_count(conn, reassigned_id, "reserve/1") == 1 end)
-    Harness.wait_until(fn -> Harness.execution_count(conn, untouched_id, "reserve/1") == 1 end)
+    Harness.wait_until(fn -> Harness.execution_count(conn, shared_id, "reserve/1") == 1 end)
+    Harness.wait_until(fn -> Harness.execution_count(conn, exclusive_id, "reserve/1") == 1 end)
 
-    {:ok, untouched_before} = Dbos.SystemDb.get_workflow_status(system_db, untouched_id)
-    assert untouched_before.status == :pending
-    assert untouched_before.executor_id == "node1"
+    exclusive_before = Harness.owner_and_status(conn, exclusive_id)
+    assert exclusive_before.status == "PENDING"
+    assert exclusive_before.executor_id == "node1"
 
     Harness.kill!(:node1)
+    Harness.release!(conn, shared_id)
 
-    Harness.reassign_executor!(conn, reassigned_id, "node2")
-    :ok = Harness.rpc(:node2, Dbos.Recovery, :recover_pending, [Dbos])
+    Harness.wait_until(
+      fn ->
+        match?({:ok, %{status: :success}}, Harness.rpc(:node2, Dbos, :status, [shared_id]))
+      end,
+      600
+    )
 
-    Harness.release!(conn, reassigned_id)
+    assert Harness.owner_and_status(conn, shared_id).executor_id == "node2"
+    assert Harness.execution_count(conn, shared_id, "reserve/1") == 1
+    assert Harness.execution_count(conn, shared_id, "await_release/1") == 1
+    assert Harness.attempt_count(conn, shared_id, "reserve/1") == 1
+    assert Harness.attempt_count(conn, shared_id, "await_release/1") == 1
 
-    Harness.wait_until(fn ->
-      match?({:ok, %{status: :success}}, Harness.rpc(:node2, Dbos, :status, [reassigned_id]))
-    end)
+    exclusive_after = Harness.owner_and_status(conn, exclusive_id)
+    assert exclusive_after.status == "PENDING"
+    assert exclusive_after.executor_id == "node1"
+    assert exclusive_after.recovery_attempts == exclusive_before.recovery_attempts
 
-    assert Harness.execution_count(conn, reassigned_id, "reserve/1") == 1
-    assert Harness.execution_count(conn, reassigned_id, "await_release/1") == 1
-    assert Harness.attempt_count(conn, reassigned_id, "reserve/1") == 1
-    assert Harness.attempt_count(conn, reassigned_id, "await_release/1") == 1
+    assert Harness.execution_count(conn, exclusive_id, "reserve/1") == 1
+    assert Harness.attempt_count(conn, exclusive_id, "reserve/1") == 1
+    assert Harness.execution_count(conn, exclusive_id, "await_release/1") == 0
 
-    {:ok, untouched_after} = Dbos.SystemDb.get_workflow_status(system_db, untouched_id)
-    assert untouched_after.status == :pending
-    assert untouched_after.executor_id == "node1"
-    assert untouched_after.recovery_attempts == untouched_before.recovery_attempts
-
-    assert Harness.execution_count(conn, untouched_id, "reserve/1") == 1
-    assert Harness.attempt_count(conn, untouched_id, "reserve/1") == 1
-    assert Harness.execution_count(conn, untouched_id, "await_release/1") == 0
-
-    Harness.start!(:node1)
+    Harness.release!(conn, exclusive_id)
   end
 end
