@@ -56,6 +56,36 @@ defmodule Dbos.NotificationsTest do
     assert :ok = Notifications.subscribe_event(engine, "wf-1", "key")
   end
 
+  test "an Ecto repo pooled on the sandbox still gets a real LISTEN connection" do
+    Application.put_env(:dbos, Dbos.SandboxRepo,
+      database: Application.fetch_env!(:dbos, :test_database),
+      hostname: System.get_env("PGHOST", "localhost"),
+      username: System.get_env("PGUSER", "postgres"),
+      password: System.get_env("PGPASSWORD", "postgres"),
+      pool: Ecto.Adapters.SQL.Sandbox,
+      pool_size: 10,
+      log: false
+    )
+
+    start_supervised!(Dbos.SandboxRepo)
+    Ecto.Adapters.SQL.Sandbox.mode(Dbos.SandboxRepo, :auto)
+
+    name = Module.concat(__MODULE__, :"EctoEngine#{System.unique_integer([:positive])}")
+
+    start_supervised!(
+      {Dbos.Supervisor,
+       name: name,
+       db: {Dbos.DB.Ecto, Dbos.SandboxRepo},
+       executor_id: "exec-#{System.unique_integer([:positive])}",
+       migrations: :skip,
+       notifications: :listen,
+       workflows: []},
+      id: name
+    )
+
+    wait_until(fn -> Notifications.mode(name) == :listen end)
+  end
+
   test "wait_until returns :found immediately when the recheck is already true" do
     engine = start_engine()
     assert Notifications.wait_until(engine, nil, fn -> true end) == :found

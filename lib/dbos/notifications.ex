@@ -28,6 +28,27 @@ defmodule Dbos.Notifications do
 
   @engine_wide_kinds [:status, :recv, :event, :stream]
 
+  # The Postgrex connection options worth carrying over from an Ecto repo's config. Everything
+  # else there describes the repo rather than the connection, and `:pool` actively breaks a
+  # dedicated listener: a `Ecto.Adapters.SQL.Sandbox` pool leaves it owned by nobody.
+  @postgrex_conn_keys [
+    :hostname,
+    :port,
+    :database,
+    :username,
+    :password,
+    :socket,
+    :socket_dir,
+    :ssl,
+    :ssl_opts,
+    :parameters,
+    :connect_timeout,
+    :search_path,
+    :endpoints,
+    :types,
+    :show_sensitive_data_on_connection_error
+  ]
+
   @notifications_channel "dbos_notifications_channel"
   @workflow_events_channel "dbos_workflow_events_channel"
   @streams_channel "dbos_streams_channel"
@@ -334,7 +355,12 @@ defmodule Dbos.Notifications do
     do: opts
 
   defp notifications_conn_opts(%Config{db: Dbos.DB.Ecto, conn: repo}) do
-    if Code.ensure_loaded?(Ecto), do: repo.config()
+    if Code.ensure_loaded?(Ecto) do
+      case Keyword.take(repo.config(), @postgrex_conn_keys) do
+        [] -> nil
+        opts -> opts
+      end
+    end
   end
 
   defp notifications_conn_opts(_config), do: nil
