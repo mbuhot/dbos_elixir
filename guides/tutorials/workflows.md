@@ -191,7 +191,7 @@ different number of ids is the classic way to break this invisibly.
 | `Dbos.enqueue/3`, `Dbos.debounce/3` | 1 |
 | `Dbos.start/3` | 1 |
 | `Dbos.await/2` | 1 |
-| `Dbos.status/2`, `Dbos.cancel/2`, `Dbos.resume/2`, `Dbos.fork/3` | 1 |
+| `Dbos.status/2`, `Dbos.cancel/2`, `Dbos.resume/2`, `Dbos.retry/2`, `Dbos.fork/3` | 1 |
 | Call to another `defworkflow` (child workflow) | 2 (start + `DBOS.getResult`) |
 | The same call with `queue_name:` | 2 (`DBOS.enqueue` + `DBOS.getResult`) |
 | `Dbos.patch/1` | 0 or 1, decided at runtime |

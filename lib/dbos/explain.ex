@@ -244,6 +244,7 @@ defmodule Dbos.Explain do
   defp dbos_op(:status, _arity), do: {:step, 1, "Dbos.status (DBOS.getStatus)"}
   defp dbos_op(:cancel, _arity), do: {:step, 1, "Dbos.cancel (DBOS.cancelWorkflow)"}
   defp dbos_op(:resume, _arity), do: {:step, 1, "Dbos.resume (DBOS.resumeWorkflow)"}
+  defp dbos_op(:retry, _arity), do: {:step, 1, "Dbos.retry (DBOS.retryWorkflow)"}
   defp dbos_op(_fun, _arity), do: :unknown
 
   defp pure_literal?(expr) do

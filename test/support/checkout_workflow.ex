@@ -48,6 +48,10 @@ defmodule Dbos.CheckoutWorkflow do
     :ok = Dbos.resume(target_workflow_id)
   end
 
+  defworkflow retries_other_workflow(target_workflow_id), name: "retries_other_workflow" do
+    :ok = Dbos.retry(target_workflow_id)
+  end
+
   defworkflow uses_a_patch(order_id), name: "uses_a_patch" do
     charge = charge_card(order_id, 100)
 

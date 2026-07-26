@@ -13,6 +13,10 @@ defmodule Dbos.StepNamesTest do
     assert StepNames.resume_workflow() == "DBOS.resumeWorkflow"
   end
 
+  test "retrying a workflow checkpoints under its own reserved name" do
+    assert StepNames.retry_workflow() == "DBOS.retryWorkflow"
+  end
+
   test "patch/1 prefixes the caller-supplied patch name" do
     assert StepNames.patch("add_field") == "DBOS.patch-add_field"
   end

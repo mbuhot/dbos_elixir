@@ -4,7 +4,7 @@ defmodule Dbos do
 
   `use Dbos` brings in the `defworkflow`, `defstep` and `deftransaction` macros (see
   `Dbos.Macros`). The functions here operate on workflows once they exist: starting and enqueuing
-  them, awaiting their results, cancelling, resuming and forking them, and the messaging, event
+  them, awaiting their results, cancelling, resuming, retrying and forking them, and the messaging, event
   and stream primitives a workflow uses to communicate.
 
   Every function takes an engine name, defaulting to `Dbos`; `config/1` resolves that name to the
@@ -30,7 +30,7 @@ defmodule Dbos do
 
   @doc """
   Brings in `defstep/2`, `deftransaction/2`, and `defworkflow/2` — see `Dbos.Macros`. `opts`:
-  `:repo`, `:warn_cross_module_calls` (default `true`).
+  `:repo`.
   """
   defmacro __using__(opts) do
     quote do
@@ -451,8 +451,8 @@ defmodule Dbos do
   @doc """
   Resumes `workflow_id` from its last checkpoint: clears its queue assignment and deadline and
   re-enqueues it onto `opts[:queue_name]` (default `Dbos.Queue.internal_queue_name/0`). Resuming a
-  workflow already `SUCCESS`/`ERROR` is a silent no-op (the row is left unchanged). `opts[:engine]`
-  defaults to `Dbos`.
+  workflow already `SUCCESS`/`ERROR` is a silent no-op (the row is left unchanged); `retry/2`
+  restarts an `ERROR` workflow. `opts[:engine]` defaults to `Dbos`.
 
   Called from inside a workflow, this consumes a step id and checkpoints a
   `"DBOS.resumeWorkflow"` step, so replaying the caller does not attempt to resume a second time.
@@ -464,6 +464,35 @@ defmodule Dbos do
 
     Runtime.run_step(StepNames.resume_workflow(), [], fn ->
       SystemDb.resume_workflows(config, [workflow_id], queue_name: queue_name)
+    end)
+
+    :ok
+  end
+
+  @doc """
+  Restarts a failed `workflow_id` from its last checkpoint: clears the recorded error, resets
+  `recovery_attempts` to `0`, clears the queue assignment and deadline, and re-enqueues it onto
+  `opts[:queue_name]` (default `Dbos.Queue.internal_queue_name/0`). `opts[:engine]` defaults to
+  `Dbos`.
+
+  Acts only on the statuses in `Dbos.Status.retryable/0` — `ERROR`, `CANCELLED`,
+  `MAX_RECOVERY_ATTEMPTS_EXCEEDED`. A `SUCCESS` workflow, whose output its callers have already
+  read, and a workflow that is still live (`PENDING`/`ENQUEUED`/`DELAYED`) are both left
+  untouched, which also makes two concurrent calls on the same id start it exactly once.
+
+  Every step already checkpointed is skipped on replay. A step whose own failure was checkpointed
+  re-raises that failure on replay; `fork/3` re-runs from that step under a new id.
+
+  Called from inside a workflow, this consumes a step id and checkpoints a `"DBOS.retryWorkflow"`
+  step, so replaying the caller does not retry a second time. Outside a workflow, no id is
+  allocated and nothing is checkpointed.
+  """
+  def retry(workflow_id, opts \\ []) do
+    {_engine, config} = engine_and_config(opts)
+    queue_name = Keyword.get(opts, :queue_name, Queue.internal_queue_name())
+
+    Runtime.run_step(StepNames.retry_workflow(), [], fn ->
+      SystemDb.retry_workflows(config, [workflow_id], queue_name: queue_name)
     end)
 
     :ok

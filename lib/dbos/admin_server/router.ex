@@ -82,6 +82,11 @@ defmodule Dbos.AdminServer.Router do
     {204, "", "application/json"}
   end
 
+  defp dispatch(engine, :post, ["workflows", id, "retry"], _body) do
+    :ok = Dbos.retry(id, engine: engine)
+    {204, "", "application/json"}
+  end
+
   defp dispatch(engine, :post, ["workflows", id, "fork"], body) do
     params = decode(body)
     start_step = Map.get(params, "start_step") || 0

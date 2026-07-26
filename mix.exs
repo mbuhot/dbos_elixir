@@ -10,6 +10,7 @@ defmodule Dbos.MixProject do
       version: @version,
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
+      compilers: compilers(Mix.env()),
       test_paths: ["test/dbos"],
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -29,13 +30,28 @@ defmodule Dbos.MixProject do
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
 
+  defp compilers(env) when env in [:dev, :test] do
+    beam =
+      Path.join([
+        "_build",
+        to_string(env),
+        "lib",
+        "dbos",
+        "ebin",
+        "Elixir.Mix.Tasks.Compile.Dbos.beam"
+      ])
+
+    if File.exists?(beam), do: [:dbos] ++ Mix.compilers(), else: Mix.compilers()
+  end
+
+  defp compilers(_env), do: Mix.compilers()
+
   defp deps do
     [
       {:postgrex, "~> 0.21"},
       {:telemetry, "~> 1.3"},
       {:ecto_sql, "~> 3.13", optional: true},
       {:jason, "~> 1.4", only: [:dev, :test]},
-      {:credo, "~> 1.7", only: [:dev, :test]},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end
@@ -224,7 +240,12 @@ defmodule Dbos.MixProject do
       ],
       Operations: [Dbos.Recovery, Dbos.AdminServer],
       Testing: [Dbos.Testing],
-      "Credo Checks": [Credo.Check.Warning.DbosDeterminism],
+      "Determinism Checking": [
+        Mix.Tasks.Compile.Dbos,
+        Dbos.Determinism,
+        Dbos.Compiler.Analysis,
+        Dbos.Compiler.State
+      ],
       Errors: ~r{Dbos\..*Error$}
     ]
   end

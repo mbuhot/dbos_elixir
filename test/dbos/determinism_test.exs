@@ -1,8 +1,6 @@
 defmodule Dbos.DeterminismTest do
   use ExUnit.Case, async: true
 
-  import ExUnit.CaptureIO
-
   defp fresh_module_name do
     :"Elixir.Dbos.DeterminismFixture#{System.unique_integer([:positive])}"
   end
@@ -208,27 +206,6 @@ defmodule Dbos.DeterminismTest do
     assert error.description =~ "Process.sleep"
   end
 
-  test "an undeclared cross-module call warns" do
-    output =
-      capture_io(:stderr, fn ->
-        compile("Dbos.DeterminismFixtureHelper.side_effect(x)")
-      end)
-
-    assert output =~ "Dbos.DeterminismFixtureHelper.side_effect/1"
-    assert output =~ "not a registered step"
-  end
-
-  test "the undeclared cross-module call warning is suppressible" do
-    output =
-      capture_io(:stderr, fn ->
-        compile("Dbos.DeterminismFixtureHelper.side_effect(x)",
-          use_opts: "warn_cross_module_calls: false"
-        )
-      end)
-
-    refute output =~ "not a registered step"
-  end
-
   @step_banned [
     {"spawn(fn -> :ok end)", "spawn"},
     {"spawn_link(fn -> :ok end)", "spawn_link"},
@@ -321,38 +298,5 @@ defmodule Dbos.DeterminismTest do
                :go -> :ok
              end
              """)
-  end
-
-  test "calling a registered step in another module does not warn" do
-    fixture_module = fresh_module_name()
-
-    step_source = """
-    defmodule Dbos.DeterminismFixtureSteps do
-      use Dbos
-
-      defstep helper(x) do
-        x
-      end
-    end
-    """
-
-    Code.compile_string(step_source, "test/fixture_steps.ex")
-
-    source = """
-    defmodule #{inspect(fixture_module)} do
-      use Dbos
-
-      defworkflow run(x), name: "run" do
-        Dbos.DeterminismFixtureSteps.helper(x)
-      end
-    end
-    """
-
-    output =
-      capture_io(:stderr, fn ->
-        Code.compile_string(source, "test/fixture.ex")
-      end)
-
-    refute output =~ "not a registered step"
   end
 end

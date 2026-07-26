@@ -6,6 +6,7 @@ defmodule QueuePatterns.MixProject do
       app: :queue_patterns,
       version: "0.1.0",
       elixir: "~> 1.19",
+      compilers: [:dbos] ++ Mix.compilers(),
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]

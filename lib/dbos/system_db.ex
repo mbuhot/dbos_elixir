@@ -842,6 +842,45 @@ defmodule Dbos.SystemDb do
     Enum.map(result.rows, fn [id] -> id end)
   end
 
+  @doc """
+  Restarts every workflow in `workflow_ids` whose status is one of `Dbos.Status.retryable/0`
+  (`ERROR`, `CANCELLED`, `MAX_RECOVERY_ATTEMPTS_EXCEEDED`): clears the recorded `error`, resets
+  `recovery_attempts` to `0`, clears `workflow_deadline_epoch_ms`, `deduplication_id`,
+  `started_at_epoch_ms`, `completed_at`, and enqueues onto `opts[:queue_name]` (default
+  `Dbos.Queue.internal_queue_name/0`). Rows at any other status are left untouched. Returns the
+  ids actually restarted, so a caller that loses a race against a concurrent restart of the same
+  id sees it absent.
+  """
+  def retry_workflows(%Config{} = config, workflow_ids, opts \\ []) do
+    queue_name = Keyword.get(opts, :queue_name, Dbos.Queue.internal_queue_name())
+    now = System.os_time(:millisecond)
+
+    sql = """
+    UPDATE #{table(config, "workflow_status")}
+        SET status = $1, queue_name = $2, recovery_attempts = $3,
+            workflow_deadline_epoch_ms = NULL, deduplication_id = NULL,
+            started_at_epoch_ms = NULL, updated_at = $4, completed_at = NULL, error = NULL
+        WHERE workflow_uuid = ANY($5) AND status IN ($6, $7, $8)
+        RETURNING workflow_uuid
+    """
+
+    [error, cancelled, exceeded] = Enum.map(Status.retryable(), &Status.to_string/1)
+
+    params = [
+      Status.to_string(:enqueued),
+      queue_name,
+      0,
+      now,
+      workflow_ids,
+      error,
+      cancelled,
+      exceeded
+    ]
+
+    {:ok, result} = query(config, sql, params)
+    Enum.map(result.rows, fn [id] -> id end)
+  end
+
   @doc "Whether `workflow_id`'s status is currently `CANCELLED`."
   def workflow_cancelled?(%Config{} = config, workflow_id) do
     sql = "SELECT status FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1"

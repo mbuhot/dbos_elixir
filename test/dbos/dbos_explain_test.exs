@@ -67,6 +67,15 @@ defmodule Mix.Tasks.Dbos.ExplainTest do
     assert output =~ "id 1: Dbos.resume (DBOS.resumeWorkflow)"
   end
 
+  test "Dbos.retry is reported as consuming one id" do
+    output =
+      capture_io(fn ->
+        Mix.Tasks.Dbos.Explain.run(["Dbos.CheckoutWorkflow.retries_other_workflow/1"])
+      end)
+
+    assert output =~ "id 0: Dbos.retry (DBOS.retryWorkflow)"
+  end
+
   test "Dbos.patch is reported as consuming 0 or 1 id, conditionally, and analysis stops there" do
     output =
       capture_io(fn ->

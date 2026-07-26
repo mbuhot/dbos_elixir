@@ -353,6 +353,30 @@ defmodule Dbos.InWorkflowCheckpointTest do
            ]
   end
 
+  test "a workflow retrying a failed workflow consumes exactly one step id" do
+    engine =
+      start_engine([
+        CheckoutWorkflow,
+        {"boom/1", {SampleWorkflows, :boom, 1}}
+      ])
+
+    config = Dbos.config(engine)
+
+    {:ok, target_handle} = Dbos.start("boom/1", [nil], engine: engine)
+    assert {:error, _} = Dbos.await(target_handle)
+
+    {:ok, handle} =
+      Dbos.start("retries_other_workflow", [target_handle.workflow_id], engine: engine)
+
+    assert {:ok, :ok} = Dbos.await(handle)
+
+    {:ok, steps} = SystemDb.get_workflow_steps(config, handle.workflow_id)
+
+    assert Enum.map(steps, &{&1.function_id, &1.function_name}) == [
+             {0, "DBOS.retryWorkflow"}
+           ]
+  end
+
   test "outside a workflow, cancel and resume still consume no ids and write no checkpoint" do
     engine =
       start_engine([

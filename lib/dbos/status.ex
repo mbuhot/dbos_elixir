@@ -24,6 +24,8 @@ defmodule Dbos.Status do
 
   @terminal [:success, :error, :cancelled, :max_recovery_attempts_exceeded]
 
+  @retryable [:error, :cancelled, :max_recovery_attempts_exceeded]
+
   @doc "Converts a status atom to its stored string."
   def to_string(status), do: Map.fetch!(@strings, status)
 
@@ -37,4 +39,13 @@ defmodule Dbos.Status do
 
   @doc "Whether a status is terminal (no further transition is possible)."
   def terminal?(status), do: status in @terminal
+
+  @doc """
+  The statuses `Dbos.retry/2` restarts a workflow from: every terminal status except `:success`.
+  A `:success` row's output has already been observed by its callers, so its run is final.
+  """
+  def retryable, do: @retryable
+
+  @doc "Whether `Dbos.retry/2` restarts a workflow at this status."
+  def retryable?(status), do: status in @retryable
 end

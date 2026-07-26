@@ -177,6 +177,26 @@ defmodule Dbos.AdminServerTest do
     assert {204, _} = post(port, "/workflows/#{handle.workflow_id}/resume")
   end
 
+  test "POST /workflows/{id}/retry puts a failed workflow back to work" do
+    engine =
+      start_engine([{"fails_once_after_step/1", {SampleWorkflows, :fails_once_after_step, 1}}])
+
+    config = Dbos.config(engine)
+    port = AdminServer.port(engine)
+
+    table = :"admin_retry_#{System.unique_integer([:positive])}"
+    :ets.new(table, [:named_table, :public, :set])
+
+    {:ok, handle} = Dbos.start("fails_once_after_step/1", [table], engine: engine)
+    assert {:error, %RuntimeError{}} = Dbos.await(handle)
+
+    assert {204, _} = post(port, "/workflows/#{handle.workflow_id}/retry")
+
+    wait_until(fn ->
+      match?({:ok, %{status: :success}}, SystemDb.get_workflow_status(config, handle.workflow_id))
+    end)
+  end
+
   test "POST /dbos-workflow-recovery reclaims a dead executor's PENDING workflows and returns their ids" do
     engine = start_engine([{"add/2", {SampleWorkflows, :add, 2}}])
     config = Dbos.config(engine)

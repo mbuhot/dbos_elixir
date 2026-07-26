@@ -113,11 +113,15 @@ stateDiagram-v2
     SUCCESS --> [*]
     ERROR --> [*]
     CANCELLED --> [*]
-    MAX_RECOVERY_ATTEMPTS_EXCEEDED --> ENQUEUED: Dbos.resume/2
+    MAX_RECOVERY_ATTEMPTS_EXCEEDED --> ENQUEUED: Dbos.resume/2, Dbos.retry/2
+    CANCELLED --> ENQUEUED: Dbos.resume/2, Dbos.retry/2
+    ERROR --> ENQUEUED: Dbos.retry/2
 ```
 
 `SUCCESS`, `ERROR`, `CANCELLED`, and `MAX_RECOVERY_ATTEMPTS_EXCEEDED` are terminal
-(`Dbos.Status.terminal?/1`). The only transition out of any of them is `Dbos.resume/2` on the last.
+(`Dbos.Status.terminal?/1`). `Dbos.retry/2` transitions out of the three failure statuses
+(`Dbos.Status.retryable/0`), clearing the recorded `error`; `Dbos.resume/2` covers the two of them
+that carry no error. `SUCCESS` is final.
 
 ## Notification channels
 

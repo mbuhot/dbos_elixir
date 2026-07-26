@@ -47,4 +47,7 @@ defmodule Dbos.StepNames do
 
   @doc "The `function_name` for `Dbos.resume/2` called from within a workflow."
   def resume_workflow, do: "DBOS.resumeWorkflow"
+
+  @doc "The `function_name` for `Dbos.retry/2` called from within a workflow."
+  def retry_workflow, do: "DBOS.retryWorkflow"
 end

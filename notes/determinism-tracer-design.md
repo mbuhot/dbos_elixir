@@ -306,10 +306,17 @@ Changes to `lib/dbos/macros.ex`:
 
 | Change | Reason |
 |---|---|
-| `__dbos_workflows__/0` entries gain `%{file:, line:}` | Report "workflow X, declared here". |
-| `__dbos_steps__/0` entries gain `%{file:, line:, kind: :step \| :transaction}` | Steps are entry points too, under the weaker step ban list. |
-| `@before_compile` calls `Dbos.Compiler.State.register_entries(module, entries)` | Fast path; the ETS row is what `flush/1` persists. |
-| `Module.register_attribute(__MODULE__, Dbos.Entries, persist: true)` | Fallback for reading entries out of a *compiled dependency's* BEAM, exactly as `Boundary.Definition` does. |
+| `@before_compile` calls `Dbos.Compiler.State.add_entry(module, row)` per workflow, step, transaction and `repo:` declaration | The ETS row carries `kind`, `name`, `mfa`, `file` and `line`, and is what `flush/1` persists. |
+| `@on_definition` reads and clears `@dbos_deterministic` | The escape hatch of §3.8, recorded as a `kind: :trusted` entry row. |
+
+**As built, the public reflection functions are unchanged.** `__dbos_workflows__/0` and
+`__dbos_steps__/0` keep their existing shapes. The file/line/kind the report needs live in the ETS
+row and the manifest, which the analysis already reads; adding them to a documented reflection
+tuple would change a public API that has no consumer for the extra fields.
+
+The persisted-attribute fallback for reading entry points out of a compiled dependency is also
+unbuilt, because §6.4 settles that only entry points belonging to the application under
+compilation are checked.
 
 The ETS write is guarded by `GenServer.whereis/1` returning a pid, so `use Dbos` still compiles
 when the Mix compiler is not installed.
@@ -534,10 +541,13 @@ everything about it:
 
 | Table | Row |
 |---|---|
-| `Dbos.Calls.<app>` | `{from_module, %{from_fun:, to:, file:, line:, mode:}}` |
-| `Dbos.Entries.<app>` | `{module, %{kind:, name:, mfa:, file:, line:}}` |
-| `Dbos.SpecialForms.<app>` | `{module, %{fun_arity:, form: :receive, line:}}` |
-| `Dbos.Seen.<app>` | `{module}` — in-memory only, cleared each run |
+| `Dbos.Compiler.State.<app>.calls` | `{from_module, %{from:, to:, file:, line:, mode:}}` |
+| `Dbos.Compiler.State.<app>.entries` | `{module, %{kind:, name:, mfa:, file:, line:}}` |
+| `Dbos.Compiler.State.<app>.seen` | `{module}` — in-memory only, cleared each run |
+
+As built the two persisted tables go into **one** manifest file, `compile.dbos_determinism`, as
+`:erlang.term_to_binary(%{format: 1, calls: [...], entries: [...]}, [:compressed])`. A single
+versioned payload is what §6.3 asks for; `:ets.tab2file/2` has nowhere to put the format number.
 
 Compression at flush, following `dedup_entries/1`: one row per `{from_fun, to, file, line}`.
 
@@ -988,3 +998,47 @@ macros as `{:imported_macro, meta, Kernel, :def, 2}` and
 `{:remote_macro, meta, Dbos.Macros, :defworkflow, 3}`, matching §3.3. Compilation of the fixture
 app under the tracer succeeded with no interference from the existing `Dbos.Determinism` AST
 walk.
+
+---
+
+## 8. As-built deviations
+
+Recorded during implementation. Each is a correction to the design above, not an open question.
+
+### 8.1 The tracer cannot trace its own recompilation
+
+A compilation tracer is called by module name. When `compile.elixir` recompiles the module
+installed as the tracer, the old code is purged before the new binary loads, and every file
+compiled in that window raises `UndefinedFunctionError` on `trace/2`. Only the `dbos` repository
+itself is in that position, since it both defines and installs the compiler.
+
+Two mitigations, both built:
+
+1. The installed tracer is `:dbos_determinism_tracer`, a shim compiled at `run/1` into a module
+   name no project owns. It forwards to `Mix.Tasks.Compile.Dbos.trace/2` and returns `:ok` when
+   the target module, `Dbos.Compiler.State` or `Dbos.Determinism.Rules` is momentarily absent.
+   Events raised in that window are lost, which under-reports; nothing crashes.
+2. `run/1` returns `{:noop, []}` without installing anything when `--force` is passed and the
+   tracer's beam lives in the project's own compile path. A full parallel rebuild reloads too
+   much at once for mitigation 1 to be reliable.
+
+The consequence for this repository: `mix compile --force` never produces a determinism report.
+An ordinary `mix compile` does.
+
+### 8.2 Phase 4 is not built
+
+`receive` is caught only where the macro AST walk sees it — written literally in a workflow body.
+The `:on_module` abstract-code scan of §3.4 is not implemented, and there is no special-forms
+table.
+
+### 8.3 New rules held back
+
+Per §6.2, `self()`, `node()`, ETS reads and `Application.get_env` are not detected. The rule table
+is exactly the set the macro AST walk already enforced, plus a `:hint` for `apply/2,3` reachable
+from an entry point.
+
+### 8.4 Repo bans are application-wide
+
+A `use Dbos, repo: MyApp.Repo` declaration registers `MyApp.Repo` as banned for every workflow
+entry point in the application, rather than only for the workflows in that module. Per-entry-point
+repo scoping needs the walk to carry provenance that the shortest-witness-chain walk discards.

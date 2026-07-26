@@ -6,6 +6,7 @@ defmodule CustomerServiceAgent.MixProject do
       app: :customer_service_agent,
       version: "0.1.0",
       elixir: "~> 1.19",
+      compilers: [:dbos] ++ Mix.compilers(),
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps()

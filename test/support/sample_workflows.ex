@@ -239,6 +239,22 @@ defmodule Dbos.SampleWorkflows do
     end
   end
 
+  @doc """
+  Checkpoints `first_step/0` (counting its invocations in `table`), then raises from the workflow
+  body itself on its first invocation only; a later run finds step 0 recorded, skips it, and
+  returns `:recovered`.
+  """
+  def fails_once_after_step(table) do
+    Dbos.Runtime.run_step("first_step/0", [], fn ->
+      :ets.update_counter(table, :first_step_runs, {2, 1}, {:first_step_runs, 0})
+    end)
+
+    case :ets.insert_new(table, {:failed_once, true}) do
+      true -> raise "workflow body failed"
+      false -> :recovered
+    end
+  end
+
   @doc "Blocks in a plain `receive`, so a cancellation only changes its durable status, not its live process."
   def blocks_forever(_arg) do
     receive do

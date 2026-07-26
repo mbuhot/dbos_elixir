@@ -94,30 +94,86 @@ to a process that starts with an empty process dictionary:
 
 ## Where the contract is enforced
 
-Two checkers share one banned-construct table, so they always agree.
+Three layers, sharing one banned-construct table, so they always agree.
 
-| Checker | Sees | On a violation |
+| Layer | Sees | On a violation |
 |---|---|---|
 | The `defworkflow`/`defstep`/`deftransaction` macros | The literal `do` block handed to the macro | `CompileError` naming the call, its file and line, and the fix |
-| `Credo.Check.Warning.DbosDeterminism` | Same-module `def`/`defp` helpers, followed transitively from every workflow, step and transaction body | A Credo issue naming the entry point, the helper it reaches through, and the fix |
+| `Mix.Tasks.Compile.Dbos` | Every function in the application, reached forward from every workflow, step and transaction body | A compiler warning carrying the whole chain from the entry point to the banned call |
+| Code review | `self()`, `node()`, ETS reads, mutable `Application.get_env` values | Guidance |
 
-Add the Credo check to `.credo.exs` under `checks`:
+### The whole-application compiler
+
+Add it ahead of the standard compilers, in `:dev` and `:test`:
 
 ```elixir
-{Credo.Check.Warning.DbosDeterminism, []}
+def project do
+  [
+    compilers: [:dbos] ++ Mix.compilers(),
+    ...
+  ]
+end
 ```
 
-Beyond the compile-time list, `defworkflow` also warns on a call to a public function in another
-module that is not a registered `defstep`/`deftransaction` — that is where undeclared side effects
-hide. Suppress it with `use Dbos, warn_cross_module_calls: false`.
+A compilation tracer records a call graph of resolved `{module, function, arity}` nodes while
+`compile.elixir` runs, and the compiler then walks it forward from each entry point. A finding
+reads:
 
-What neither checker reaches:
+```
+warning: nondeterministic call reachable from a workflow body
 
-- Helpers in another module, calls through `apply/3`, and calls through an unresolvable function
-  value — out of scope for the Credo check.
-- `self()`-dependent logic, `node()`-dependent logic, and reads of mutable module or application
-  state. Any expression can read `self()` or touch an ETS table, so there is no closed set of
-  function names to match. These stay guidance enforced by code review.
+  MyApp.Orders.place/3  (workflow "place")
+    → MyApp.Pricing.quote/1  lib/my_app/orders.ex:23
+    → MyApp.Pricing.jitter/1  lib/my_app/pricing.ex:4
+    → :rand.uniform/1  lib/my_app/pricing.ex:6
+
+  This is nondeterministic and breaks replay on recovery. Generate the random value inside a
+  step so it is checkpointed and replayed as a fixed value.
+
+  lib/my_app/pricing.ex:6
+```
+
+The diagnostic sits at the banned call, so an editor sends you to the fix; the chain shows why
+the checker believes a workflow reaches it. `mix compile --warnings-as-errors` makes findings fail
+the build, which is the recommended CI setting.
+
+Descent stops at every step and transaction body — a step is where nondeterminism belongs — at
+`Dbos` engine internals, and at every dependency. A dependency is an opaque leaf: its calls are
+matched against the rule table, its internals are never traced.
+
+### Silencing a finding
+
+One function, in a module that has `use Dbos`:
+
+```elixir
+@dbos_deterministic "reads a compile-time-frozen config map"
+def lookup_region(code), do: :persistent_term.get({:regions, code})
+```
+
+A module or MFA the project does not own, in `mix.exs`:
+
+```elixir
+dbos: [trusted: [MyApp.PureHelpers, {Some.Dep, :fetch_config, 1}]]
+```
+
+Either one makes the function a leaf: it is not followed, and its own calls are not reported. An
+annotation or list entry that silences nothing is itself reported, so the list does not rot.
+
+### What the compiler cannot see
+
+The analysis is an over-approximation of what runs and an under-approximation of what is
+reachable. Treat it as a large, cheap improvement in recall, and not as a guarantee.
+
+| Construct | Behaviour |
+|---|---|
+| `apply/3` with a computed module | Reported as a blind spot, never followed |
+| A call through a variable module (`mod.fetch(id)`), protocol dispatch, a behaviour callback | Invisible |
+| A function value received as an argument and called | Invisible at the callee; the capture at the call site is followed |
+| A branch that never runs | Reported anyway |
+| Workflows defined in a compiled dependency | Not checked — their call graph belongs to another compile run |
+| A macro that expands to a banned call | Reported at the macro's line |
+
+Warnings, never errors: an inference that turns out wrong must not break a build.
 
 ## `mix dbos.explain`
 

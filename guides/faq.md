@@ -19,9 +19,10 @@ operation itself never runs again. For `receive`, use `Dbos.recv_message/2` or `
 For a direct repo call, wrap it in `deftransaction` so it commits atomically with its
 checkpoint.
 
-The macro sees only the literal `do` block. A banned construct reached through a same-module
-helper compiles cleanly, and `mix credo` reports it — the check walks the local call graph out of
-every workflow, step and transaction body, using the same banned-construct tables.
+The macro sees only the literal `do` block. A banned construct reached through a helper function
+compiles cleanly, and `Mix.Tasks.Compile.Dbos` reports it as a warning naming the whole chain from
+the workflow to the call. Add `compilers: [:dbos] ++ Mix.compilers()` to `mix.exs` to turn that on;
+see `docs/determinism.md`.
 
 ## What does `Dbos.UnexpectedStepError` mean?
 
@@ -93,8 +94,23 @@ workflow body, since a transient failure would eventually succeed — eventually
 here, ending the retry loop.
 
 **Fix:** this status will not run again on its own. Fix whatever's actually crashing it, then
-call `Dbos.resume/2` — it clears the queue assignment and deadline, resets `recovery_attempts` to
-`0`, and re-enqueues it from its last checkpoint.
+call `Dbos.retry/2` (or `POST /workflows/{id}/retry` on the admin server) — it clears the recorded
+error, the queue assignment and the deadline, resets `recovery_attempts` to `0`, and re-enqueues
+it from its last checkpoint. `Dbos.resume/2` does the same for this status.
+
+## A workflow errored while parked waiting on a human
+
+**Symptom:** a workflow blocked in `Dbos.recv_message/3` or `Dbos.get_event/4` raised — a bad
+message payload, a downstream call that was out — and now sits at `ERROR`. The message it was
+waiting for has already been consumed and checkpointed, so re-running the workflow under a fresh
+id would park it forever.
+
+**Cause:** `ERROR` is terminal. `Dbos.resume/2` is a no-op there, matching upstream DBOS.
+
+**Fix:** `Dbos.retry/2`. It restarts the same workflow id from its last checkpoint, so the
+`DBOS.recv` step replays with the message it already received and execution continues at the line
+that raised. Every retryable status is listed under `Dbos.Status.retryable/0`; see
+`guides/tutorials/workflow-management.md`.
 
 ## The notification listener fell back to polling
 
@@ -180,5 +196,5 @@ The determinism checker rejects the construct at compile time in both workflow b
 and step and transaction bodies (`check_step!/2`).
 
 **Fix:** run the work inline in the step, or use a child workflow (`Dbos.start/3` from inside a
-workflow) for concurrency that itself needs to be durable. A process spawned through a
-same-module helper compiles, and `mix credo` reports it.
+workflow) for concurrency that itself needs to be durable. A process spawned through a helper
+function compiles, and `Mix.Tasks.Compile.Dbos` reports it as a warning.

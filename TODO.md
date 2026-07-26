@@ -13,8 +13,7 @@ workflow strands in-flight instances of all of them.
 
 **Phase 0 is done**: a drained reclaim pass reports every row it left behind — one
 `Logger.warning` and one `[:dbos, :recovery, :declined]` event per `{name, version, reason}`
-group, with `reason` in `:name_not_registered | :version_mismatch | :locked_elsewhere`. Folding
-that event into `Dbos.Telemetry` and `docs/telemetry.md` is outstanding.
+group, with `reason` in `:name_not_registered | :version_mismatch | :locked_elsewhere`.
 
 **Phases 1-5 remain**: the `ex_workflow_version` column and `ex_capabilities` on leases,
 `Dbos.Recovery.orphans/1` and `mix dbos.orphans`, the workflow-skeleton digest, the per-workflow
@@ -22,17 +21,13 @@ reclaim predicate, and prefix verification with `Dbos.Recovery.adopt/3`.
 
 ## Whole-application determinism checker
 
-`notes/determinism-tracer-design.md` has the design: a `Mix.Task.Compiler` that installs a
-compilation tracer, builds a function-level call graph, and reports transitive violations as
-warnings. Keeps the macro AST walk as the hard failure, deletes the Credo check.
+`Mix.Tasks.Compile.Dbos` ships phases 1-3 and 5 of `notes/determinism-tracer-design.md`: the
+tracer, the ETS state and manifest, entry points from the macros, forward BFS with witness
+chains, `@dbos_deterministic` and the project `trusted:` list. The Credo check is gone.
 
-Phase 0 is a gate: confirm `env.function` attributes calls inside a `defworkflow` body captured
-with `Macro.escape/1` and re-injected at `@before_compile`, and that line metadata survives the
-round trip. A no answer invalidates the design.
+Phase 4 remains: the `:on_module` abstract-code scan for `receive` and other special forms, which
+the macro AST walk currently catches only when written literally in a body.
 
-## Primitives the Phoenix integration wanted
-
-Surfaced building `sample_apps/live_approvals`:
-
-- `Dbos.resume/2` is a no-op on `SUCCESS`/`ERROR`, so a workflow that errored while parked has no
-  public route back. The only way through is a raw `UPDATE` to `PENDING`.
+Two gaps are recorded in §8 of the design note: this repo cannot trace a compile run that also
+recompiles the tracer's own modules, and a stale or missing manifest under-reports until the next
+full recompile.

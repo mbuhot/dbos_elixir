@@ -48,8 +48,8 @@ and `period_ms` are not both positive, or when the name is the reserved internal
 
 Each declared queue gets its own polling runner. A tick that hits lock contention backs the
 interval off (up to 120s); a quiet tick scales it back toward the base interval. Every engine also
-runs a reserved internal queue — the default target `Dbos.resume/2` and `Dbos.fork/3` re-enqueue
-onto.
+runs a reserved internal queue — the default target `Dbos.resume/2`, `Dbos.retry/2` and
+`Dbos.fork/3` re-enqueue onto.
 
 ## Enqueueing
 

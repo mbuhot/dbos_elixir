@@ -176,7 +176,7 @@ A workflow waiting longer than a minute releases its process and is rebuilt when
 
 ### Determinism checked at compile time
 
-`defworkflow` holds its body's AST, so nondeterministic constructs are rejected by the compiler with the call, the line, and the fix. Step and transaction bodies are checked for constructs that spawn a process out of the workflow context. `mix credo` extends the same tables to the same-module helpers those bodies call, transitively.
+`defworkflow` holds its body's AST, so nondeterministic constructs are rejected by the compiler with the call, the line, and the fix. Step and transaction bodies are checked for constructs that spawn a process out of the workflow context. The optional `:dbos` Mix compiler extends the same tables across the whole application, following every helper a workflow or step body calls, transitively.
 
 ### Evolving a workflow in flight
 

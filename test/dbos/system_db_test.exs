@@ -490,6 +490,14 @@ defmodule Dbos.SystemDbTest do
     )
   end
 
+  defp bump_recovery_attempts(config, workflow_id, attempts) do
+    Dbos.DB.Postgrex.query!(
+      config.conn,
+      "UPDATE dbos.workflow_status SET recovery_attempts = $2 WHERE workflow_uuid = $1",
+      [workflow_id, attempts]
+    )
+  end
+
   describe "insert_workflow_status/3" do
     test "inserts a PENDING row and returns the RETURNING shape", %{config: config} do
       result =
@@ -764,6 +772,88 @@ defmodule Dbos.SystemDbTest do
       assert_raise Dbos.UnexpectedStepError, fn ->
         SystemDb.record_operation_result(config, %{attrs | function_name: "charge_card/2"})
       end
+    end
+  end
+
+  describe "retry_workflows/3" do
+    test "a failed workflow becomes queued again with its error and attempt count cleared", %{
+      config: config
+    } do
+      workflow_id = "wf-retry-error"
+
+      SystemDb.insert_workflow_status(config, %{
+        workflow_id: workflow_id,
+        status: :pending,
+        name: "W",
+        inputs: [1],
+        workflow_deadline_epoch_ms: 123
+      })
+
+      mark_error(config, workflow_id, %RuntimeError{message: "boom"})
+      bump_recovery_attempts(config, workflow_id, 4)
+
+      assert SystemDb.retry_workflows(config, [workflow_id], queue_name: "retries") == [
+               workflow_id
+             ]
+
+      {:ok, status} = SystemDb.get_workflow_status(config, workflow_id)
+      assert status.status == :enqueued
+      assert status.error == nil
+      assert status.recovery_attempts == 0
+      assert status.queue_name == "retries"
+      assert status.workflow_deadline_epoch_ms == nil
+      assert status.completed_at == nil
+    end
+
+    test "a workflow that exhausted its recovery attempts is queued again", %{config: config} do
+      workflow_id = "wf-retry-exceeded"
+
+      SystemDb.insert_workflow_status(config, %{
+        workflow_id: workflow_id,
+        status: :max_recovery_attempts_exceeded,
+        name: "W",
+        inputs: [1]
+      })
+
+      assert SystemDb.retry_workflows(config, [workflow_id]) == [workflow_id]
+
+      {:ok, status} = SystemDb.get_workflow_status(config, workflow_id)
+      assert status.status == :enqueued
+    end
+
+    test "a successful workflow keeps its recorded output and stays finished", %{config: config} do
+      workflow_id = "wf-retry-success"
+
+      SystemDb.insert_workflow_status(config, %{
+        workflow_id: workflow_id,
+        status: :pending,
+        name: "W",
+        inputs: [1]
+      })
+
+      mark_success(config, workflow_id, %{shipped: true})
+
+      assert SystemDb.retry_workflows(config, [workflow_id]) == []
+
+      {:ok, status} = SystemDb.get_workflow_status(config, workflow_id)
+      assert status.status == :success
+      assert status.output == %{shipped: true}
+    end
+
+    test "a second retry of the same workflow restarts nothing", %{config: config} do
+      workflow_id = "wf-retry-twice"
+
+      SystemDb.insert_workflow_status(config, %{
+        workflow_id: workflow_id,
+        status: :pending,
+        name: "W",
+        inputs: [1]
+      })
+
+      mark_error(config, workflow_id, %RuntimeError{message: "boom"})
+
+      assert SystemDb.retry_workflows(config, [workflow_id]) == [workflow_id]
+      assert SystemDb.retry_workflows(config, [workflow_id]) == []
     end
   end
 

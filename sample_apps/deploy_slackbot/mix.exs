@@ -6,6 +6,7 @@ defmodule DeploySlackbot.MixProject do
       app: :deploy_slackbot,
       version: "0.1.0",
       elixir: "~> 1.19",
+      compilers: [:dbos] ++ Mix.compilers(),
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]

@@ -2,7 +2,7 @@
 
 Every workflow run is a row in `workflow_status`, plus one row per checkpointed step in
 `operation_outputs`. This tutorial covers reading that state back — listing workflows, inspecting
-a single one's steps — and acting on it: cancel, resume, fork, and garbage collection. It also
+a single one's steps — and acting on it: cancel, resume, retry, fork, and garbage collection. It also
 covers what happens when a node dies mid-workflow, and the admin HTTP API that exposes all of this
 over the wire.
 
@@ -74,6 +74,35 @@ re-enqueues it (onto `opts[:queue_name]`, default the reserved internal queue). 
 recorded is skipped on replay; execution continues from the first uncheckpointed step. Resuming a
 workflow that already finished (`SUCCESS`/`ERROR`) is a silent no-op. Called from inside a
 workflow, this consumes a step id and checkpoints under `"DBOS.resumeWorkflow"`.
+
+## Retry
+
+```elixir
+:ok = Dbos.retry(workflow_id)
+```
+
+Puts a failed workflow back to work, from its last checkpoint. `Dbos.retry/2` acts on the three
+terminal statuses a run can fail into — `ERROR`, `CANCELLED`, `MAX_RECOVERY_ATTEMPTS_EXCEEDED`
+(`Dbos.Status.retryable/0`) — clearing the recorded error, resetting `recovery_attempts` to `0`,
+clearing the queue assignment and deadline, and re-enqueueing onto `opts[:queue_name]` (default
+the internal queue).
+
+| Status | `Dbos.retry/2` |
+|---|---|
+| `ERROR`, `CANCELLED`, `MAX_RECOVERY_ATTEMPTS_EXCEEDED` | Re-enqueued from its last checkpoint. |
+| `SUCCESS` | Untouched. Callers have already read the output, so the run is final; `Dbos.fork/3` re-runs that work under a new id. |
+| `PENDING`, `ENQUEUED`, `DELAYED` | Untouched — the workflow is already live. |
+
+Leaving the live statuses alone is what makes two operators clicking retry at the same moment
+safe: the first call moves the row to `ENQUEUED`, and the second finds a status it does not act
+on, so the workflow starts once.
+
+A step whose *own* failure was checkpointed re-raises that recorded failure on replay, so a
+workflow that failed inside a step fails the same way again. `Dbos.fork/3` from that step id is
+the route that re-runs the step itself.
+
+Called from inside a workflow, `retry/2` consumes a step id and checkpoints under
+`"DBOS.retryWorkflow"`.
 
 ## Fork
 
@@ -182,6 +211,7 @@ Opt in via `Dbos.Supervisor`'s `:admin_server` option (default port `3001`):
 | `GET` | `/workflows/{id}/steps` | One workflow's checkpointed steps. |
 | `POST` | `/workflows/{id}/cancel` | `Dbos.cancel/2`. |
 | `POST` | `/workflows/{id}/resume` | `Dbos.resume/2`. |
+| `POST` | `/workflows/{id}/retry` | `Dbos.retry/2`. |
 | `POST` | `/workflows/{id}/fork` | Body may set `start_step` (default `0`), `new_workflow_id`, `application_version`. |
 
 The server is a bare `:gen_tcp` listener, one process per connection, with no keep-alive.

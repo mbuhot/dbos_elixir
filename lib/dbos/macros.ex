@@ -34,13 +34,20 @@ defmodule Dbos.Macros do
   workflow enqueues a child and carries on without waiting.
 
   `use Dbos` options: `:repo` — the module direct calls to which are banned inside a workflow
-  body (see `docs/determinism.md`); `:warn_cross_module_calls` (default `true`) — set `false` to
-  suppress the undeclared-cross-module-call warning for the whole module.
+  body (see `docs/determinism.md`).
+
+  `@dbos_deterministic "why"` on a function head tells `Mix.Tasks.Compile.Dbos` to treat that
+  function as a leaf: it is not followed and its own calls are not reported. The string is
+  required, and shows up in the report when the annotation suppresses nothing.
   """
 
+  alias Dbos.Compiler.State
+
+  @using_options [:repo]
+
   defmacro __using__(opts) do
+    validate_using_options!(opts, __CALLER__)
     repo = Keyword.get(opts, :repo)
-    warn_cross_module_calls = Keyword.get(opts, :warn_cross_module_calls, true)
 
     quote do
       import Dbos.Macros,
@@ -55,31 +62,64 @@ defmodule Dbos.Macros do
 
       Module.register_attribute(__MODULE__, :dbos_steps, accumulate: true)
       Module.register_attribute(__MODULE__, :dbos_workflow_defs, accumulate: true)
+      Module.register_attribute(__MODULE__, :dbos_deterministic, accumulate: false)
       @dbos_repo unquote(repo)
-      @dbos_warn_cross_module_calls unquote(warn_cross_module_calls)
 
+      @on_definition Dbos.Macros
       @before_compile Dbos.Macros
     end
   end
 
+  @doc """
+  Reads and clears a `@dbos_deterministic` annotation, registering the function it precedes as
+  trusted for the whole-application determinism check.
+  """
+  def __on_definition__(env, _kind, name, args, _guards, _body) do
+    case Module.get_attribute(env.module, :dbos_deterministic) do
+      nil ->
+        :ok
+
+      reason when is_binary(reason) ->
+        Module.delete_attribute(env.module, :dbos_deterministic)
+
+        State.add_entry(env.module, %{
+          kind: :trusted,
+          mfa: {env.module, name, length(args || [])},
+          reason: reason,
+          file: Path.relative_to_cwd(env.file),
+          line: env.line
+        })
+
+      other ->
+        raise CompileError,
+          file: env.file,
+          line: env.line,
+          description:
+            "@dbos_deterministic takes a string explaining why #{name}/#{length(args || [])} " <>
+              "is safe to skip, got #{inspect(other)}."
+    end
+  end
+
   defmacro __before_compile__(env) do
-    steps = env.module |> Module.get_attribute(:dbos_steps, []) |> List.wrap() |> Enum.reverse()
+    steps_meta =
+      env.module |> Module.get_attribute(:dbos_steps, []) |> List.wrap() |> Enum.reverse()
+
+    steps = Enum.map(steps_meta, fn {name, fun_arity, _meta} -> {name, fun_arity} end)
 
     workflow_defs =
       env.module |> Module.get_attribute(:dbos_workflow_defs, []) |> List.wrap() |> Enum.reverse()
 
     repo = Module.get_attribute(env.module, :dbos_repo)
 
-    warn_cross_module_calls =
-      Module.get_attribute(env.module, :dbos_warn_cross_module_calls, true)
-
     reject_duplicate_workflows!(workflow_defs, env)
     reject_ambiguous_opts_arity!(workflow_defs, env)
 
-    built = Enum.map(workflow_defs, &build_workflow(&1, env, repo, warn_cross_module_calls))
+    built = Enum.map(workflow_defs, &build_workflow(&1, env, repo))
     workflow_asts = Enum.map(built, &elem(&1, 0))
     workflows_meta = Enum.map(built, &elem(&1, 1))
     schedules_meta = built |> Enum.map(&elem(&1, 2)) |> Enum.reject(&is_nil/1)
+
+    register_entries(env, repo, workflow_defs, workflows_meta, steps_meta)
 
     quote do
       unquote_splicing(workflow_asts)
@@ -198,7 +238,8 @@ defmodule Dbos.Macros do
     Dbos.Determinism.check_step!(block, %{env: env, step_name: step_name})
 
     quote do
-      @dbos_steps {unquote(step_name), {unquote(fun_name), unquote(arity)}}
+      @dbos_steps {unquote(step_name), {unquote(fun_name), unquote(arity)},
+                   unquote(Macro.escape(%{kind: :step, line: env.line}))}
       def unquote(call), do: unquote(wrap_run_step(step_name, run_opts, block))
     end
   end
@@ -212,7 +253,8 @@ defmodule Dbos.Macros do
     Dbos.Determinism.check_step!(block, %{env: env, step_name: step_name})
 
     quote do
-      @dbos_steps {unquote(step_name), {unquote(fun_name), unquote(arity)}}
+      @dbos_steps {unquote(step_name), {unquote(fun_name), unquote(arity)},
+                   unquote(Macro.escape(%{kind: :transaction, line: env.line}))}
       def unquote(call), do: unquote(wrap_transaction(step_name, run_opts, block))
     end
   end
@@ -246,6 +288,28 @@ defmodule Dbos.Macros do
     end
   end
 
+  defp validate_using_options!(opts, env) when is_list(opts) do
+    case Keyword.keys(opts) -- @using_options do
+      [] ->
+        :ok
+
+      [unknown | _rest] ->
+        raise CompileError,
+          file: env.file,
+          line: env.line,
+          description:
+            "unknown option #{inspect(unknown)} for `use Dbos`; " <>
+              "valid options are #{inspect(@using_options)}"
+    end
+  end
+
+  defp validate_using_options!(_opts, env) do
+    raise CompileError,
+      file: env.file,
+      line: env.line,
+      description: "`use Dbos` takes a keyword list of options"
+  end
+
   defp capture_workflow(call, opts, env) do
     quote do
       @dbos_workflow_defs {unquote(Macro.escape(call)), unquote(Macro.escape(opts)),
@@ -255,19 +319,44 @@ defmodule Dbos.Macros do
     end
   end
 
-  defp build_workflow({call, opts, line, doc}, env, repo, warn_cross_module_calls) do
+  defp register_entries(env, repo, workflow_defs, workflows_meta, steps_meta) do
+    file = Path.relative_to_cwd(env.file)
+
+    if repo do
+      State.add_entry(env.module, %{kind: :repo, module: repo, file: file, line: env.line})
+    end
+
+    workflow_defs
+    |> Enum.zip(workflows_meta)
+    |> Enum.each(fn {{_call, _opts, line, _doc}, {name, mfa, _block}} ->
+      State.add_entry(env.module, %{
+        kind: :workflow,
+        name: name,
+        mfa: mfa,
+        file: file,
+        line: line
+      })
+    end)
+
+    Enum.each(steps_meta, fn {name, {fun, arity}, meta} ->
+      State.add_entry(env.module, %{
+        kind: meta.kind,
+        name: name,
+        mfa: {env.module, fun, arity},
+        file: file,
+        line: meta.line
+      })
+    end)
+  end
+
+  defp build_workflow({call, opts, line, doc}, env, repo) do
     {block, extra_opts} = Keyword.pop!(opts, :do)
 
     reject_guard!(call, env, line)
     {fun_name, args, arity} = workflow_head_info(call)
     name = fetch_required_name!(extra_opts, fun_name, arity, env, line)
 
-    Dbos.Determinism.check!(block, %{
-      env: env,
-      workflow_name: name,
-      repo: repo,
-      warn_cross_module_calls: warn_cross_module_calls
-    })
+    Dbos.Determinism.check!(block, %{env: env, workflow_name: name, repo: repo})
 
     body_fun = body_function_name(fun_name)
     dispatcher_head = build_dispatcher_head(fun_name, args)
