@@ -152,8 +152,8 @@ would claim it are among the processes these modes deliberately do not start, wh
 everything on the caller's own connection and therefore inside `Ecto.Adapters.SQL.Sandbox`.
 
 **Fix:** call `Dbos.Testing.drain_queue/2` or `Dbos.Testing.drain_all/1` at the point in the test
-where the work should happen, and `Dbos.Testing.recover_pending/1` to exercise recovery. Use
-`testing: :inline` for the enqueue to run synchronously inside the call itself.
+where the work should happen. Use `testing: :inline` for the enqueue to run synchronously inside
+the call itself.
 
 ## My `Task.async` call will not compile inside a workflow or a step
 

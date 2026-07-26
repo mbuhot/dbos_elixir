@@ -129,48 +129,6 @@ A stream behaves the same way: an open stream with nothing left to read raises
 before reading it back. A stream whose producing workflow has reached a terminal status reads back
 whatever was written and stops, in every mode.
 
-## Simulating a crash with `Dbos.Testing.recover_pending/1`
-
-Everything has already run synchronously by the time `Dbos.start/3` or `drain_queue/2` returns, so
-simulate the crash at the row: flip a finished workflow back to `PENDING`, let
-`Dbos.Testing.recover_pending/1` replay it, and prove an already-checkpointed step did not re-run
-its body. An ETS counter bumped inside the step body is the usual way to show that:
-
-```elixir
-test "recovering a workflow does not re-run its already-checkpointed steps", %{engine: engine} do
-  table = :ets.new(:counters, [:public, :set])
-  workflow_id = "order-#{System.unique_integer([:positive])}"
-
-  {:ok, handle} =
-    Dbos.start("counted_steps_then_sleep", [table, 3, 3_600_000],
-      engine: engine,
-      workflow_id: workflow_id
-    )
-
-  {:ok, :woke} = Dbos.await(handle, engine: engine)
-  assert :ets.lookup_element(table, :count, 2) == 3
-
-  config = Dbos.config(engine)
-
-  Dbos.DB.Ecto.query!(
-    config.conn,
-    "UPDATE dbos.workflow_status SET status = 'PENDING' WHERE workflow_uuid = $1",
-    [workflow_id]
-  )
-
-  assert Dbos.Testing.recover_pending(engine: engine) == 1
-  assert :ets.lookup_element(table, :count, 2) == 3
-  assert {:ok, %Dbos.WorkflowStatus{status: :success}} = Dbos.status(workflow_id, engine: engine)
-end
-```
-
-A workflow that was *enqueued* is recovered back to `ENQUEUED` for its queue to redistribute, so
-follow `recover_pending/1` with `Dbos.Testing.drain_queue/2` before asserting on a terminal status.
-The example above starts its workflow directly, which is redispatched and run in the same call.
-
-The counter staying at `3` after recovery is the assertion that matters: proof the replayed steps
-returned their recorded output without re-executing.
-
 ## What these modes cannot cover
 
 `:inline`/`:manual` prove checkpointing, replay, and queue mechanics. The rest needs a real engine
