@@ -9,7 +9,7 @@ defmodule Mix.Tasks.Dbos.ExplainTest do
         Mix.Tasks.Dbos.Explain.run(["Dbos.CheckoutWorkflow.process_order/2"])
       end)
 
-    assert output =~ ~s(workflow "process_order")
+    assert output =~ ~s(workflow "Dbos.CheckoutWorkflow.process_order")
     assert output =~ "id 0: step charge_card/2"
     assert output =~ "id 1: step record_receipt/2"
   end
@@ -43,7 +43,7 @@ defmodule Mix.Tasks.Dbos.ExplainTest do
       end)
 
     assert output =~ "child workflow child_flow/1"
-    assert output =~ ~s("child_flow")
+    assert output =~ ~s("Dbos.CheckoutWorkflow.child_flow")
   end
 
   test "Dbos.enqueue, Dbos.fork, and Dbos.status are each reported as consuming one id" do

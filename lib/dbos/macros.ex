@@ -479,8 +479,9 @@ defmodule Dbos.Macros do
           line: line,
           description:
             "defworkflow #{fun_name}/#{arity} requires a name: option — recovery dispatches on " <>
-              "the workflow's name, not its module/function, so it cannot default. Add " <>
-              "`name: \"#{fun_name}\"` (or another stable string) to the defworkflow declaration."
+              "the workflow's name, not its module/function, so it cannot default. The name must " <>
+              "be unique across the application and stable across deploys. Add " <>
+              "`name: \"#{inspect(env.module)}.#{fun_name}\"` to the defworkflow declaration."
     end
   end
 

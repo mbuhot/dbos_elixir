@@ -330,7 +330,9 @@ defmodule Dbos.TestingModeTest do
       )
 
       {:ok, handle} =
-        Dbos.start("parent_flow_queueing_child", ["ord_inline_child"], engine: name)
+        Dbos.start("Dbos.CheckoutWorkflow.parent_flow_queueing_child", ["ord_inline_child"],
+          engine: name
+        )
 
       assert {:ok, %{charge_id: "ch_ord_inline_child"}} = Dbos.await(handle, engine: name)
     end

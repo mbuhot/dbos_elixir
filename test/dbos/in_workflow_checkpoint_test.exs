@@ -339,9 +339,9 @@ defmodule Dbos.InWorkflowCheckpointTest do
     wait_until(fn -> match?({:ok, _}, WorkflowSup.whereis(engine, target_handle.workflow_id)) end)
 
     {:ok, handle} =
-      Dbos.start("cancels_and_resumes_other_workflow", [target_handle.workflow_id],
-        engine: engine
-      )
+      Dbos.start(
+        "Dbos.CheckoutWorkflow.cancels_and_resumes_other_workflow",
+        [target_handle.workflow_id], engine: engine)
 
     assert {:ok, :ok} = Dbos.await(handle)
 
@@ -366,7 +366,9 @@ defmodule Dbos.InWorkflowCheckpointTest do
     assert {:error, _} = Dbos.await(target_handle)
 
     {:ok, handle} =
-      Dbos.start("retries_other_workflow", [target_handle.workflow_id], engine: engine)
+      Dbos.start("Dbos.CheckoutWorkflow.retries_other_workflow", [target_handle.workflow_id],
+        engine: engine
+      )
 
     assert {:ok, :ok} = Dbos.await(handle)
 

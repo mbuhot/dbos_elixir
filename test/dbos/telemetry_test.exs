@@ -59,7 +59,9 @@ defmodule Dbos.TelemetryTest do
 
     engine = start_engine([CheckoutWorkflow])
 
-    {:ok, handle} = Dbos.start("process_order", ["ord-1", 100], engine: engine)
+    {:ok, handle} =
+      Dbos.start("Dbos.CheckoutWorkflow.process_order", ["ord-1", 100], engine: engine)
+
     assert {:ok, _} = Dbos.await(handle)
 
     assert_received {[:dbos, :step, :start], _ref, %{system_time: _},

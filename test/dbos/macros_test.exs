@@ -63,7 +63,8 @@ defmodule Dbos.MacrosTest do
     engine = start_engine([CheckoutWorkflow])
     config = Dbos.config(engine)
 
-    {:ok, handle} = Dbos.start("process_order", ["ord_1", 4999], engine: engine)
+    {:ok, handle} =
+      Dbos.start("Dbos.CheckoutWorkflow.process_order", ["ord_1", 4999], engine: engine)
 
     assert {:ok, %{charge: %{charge_id: "ch_ord_1"}, receipt: {"ord_1", "ch_ord_1"}}} =
              Dbos.await(handle)
@@ -77,7 +78,9 @@ defmodule Dbos.MacrosTest do
     engine = start_engine([CheckoutWorkflow])
     config = Dbos.config(engine)
 
-    {:ok, handle} = Dbos.start("process_order", ["ord_2", 100], engine: engine)
+    {:ok, handle} =
+      Dbos.start("Dbos.CheckoutWorkflow.process_order", ["ord_2", 100], engine: engine)
+
     assert {:ok, _} = Dbos.await(handle)
 
     {:ok, [charge_step, _receipt_step]} = SystemDb.get_workflow_steps(config, handle.workflow_id)
@@ -95,13 +98,13 @@ defmodule Dbos.MacrosTest do
     engine = start_engine([CheckoutWorkflow])
     config = Dbos.config(engine)
 
-    {:ok, handle} = Dbos.start("parent_flow", ["ord_4"], engine: engine)
+    {:ok, handle} = Dbos.start("Dbos.CheckoutWorkflow.parent_flow", ["ord_4"], engine: engine)
     assert {:ok, "ord_4"} = Dbos.await(handle)
 
     expected_child_id = "#{handle.workflow_id}-0"
     {:ok, [start_step, get_result_step]} = SystemDb.get_workflow_steps(config, handle.workflow_id)
     assert start_step.child_workflow_id == expected_child_id
-    assert start_step.function_name == "child_flow"
+    assert start_step.function_name == "Dbos.CheckoutWorkflow.child_flow"
 
     assert get_result_step.function_name == "DBOS.getResult"
     assert get_result_step.child_workflow_id == expected_child_id
@@ -201,7 +204,9 @@ defmodule Dbos.MacrosTest do
     engine = start_engine([CheckoutWorkflow])
 
     {:ok, handle} =
-      Dbos.start("parent_flow_with_opts", ["ord_child_pin", "pinned-child"], engine: engine)
+      Dbos.start("Dbos.CheckoutWorkflow.parent_flow_with_opts", ["ord_child_pin", "pinned-child"],
+        engine: engine
+      )
 
     assert {:ok, "ord_child_pin"} = Dbos.await(handle)
 
@@ -258,7 +263,7 @@ defmodule Dbos.MacrosTest do
       end
 
     message = Exception.message(error)
-    assert message =~ "child_flow"
+    assert message =~ "Dbos.CheckoutWorkflow.child_flow"
     assert message =~ ":queue"
     assert message =~ ":queue_name"
   end
@@ -292,7 +297,9 @@ defmodule Dbos.MacrosTest do
   test "asking Dbos.start for a queue is refused, pointing at Dbos.enqueue" do
     error =
       assert_raise Dbos.InvalidWorkflowOptionError, fn ->
-        Dbos.start("child_flow", ["ord_start_queue"], queue_name: "children")
+        Dbos.start("Dbos.CheckoutWorkflow.child_flow", ["ord_start_queue"],
+          queue_name: "children"
+        )
       end
 
     message = Exception.message(error)
@@ -305,7 +312,9 @@ defmodule Dbos.MacrosTest do
     config = Dbos.config(engine)
 
     {:ok, handle} =
-      Dbos.start("parent_flow_queueing_child", ["ord_qchild"], engine: engine)
+      Dbos.start("Dbos.CheckoutWorkflow.parent_flow_queueing_child", ["ord_qchild"],
+        engine: engine
+      )
 
     assert {:ok, %{charge_id: "ch_ord_qchild"}} = Dbos.await(handle, timeout_ms: 10_000)
 
@@ -315,7 +324,7 @@ defmodule Dbos.MacrosTest do
              {2, "charge_card/2"}
            ]
 
-    assert count_workflows_named(config, "child_flow") == 1
+    assert count_workflows_named(config, "Dbos.CheckoutWorkflow.child_flow") == 1
   end
 
   test "a workflow that queues a child and crashes before completing recovers to exactly one child" do
@@ -359,7 +368,7 @@ defmodule Dbos.MacrosTest do
 
     {:ok, status} = SystemDb.get_workflow_status(config, parent_id)
     assert status.output == "ord_replayed"
-    assert count_workflows_named(config, "child_flow") == 1
+    assert count_workflows_named(config, "Dbos.CheckoutWorkflow.child_flow") == 1
 
     assert step_layout(config, parent_id) == [{0, "DBOS.enqueue"}, {1, "DBOS.getResult"}]
   end

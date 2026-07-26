@@ -3,56 +3,61 @@ defmodule Dbos.CheckoutWorkflow do
 
   use Dbos
 
-  defworkflow process_order(order_id, amount), name: "process_order" do
+  defworkflow process_order(order_id, amount), name: "Dbos.CheckoutWorkflow.process_order" do
     charge = charge_card(order_id, amount)
     receipt = record_receipt(order_id, charge)
     %{charge: charge, receipt: receipt}
   end
 
-  defworkflow parent_flow(order_id), name: "parent_flow" do
+  defworkflow parent_flow(order_id), name: "Dbos.CheckoutWorkflow.parent_flow" do
     child_flow(order_id)
   end
 
-  defworkflow parent_flow_with_opts(order_id, child_workflow_id), name: "parent_flow_with_opts" do
+  defworkflow parent_flow_with_opts(order_id, child_workflow_id),
+    name: "Dbos.CheckoutWorkflow.parent_flow_with_opts" do
     child_flow(order_id, workflow_id: child_workflow_id)
   end
 
-  defworkflow parent_flow_queueing_child(order_id), name: "parent_flow_queueing_child" do
+  defworkflow parent_flow_queueing_child(order_id),
+    name: "Dbos.CheckoutWorkflow.parent_flow_queueing_child" do
     result = child_flow(order_id, queue_name: "children")
     charge_card(result, 1)
   end
 
-  defworkflow child_flow(order_id), name: "child_flow" do
+  defworkflow child_flow(order_id), name: "Dbos.CheckoutWorkflow.child_flow" do
     order_id
   end
 
-  defworkflow slow_flow(order_id), name: "slow_flow" do
+  defworkflow slow_flow(order_id), name: "Dbos.CheckoutWorkflow.slow_flow" do
     Dbos.sleep(5_000)
     order_id
   end
 
-  defworkflow greet(name \\ "world"), name: "greet" do
+  defworkflow greet(name \\ "world"), name: "Dbos.CheckoutWorkflow.greet" do
     "hello, #{name}"
   end
 
   defworkflow inspects_other_workflow(order_id, target_workflow_id),
-    name: "inspects_other_workflow" do
-    {:ok, _enqueue_handle} = Dbos.enqueue("process_order", [order_id, 100], queue_name: "orders")
+    name: "Dbos.CheckoutWorkflow.inspects_other_workflow" do
+    {:ok, _enqueue_handle} =
+      Dbos.enqueue("Dbos.CheckoutWorkflow.process_order", [order_id, 100], queue_name: "orders")
+
     {:ok, _fork_handle} = Dbos.fork(target_workflow_id, 0)
     Dbos.status(target_workflow_id)
   end
 
   defworkflow cancels_and_resumes_other_workflow(target_workflow_id),
-    name: "cancels_and_resumes_other_workflow" do
+    name: "Dbos.CheckoutWorkflow.cancels_and_resumes_other_workflow" do
     :ok = Dbos.cancel(target_workflow_id)
     :ok = Dbos.resume(target_workflow_id)
   end
 
-  defworkflow retries_other_workflow(target_workflow_id), name: "retries_other_workflow" do
+  defworkflow retries_other_workflow(target_workflow_id),
+    name: "Dbos.CheckoutWorkflow.retries_other_workflow" do
     :ok = Dbos.retry(target_workflow_id)
   end
 
-  defworkflow uses_a_patch(order_id), name: "uses_a_patch" do
+  defworkflow uses_a_patch(order_id), name: "Dbos.CheckoutWorkflow.uses_a_patch" do
     charge = charge_card(order_id, 100)
 
     if Dbos.patch("fraud-check") do
@@ -62,14 +67,14 @@ defmodule Dbos.CheckoutWorkflow do
     charge
   end
 
-  defworkflow even_branches(order_id, outcome), name: "even_branches" do
+  defworkflow even_branches(order_id, outcome), name: "Dbos.CheckoutWorkflow.even_branches" do
     case outcome do
       :approve -> charge_card(order_id, 100)
       _ -> charge_card(order_id, 0)
     end
   end
 
-  defworkflow uneven_branches(order_id, outcome), name: "uneven_branches" do
+  defworkflow uneven_branches(order_id, outcome), name: "Dbos.CheckoutWorkflow.uneven_branches" do
     case outcome do
       :approve ->
         charge_card(order_id, 100)
