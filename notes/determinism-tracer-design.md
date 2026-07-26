@@ -799,3 +799,192 @@ It loses on three counts:
 The tracer wins. The abstract-code technique survives in the design, scoped to the one job it
 is uniquely good at: `receive` detection, driven off `:on_module` so it stays incremental
 (§3.4).
+
+---
+
+## 7. Phase 0 results
+
+**The gate passes. All six assumptions hold.** Verdict summary:
+
+| # | Assumption | Verdict |
+|---|---|---|
+| 1 | `env.function` in a re-injected workflow body is the generated body function | **yes** |
+| 2 | `Macro.escape/1` preserves `:line` through the `@before_compile` round trip | **yes** — and `:column` too |
+| 3 | `&local/1` → `local_function`; `&Mod.f/1` → `remote_function` | **yes** |
+| 4 | `send/2`, `spawn/1`, `make_ref/0` → `{:imported_function, meta, Kernel, ...}` | **yes** |
+| 5 | `:rand.uniform/1` → `{:remote_function, meta, :rand, :uniform, 1}` | **yes** |
+| 6 | `:beam_lib.chunks(bytecode, [:abstract_code])` on the `:on_module` binary | **yes**, real source lines |
+
+### 7.1 Method
+
+Throwaway two-project spike, Elixir 1.19.3 / OTP 28. `tracer` holds `SpikeTracer` and a
+`Mix.Task.Compiler` that pushes it onto `Code.put_compiler_option(:tracers, ...)`; `spike_app`
+depends on it plus a path dep on this repo, sets `compilers: [:spike] ++ Mix.compilers()`, and
+contains two fixture modules. The tracer prints every event whose `env.module` starts with
+`Fixture`, and runs `:beam_lib.chunks/2` on every `:on_module` bytecode.
+
+`lib/fixture_workflows.ex`:
+
+```elixir
+1  defmodule Fixture.Workflows do
+2    @moduledoc false
+3    use Dbos, warn_cross_module_calls: false
+4
+5    defworkflow order(id), name: "order" do
+6      a = local_helper(id)
+7      b = Fixture.Helpers.pure(id)
+8      c = Enum.map([1, 2, 3], &local_helper/1)
+9      d = Enum.map([1, 2, 3], &Fixture.Helpers.pure/1)
+10     e = step_one(id)
+11     {a, b, c, d, e}
+12   end
+13
+14   defstep step_one(id) do
+15     Fixture.Helpers.nondeterministic(id)
+16   end
+17
+18   def ordinary(id) do
+19     local_helper(id)
+20   end
+21
+22   defp local_helper(x), do: x + 1
+23 end
+```
+
+`lib/fixture_helpers.ex` holds `pure/1` (line 4), `nondeterministic/1` (line 6, with
+`:rand.uniform/1` on 7, `DateTime.utc_now/0` on 8, `make_ref/0` on 9, `send/2` on 10,
+`spawn/1` on 11), `waits/0` (line 15, `receive`/`after` on 16), `bare_receive/0` (line 23,
+`receive` on 24) and `captures/0` (line 29, three captures on 30–32).
+
+### 7.2 Assumption 1 — the gate
+
+Every call written inside the `defworkflow` body is attributed to
+`{:order__dbos_workflow_body__, 1}`, which is exactly the node
+`__dbos_workflows__/0` already publishes. Observed events, verbatim:
+
+```
+env.module=Fixture.Workflows env.function={:order__dbos_workflow_body__, 1} env.line=1
+  event={:local_function, [line: 6, column: 9], :local_helper, 1}
+env.module=Fixture.Workflows env.function={:order__dbos_workflow_body__, 1} env.line=1
+  event={:remote_function, [line: 7, column: 25], Fixture.Helpers, :pure, 1}
+env.module=Fixture.Workflows env.function={:order__dbos_workflow_body__, 1} env.line=1
+  event={:remote_function, [line: 8, column: 14], Enum, :map, 2}
+env.module=Fixture.Workflows env.function={:order__dbos_workflow_body__, 1} env.line=1
+  event={:local_function, [line: 8, column: 30], :local_helper, 1}
+env.module=Fixture.Workflows env.function={:order__dbos_workflow_body__, 1} env.line=1
+  event={:remote_function, [no_parens: true, line: 9, column: 46], Fixture.Helpers, :pure, 1}
+env.module=Fixture.Workflows env.function={:order__dbos_workflow_body__, 1} env.line=1
+  event={:local_function, [line: 10, column: 9], :step_one, 1}
+```
+
+And `Fixture.Workflows.__dbos_workflows__/0` returns
+`{"order", {Fixture.Workflows, :order__dbos_workflow_body__, 1}}`. The entry-point mechanism
+of §3.2 is confirmed: the reflection entry and the tracer node are the same tuple.
+
+Adjacent attributions, all correct:
+
+- `defstep` body → `env.function={:step_one, 1}`, with
+  `{:remote_function, [line: 15, column: 21], Fixture.Helpers, :nondeterministic, 1}`.
+  The generated wrapper's own edges (`Dbos.Runtime.run_step/3`, `Dbos.Telemetry.span_step/2`,
+  `Dbos.Runtime.in_workflow?/0`) land on the same node with `line: 14`, the `defstep` line.
+- Generated dispatchers → `env.function={:order, 1}` and `{:order, 2}`, each with
+  `{:remote_function, [line: 1], Dbos.Macros, :dispatch_workflow, 2}` / `..., 3}`.
+- Module body → `env.function=nil`, as §3.3 assumes.
+- Ordinary function → `env.function={:ordinary, 1}` with
+  `{:local_function, [line: 19, column: 5], :local_helper, 1}`.
+
+### 7.3 Assumption 2 — line metadata
+
+`meta[:line]` matches the user's source exactly, and `:column` survives as well: `line: 6` for
+the `local_helper(id)` on source line 6, `line: 7` for the `Fixture.Helpers.pure(id)` on line 7,
+through to `line: 10` for `step_one(id)` on line 10. `Macro.escape/1` on the raw `do` block
+preserves positions through storage in `@dbos_workflow_defs` and re-injection at
+`@before_compile`.
+
+**One correction to the design.** `env.line` for every workflow-body event is `1` — the
+`defmodule` line, because the body is injected at `@before_compile`. Copying `boundary`'s
+`line: Keyword.get(meta, :line, env.line)` would silently place a diagnostic at line 1 whenever
+`meta` carries no `:line`. §3.3 now states that the line comes from `meta[:line]` alone.
+
+Generated code that the user never wrote carries `line: 1` in `meta` too (the dispatcher edges
+above). Nodes reached only through generated wrappers therefore need their reporting position
+taken from the entry point's declared line, which §3.2 already adds to the reflection entries.
+
+### 7.4 Assumption 3 — captures
+
+Both forms fire, inside and outside a workflow body:
+
+```
+env.function={:captures, 0} event={:local_function, [line: 30, column: 14], :pure, 1}
+env.function={:captures, 0}
+  event={:remote_function, [no_parens: true, line: 31, column: 31], Fixture.Helpers, :pure, 1}
+env.function={:captures, 0}
+  event={:remote_function, [no_parens: true, line: 32, column: 21], :rand, :uniform, 1}
+```
+
+`no_parens: true` in `meta` distinguishes a capture from an ordinary call, should a future
+refinement want to weaken the "a captured function is called" over-approximation of §3.3.
+
+### 7.5 Assumption 4 — `Kernel` imports
+
+All four resolve as `imported_function` from `Kernel` at expansion time:
+
+```
+env.function={:nondeterministic, 1} event={:imported_function, [line: 9,  column: 11], Kernel, :make_ref, 0}
+env.function={:nondeterministic, 1} event={:imported_function, [line: 10, column: 5],  Kernel, :send, 2}
+env.function={:nondeterministic, 1} event={:imported_function, [line: 10, column: 10], Kernel, :self, 0}
+env.function={:nondeterministic, 1} event={:imported_function, [line: 11, column: 11], Kernel, :spawn, 1}
+```
+
+The rule table keys on `Kernel`. Keeping the `:erlang` aliases costs nothing and covers an
+explicit `:erlang.spawn/1`.
+
+### 7.6 Assumption 5 — Erlang targets
+
+```
+env.function={:nondeterministic, 1} event={:remote_function, [line: 7, column: 15], :rand, :uniform, 1}
+env.function={:nondeterministic, 1} event={:remote_function, [line: 8, column: 18], DateTime, :utc_now, 0}
+```
+
+Erlang modules reach the tracer unfiltered. Compiler-internal Erlang traffic arrives on the same
+channel — `:erlang.orelse/2`, `:erlang."=:="/2`, `:elixir_def.store_definition/3`,
+`:elixir_utils.noop/0`, `Module.compile_definition_attributes/6` — so the §3.3 storage filter
+("callee module is in the app, or the callee MFA is in the rule table") is load-bearing for
+table size, not merely an optimisation.
+
+### 7.7 Assumption 6 — `:on_module` abstract code
+
+`:beam_lib.chunks(bytecode, [:abstract_code])` returns
+`{:ok, {Module, [abstract_code: {:raw_abstract_v1, forms}]}}` on the binary handed to the trace
+callback. Walking the forms for `{:receive, anno, clauses}` and
+`{:receive, anno, clauses, timeout, after_body}`, attributed to the enclosing
+`{:function, _, name, arity, _}`:
+
+```
+ON_MODULE module=Fixture.Helpers bytes=4056
+BEAMLIB ok module=Fixture.Helpers forms=11
+RECEIVE module=Fixture.Helpers fun=bare_receive/0 line=24
+RECEIVE module=Fixture.Helpers fun=waits/0 line=16
+```
+
+Source line 24 is `bare_receive/0`'s `receive`; line 16 is `waits/0`'s `receive`/`after`. Both
+shapes are found and both lines are real. `env.function` is `nil` on an `:on_module` event, and
+`env.module` carries the module — the `{module, {name, arity}, :receive, line}` row of §3.4 is
+constructible from the scan alone.
+
+### 7.8 Bearing on §3.5
+
+The spike is silent on forward-versus-reverse BFS; it collects edges and does no reachability.
+It does confirm the two structural facts the forward walk depends on: the entry-point seed is a
+real traced node (§7.2), and step bodies are traced under their own public `{name, arity}`,
+which `__dbos_steps__/0` publishes — so a step is identifiable as a cut vertex from reflection
+alone. §3.5 stands as written.
+
+### 7.9 Everything else the spike touched
+
+The design is otherwise accurate as written. `local_function` arrives as
+`{:local_function, meta, fun, arity}`, `alias_reference` as `{:alias_reference, meta, module}`,
+macros as `{:imported_macro, meta, Kernel, :def, 2}` and
+`{:remote_macro, meta, Dbos.Macros, :defworkflow, 3}`, matching §3.3. Compilation of the fixture
+app under the tracer succeeded with no interference from the existing `Dbos.Determinism` AST
+walk.
