@@ -19,10 +19,10 @@ operation itself never runs again. For `receive`, use `Dbos.recv_message/2` or `
 For a direct repo call, wrap it in `deftransaction` so it commits atomically with its
 checkpoint.
 
-The macro sees only the literal `do` block. A banned construct reached through a helper function
-compiles cleanly, and `Mix.Tasks.Compile.Dbos` reports it as a warning naming the whole chain from
-the workflow to the call. Add `compilers: [:dbos] ++ Mix.compilers()` to `mix.exs` to turn that on;
-see `docs/determinism.md`.
+`defworkflow` sees only the literal `do` block. A banned construct reached through a helper
+function compiles cleanly, and the `:dbos` compiler reports it as a warning naming the whole chain
+from the workflow to the call. Add `compilers: [:dbos] ++ Mix.compilers()` to `mix.exs` to turn
+that on; see [the determinism contract](../docs/determinism.md).
 
 ## What does `Dbos.UnexpectedStepError` mean?
 
@@ -30,10 +30,9 @@ see `docs/determinism.md`.
 and a `recorded` one.
 
 **Cause:** the step the current code is about to run at this position does not match the step
-name recorded in `operation_outputs` for that same `(workflow_uuid, function_id)` — a replay
-whose step sequence has drifted from what actually happened during the original run. Usually
-this means the workflow's code changed (a step reordered, renamed, or added/removed) while an
-instance of it was still in flight.
+recorded there during the original run — the replay's step sequence has drifted. Usually this
+means the workflow's code changed (a step reordered, renamed, or added/removed) while an instance
+of it was still in flight.
 
 **Fix:** the checkpoint and the code disagree about what happened at that step, and the mismatch
 cannot be repaired in place. Restore the code that produced the original layout long enough for
@@ -52,16 +51,14 @@ process is running it.
 
 **Cause**, in order of likelihood:
 
-1. **Nobody has this workflow's name registered.** `Dbos.Recovery`/reclaim log a warning
-   ("workflow ... is not registered on this executor; skipping recovery") and move on without
-   raising — check your logs for it. Pass `otp_app:` to `Dbos.Supervisor` so every module in the
-   application defining a `defworkflow` is discovered, and use `workflows:` for modules that live
-   in a dependency.
-2. **`application_version` mismatch.** A non-queued `PENDING` row is only reclaimed by an
-   executor whose own `config.application_version` matches the row's
-   (`reclaim_pending_workflows/4` filters on it when set). If every live executor is running a
-   different version than the one that started this workflow, nothing will ever pick it up.
-   Every reclaim pass that finishes its batch says so, one warning per name and version:
+1. **Nobody has this workflow's name registered.** Recovery logs a warning ("workflow ... is
+   not registered on this executor; skipping recovery") and moves on without raising — check your
+   logs for it. Pass `otp_app:` to `Dbos.Supervisor` so every module in the application defining a
+   `defworkflow` is discovered, and use `workflows:` for modules that live in a dependency.
+2. **`application_version` mismatch.** A workflow is only recovered by an executor whose own
+   `application_version` matches the one that started it. If every live executor is running a
+   different version, nothing will ever pick it up. Every reclaim pass that finishes its batch
+   says so, one warning per name and version:
 
    ```
    [warning] dbos: leaving 12 PENDING workflow(s) named "process_order/1"
@@ -75,8 +72,8 @@ process is running it.
    nothing can claim re-reports on every lease sweep until an operator moves it.
 3. **It's actually running, just slow or blocked.** A step body that's genuinely long-running, or
    a `defworkflow` blocked in `Dbos.sleep/1`/`Dbos.recv_message/2` with a long remaining wait,
-   looks identical to "stuck" from the status alone — check `operation_outputs` for that
-   workflow to see how far it's actually gotten.
+   looks identical to "stuck" from the status alone — `Dbos.Client.steps/2` shows how far it has
+   actually gotten.
 
 **Fix:** register the missing module and restart, or align `application_version`, or call
 `Dbos.Recovery.reclaim/3` (or `POST /dbos-workflow-recovery` on the admin server) explicitly
@@ -87,16 +84,15 @@ naming the executor id it's stuck under.
 **Symptom:** `Dbos.status/2` returns this status; `Dbos.result/2` / `Dbos.await/2` return
 `{:error, %Dbos.MaxRecoveryAttemptsExceededError{}}`.
 
-**Cause:** the workflow's `recovery_attempts` climbed past `Dbos.Config.max_recovery_attempts`
-(default `3`) — every recovery/reclaim pass that redispatches it bumps this counter, so a
-workflow whose process crashes immediately on every attempt — the signature of a bug in the
-workflow body, since a transient failure would eventually succeed — eventually gets moved
-here, ending the retry loop.
+**Cause:** the workflow has been recovered more times than `max_recovery_attempts` (default
+`3`) allows. A workflow whose process crashes immediately on every attempt — the signature of a
+bug in the workflow body, since a transient failure would eventually succeed — ends up here,
+which ends the retry loop.
 
 **Fix:** this status will not run again on its own. Fix whatever's actually crashing it, then
 call `Dbos.retry/2` (or `POST /workflows/{id}/retry` on the admin server) — it clears the recorded
-error, the queue assignment and the deadline, resets `recovery_attempts` to `0`, and re-enqueues
-it from its last checkpoint. `Dbos.resume/2` does the same for this status.
+error and the recovery count, and re-enqueues the workflow from its last checkpoint.
+`Dbos.resume/2` does the same for this status.
 
 ## A workflow errored while parked waiting on a human
 
@@ -107,10 +103,10 @@ id would park it forever.
 
 **Cause:** `ERROR` is terminal. `Dbos.resume/2` is a no-op there, matching upstream DBOS.
 
-**Fix:** `Dbos.retry/2`. It restarts the same workflow id from its last checkpoint, so the
-`DBOS.recv` step replays with the message it already received and execution continues at the line
-that raised. Every retryable status is listed under `Dbos.Status.retryable/0`; see
-`guides/tutorials/workflow-management.md`.
+**Fix:** `Dbos.retry/2`. It restarts the same workflow id from its last checkpoint, so the wait
+replays with the message it already received and execution continues at the line that raised.
+Every retryable status is listed under `Dbos.Status.retryable/0`; see
+[Workflow Management](tutorials/workflow-management.md).
 
 ## The notification listener fell back to polling
 
@@ -131,9 +127,9 @@ unnoticed degradation.
 **Symptom:** a raised error at boot naming a `dbos_migrations.version` that isn't the expected
 one (`42`), or saying the table doesn't exist at all.
 
-**Cause:** `Dbos.Migrator.verify!/1`, run by `migrations: :verify` (the default), refuses to start
-against a schema at the wrong version. Tables whose shape doesn't match what the engine expects
-would silently checkpoint into the wrong columns.
+**Cause:** `migrations: :verify` (the default) refuses to start against a schema at the wrong
+version. Tables whose shape doesn't match what the engine expects would silently checkpoint into
+the wrong columns.
 
 **Fix:** run `mix dbos.gen.migration` and apply the resulting migration through `mix ecto.migrate`,
 as an explicit step in your own migration sequence.
@@ -146,10 +142,9 @@ running process keeps going.
 **Cause:** cancellation is cooperative — a workflow observes it at its next durable operation.
 A workflow blocked in a durable wait (`sleep`/`recv_message`/`get_event`) with a live process
 on this engine is woken immediately.
-A workflow actively executing a step's body only notices at its **next step boundary** —
-`check_operation_execution` is where the cancelled status is actually observed and stops the
-workflow. A step whose body runs for a long time (or loops without ever calling another durable
-operation) has no boundary to hit until it returns.
+A workflow actively executing a step's body only notices at its **next step boundary**. A step
+whose body runs for a long time (or loops without ever calling another durable operation) has no
+boundary to hit until it returns.
 
 **Fix:** cancellation will take effect at the next step call; if the current step's body can run
 indefinitely, add a durable operation (or break it into smaller steps) so there's a boundary to
@@ -165,19 +160,17 @@ one already in progress still runs to completion.
 `(queue_name, deduplication_id)` pair exists and hasn't finished (or been re-enqueued past the
 point where the slot frees), and this call tried to claim the same slot.
 
-**Fix:** either treat the raise as "already enqueued, nothing to do" (catch it, or check
-query the workflow row first to see who holds it), or pick a deduplication
-id that's actually unique to this attempt. Note `deduplication_id` and `partition_key` are
-mutually exclusive on the same enqueue call.
+**Fix:** either treat the raise as "already enqueued, nothing to do" (catch it), or pick a
+deduplication id that's actually unique to this attempt. Note `deduplication_id` and
+`partition_key` are mutually exclusive on the same enqueue call.
 
 ## My enqueued workflow never runs in a test
 
-**Symptom:** `Dbos.enqueue/3` returns a handle, the row is in `workflow_status`, and the test
-times out waiting for a result.
+**Symptom:** `Dbos.enqueue/3` returns a handle and the test times out waiting for a result.
 
-**Cause:** under `testing: :manual` the row is inserted and left alone; the queue runners that
-would claim it are among the processes these modes deliberately do not start, which is what keeps
-everything on the caller's own connection and therefore inside `Ecto.Adapters.SQL.Sandbox`.
+**Cause:** under `testing: :manual` the workflow is recorded and left alone. Testing modes start
+no queue runners, which is what keeps everything on the caller's own connection and therefore
+inside `Ecto.Adapters.SQL.Sandbox`.
 
 **Fix:** call `Dbos.Testing.drain_queue/2` or `Dbos.Testing.drain_all/1` at the point in the test
 where the work should happen. Use `testing: :inline` for the enqueue to run synchronously inside
@@ -189,12 +182,10 @@ the call itself.
 `Task.start`, `Task.start_link`, `spawn`, `spawn_link`, or `spawn_monitor`, in a `defworkflow`,
 `defstep`, or `deftransaction` body.
 
-**Cause:** a spawned process starts with none of the workflow context the process dictionary
-carries (`Dbos.Runtime.current_workflow_id/0` has nothing to return inside it), so a durable
-operation called from within it takes the passthrough path and skips its checkpoint entirely.
-The determinism checker rejects the construct at compile time in both workflow bodies (`check!/2`)
-and step and transaction bodies (`check_step!/2`).
+**Cause:** a spawned process starts with none of the workflow context, so a durable operation
+called from within it runs without checkpointing at all. The determinism checker rejects the
+construct at compile time in workflow, step, and transaction bodies.
 
 **Fix:** run the work inline in the step, or use a child workflow (`Dbos.start/3` from inside a
 workflow) for concurrency that itself needs to be durable. A process spawned through a helper
-function compiles, and `Mix.Tasks.Compile.Dbos` reports it as a warning.
+function compiles, and the `:dbos` compiler reports it as a warning.

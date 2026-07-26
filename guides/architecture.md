@@ -32,22 +32,34 @@ sequenceDiagram
 
 ## The two tables that carry all state
 
-**`workflow_status`** — one row per workflow execution: `status` (`PENDING`, `ENQUEUED`,
-`DELAYED`, `SUCCESS`, `ERROR`, `CANCELLED`, `MAX_RECOVERY_ATTEMPTS_EXCEEDED`), the workflow's
-`name`, its `inputs` (persisted once, at start), its final `output`/`error`, `executor_id`
-(the node that owns it), `recovery_attempts`, an optional `parent_workflow_id`, and queue
-columns (`queue_name`, `priority`, `deduplication_id`, `delay_until_epoch_ms`, ...).
+**`workflow_status`** — one row per workflow execution, keyed by `workflow_uuid`.
 
-**`operation_outputs`** — one row per completed step, keyed by `(workflow_uuid, function_id)`:
-the step's `function_name`, its encoded `output` or `error`, and for a child workflow start,
-the `child_workflow_id`. This table is the replay cache.
+| Column | Holds |
+|---|---|
+| `status` | `PENDING`, `ENQUEUED`, `DELAYED`, `SUCCESS`, `ERROR`, `CANCELLED`, `MAX_RECOVERY_ATTEMPTS_EXCEEDED` |
+| `name` | the workflow name recovery dispatches on |
+| `inputs` | the arguments, written once at start |
+| `output`, `error` | the terminal result |
+| `executor_id` | the node that owns the row |
+| `recovery_attempts` | how many times it has been reclaimed |
+| `parent_workflow_id` | the parent, for a child workflow |
+| `queue_name`, `priority`, `deduplication_id`, `delay_until_epoch_ms` | queue placement |
 
-Values in both tables are encoded with `:erlang.term_to_binary/1` and base64-encoded into a
-`TEXT` column, under the format name `"erl_etf"`.
+**`operation_outputs`** — one row per completed step, keyed by `(workflow_uuid, function_id)`.
+This table is the replay cache.
 
-Supporting tables cover cross-workflow messaging (`notifications`, `workflow_events`,
-`streams`), cron (`workflow_schedules`), and queues (`queues`). All of them live under one
-Postgres schema, `dbos` by default.
+| Column | Holds |
+|---|---|
+| `function_id` | the step's position in the call sequence |
+| `function_name` | the step's name, checked on replay |
+| `output`, `error` | what the step recorded |
+| `child_workflow_id` | the child's id, for a child workflow start |
+
+Values in both tables are stored as Erlang terms, so atoms, tuples, and structs round-trip
+exactly.
+
+Supporting tables cover cross-workflow messaging, cron schedules, and queues. All of them live
+under one Postgres schema, `dbos` by default.
 
 ## The step-id counter
 
@@ -76,15 +88,15 @@ so an in-flight workflow keeps replaying the code it started on.
 
 ## Recovery
 
-Every `PENDING` row owned by this engine's `executor_id` is looked up by workflow `name` and
-run again from the top, with its checkpoints in place. The first step position with no row is
-where real work resumes.
+Every `PENDING` workflow owned by this engine's `executor_id` is looked up by name and run again
+from the top, with its checkpoints in place. The first step with nothing recorded is where real
+work resumes.
 
 | Trigger | Scope |
 |---|---|
-| Engine boot | This executor's own `PENDING` rows |
+| Engine boot | This executor's own `PENDING` workflows |
 | A parked wait waking (timer or notification) | One workflow |
-| A peer's lease expiring | The dead executor's `PENDING` rows, reassigned to a survivor |
+| A peer's lease expiring | The dead executor's `PENDING` workflows, taken over by a survivor |
 
 A workflow with a `queue_name` is handed back to its queue, so it re-enters through the
 queue's normal concurrency and rate limits. A workflow `name` that
@@ -96,22 +108,21 @@ must stay stable across deploys, independent of the module and function it lives
 ## Waits do not hold a process
 
 A workflow blocked in `Dbos.sleep/1`, `Dbos.recv_message/3`, or `Dbos.get_event/4` for longer
-than `Dbos.Config`'s `park_exit_threshold_ms` gives up its process, leaving a timer and a small
-registry entry behind. The deadline or an incoming notification re-dispatches the workflow,
-which replays from its checkpoints back to the wait site and continues. A workflow can wait for
-days at the cost of a few tens of bytes.
+than `park_exit_threshold_ms` gives up its process. The deadline or an incoming notification
+re-dispatches the workflow, which replays from its checkpoints back to the wait site and
+continues, so a workflow can wait for days while holding nothing.
 
 ## Where your Postgres fits
 
-`Dbos.Config` holds a `{db_module, conn}` pair — `{Dbos.DB.Postgrex, pool}` or
+The `:db` option names the adapter and connection — `{Dbos.DB.Postgrex, pool}` or
 `{Dbos.DB.Ecto, MyApp.Repo}` — and every checkpoint write goes through it, onto the pool your
-application already uses. A `deftransaction` step rides in a single transaction call, so your
-own writes and the step's checkpoint commit or roll back together.
+application already uses. A `deftransaction` step runs in a single transaction, so your own writes
+and the step's checkpoint commit or roll back together.
 
 One connection sits outside the pool: `LISTEN` occupies a connection for its whole lifetime,
 so notifications get a dedicated one.
 
-Multiple engines can run in the same BEAM. Every process is namespaced by the `:name` given to
-`Dbos.Supervisor`, and that name is the only thing the API needs to address an engine.
+Multiple engines can run in the same BEAM, each addressed by the `:name` given to
+`Dbos.Supervisor`.
 
 For the determinism rules, the full schema, and clustering, see `docs/`.

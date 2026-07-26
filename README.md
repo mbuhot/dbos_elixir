@@ -12,7 +12,7 @@
 
 This library is a port of **[DBOS Transact for Go](https://github.com/dbos-inc/dbos-transact-golang)**, created by **[DBOS, Inc.](https://www.dbos.dev)** and released under the MIT License.
 
-The design is theirs. The database schema, the status and step-name protocol, the SQL, and the algorithms for checkpointing, replay, recovery, queue dequeueing, messaging, and transactional steps are all derived from their work, at commit [`2a7705c`](https://github.com/dbos-inc/dbos-transact-golang/commit/2a7705c37c93e5fd1d5c1ce049a4224ec2f1f969). This documentation follows the structure of [docs.dbos.dev](https://docs.dbos.dev), with every example rewritten for Elixir.
+The design is theirs. The database schema, the status and step-name protocol, the SQL, and the algorithms for checkpointing, replay, recovery, queue dequeueing, messaging, and transactional steps are all derived from their work, at commit [`2a7705c`](https://github.com/dbos-inc/dbos-transact-golang/commit/2a7705c37c93e5fd1d5c1ce049a4224ec2f1f969). The documentation here is written for this library, and covers the Elixir API only.
 
 If this library is useful to you, the credit belongs upstream. Please [star the original project](https://github.com/dbos-inc/dbos-transact-golang).
 
@@ -48,7 +48,7 @@ A workflow checkpoints each completed step. After a crash, restarting replays th
 defmodule MyApp.Checkout do
   use Dbos, repo: MyApp.Repo
 
-  defworkflow process_order(order_id, amount), name: "process_order" do
+  defworkflow process_order(order_id, amount), name: "MyApp.Checkout.process_order" do
     charge = charge_card(order_id, amount)
     record_receipt(order_id, charge)
     ship(order_id)
@@ -122,7 +122,7 @@ Declare a cron schedule on the workflow itself. Several nodes may run the same s
 
 ```elixir
 defworkflow nightly_report(scheduled_time_ms, _context),
-  name: "nightly_report",
+  name: "MyApp.Reports.nightly_report",
   schedule: "0 0 2 * * *" do
   MyApp.Reports.build_for(scheduled_time_ms)
 end
@@ -131,7 +131,7 @@ end
 Durable sleep records its wake time, so a workflow sleeps through restarts:
 
 ```elixir
-defworkflow trial_reminder(user_id), name: "trial_reminder" do
+defworkflow trial_reminder(user_id), name: "MyApp.Onboarding.trial_reminder" do
   Dbos.sleep(:timer.hours(24 * 14))
   send_reminder(user_id)
 end
@@ -142,7 +142,7 @@ end
 Pause a workflow until a message arrives, or publish events for external readers. Both persist in Postgres with exactly-once delivery, and both survive a restart.
 
 ```elixir
-defworkflow await_approval(order_id), name: "await_approval" do
+defworkflow await_approval(order_id), name: "MyApp.Orders.await_approval" do
   Dbos.set_event("status", :awaiting_approval)
 
   case Dbos.recv_message("decision", :timer.hours(48)) do
@@ -170,15 +170,15 @@ The lease lives in the same database the executor needs in order to checkpoint, 
 
 The guarantee is **exactly-once checkpoints, at-least-once side effects.** A step that performs an external effect and crashes before its checkpoint commits runs that effect again on recovery. A step that must never repeat needs an idempotency key at its own boundary.
 
-### Long waits cost no process
+### A long wait releases the process
 
-A workflow waiting longer than a minute releases its process and is rebuilt when it wakes, on a deadline or on a message. Measured at 163 bytes per parked wait, so a hundred thousand workflows parked for a fortnight cost about 16MB and no processes.
+A workflow waiting longer than a minute releases its process. It is rebuilt when it wakes — on a deadline or on a message. A parked wait is a row in the database, so hundreds of thousands of workflows can sit idle for weeks with nothing running.
 
 ### Determinism checked at compile time
 
-`defworkflow` holds its body's AST, so nondeterministic constructs are rejected by the compiler with the call, the line, and the fix. Step and transaction bodies are checked for constructs that spawn a process out of the workflow context. The optional `:dbos` Mix compiler extends the same tables across the whole application, following every helper a workflow or step body calls, transitively.
+Nondeterministic constructs in a workflow body are rejected by the compiler, naming the call, the line, and the fix. Step and transaction bodies are checked for constructs that spawn a process out of the workflow context. The optional `:dbos` Mix compiler extends the same checks across the whole application, following every helper a workflow or step body calls, transitively.
 
-### Evolving a workflow in flight
+### Evolving a workflow
 
 `Dbos.patch/1` guards new code so executions that predate it keep their recorded step sequence; `Dbos.deprecate_patch/1` retires the guard once those executions have drained.
 
@@ -233,7 +233,7 @@ Runnable applications live in [`sample_apps/`](https://github.com/mbuhot/dbos_el
 
 ## Serialization
 
-Values are encoded with `:erlang.term_to_binary/1` and base64-encoded into a TEXT column, under the format name `"erl_etf"`. Atoms, tuples, structs and dates round-trip exactly.
+Values are stored as Erlang terms, so atoms, tuples, structs and dates round-trip exactly.
 
 ## License
 

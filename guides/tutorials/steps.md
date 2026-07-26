@@ -8,7 +8,7 @@ unexecuted.
 defmodule MyApp.Checkout do
   use Dbos
 
-  defworkflow process_order(order_id, amount), name: "process_order" do
+  defworkflow process_order(order_id, amount), name: "MyApp.Checkout.process_order" do
     charge_card(order_id, amount)
   end
 
@@ -22,13 +22,13 @@ end
 
 Everything nondeterministic, and every side effect: an HTTP call, a call to another service, a
 read of the current time, a random number, a file read, a database write (through
-`deftransaction` — see `guides/tutorials/transactions.md`).
+`deftransaction` — see [Transactions](transactions.md)).
 
 Pure computation over the workflow's own inputs and prior steps' outputs stays in the workflow
 body:
 
 ```elixir
-defworkflow process_order(order_id, amount), name: "process_order" do
+defworkflow process_order(order_id, amount), name: "MyApp.Checkout.process_order" do
   charge = charge_card(order_id, amount)
   total_with_tax = charge.amount * 1.1
   record_receipt(order_id, total_with_tax)
@@ -124,24 +124,23 @@ checkpointed as the step's recorded failure.
 
 ## What is checkpointed
 
-On success: the step name, its encoded output, and start/completion timestamps. On failure: the
-step name and the encoded exception. All of it keyed by `(workflow_id, function_id)` — the step's
-position in call order.
+On success: the step name, its output, and start/completion timestamps. On failure: the step name
+and the exception. All of it recorded against the step's position in call order.
 
 Step **arguments are never stored.** This stays invisible until a step is called with different
 arguments on a replay:
 
 ```elixir
-defworkflow charge_customer(order_id), name: "charge_customer" do
+defworkflow charge_customer(order_id), name: "MyApp.Checkout.charge_customer" do
   order = load_order(order_id)
   charge_card(order.customer_id, order.total)
 end
 ```
 
 If `load_order` reads a price that can change between the original run and a crash-recovery
-replay, `charge_card` is called with a different `order.total` on replay. The engine matches on
-`(workflow_id, function_id)`, finds a recorded output at that position, and returns it: the
-workflow succeeds with the old charge amount silently substituted.
+replay, `charge_card` is called with a different `order.total` on replay. The engine finds a
+recorded output at that position and returns it: the workflow succeeds with the old charge amount
+silently substituted.
 
 The fix is structural — every argument passed to a step comes from the workflow's own input or a
-prior step's recorded output. See `docs/determinism.md` for the full worked example.
+prior step's recorded output. See [the determinism contract](../../docs/determinism.md) for the full worked example.

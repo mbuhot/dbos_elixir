@@ -9,7 +9,7 @@ matter how many engine instances are sharing the database.
 defmodule MyApp.Reports do
   use Dbos
 
-  defworkflow nightly_summary(scheduled_time_ms, _context), name: "nightly_summary",
+  defworkflow nightly_summary(scheduled_time_ms, _context), name: "MyApp.Reports.nightly_summary",
     schedule: "0 0 3 * * *" do
     MyApp.Reports.build_summary_for(scheduled_time_ms)
   end
@@ -20,7 +20,7 @@ end
 string, or a keyword list for more control:
 
 ```elixir
-defworkflow monthly_invoice(scheduled_time_ms, context), name: "monthly_invoice",
+defworkflow monthly_invoice(scheduled_time_ms, context), name: "MyApp.Reports.monthly_invoice",
   schedule: [
     cron: "0 0 6 1 * *",
     name: "monthly_invoice_schedule",
@@ -112,29 +112,28 @@ combine (`1h30m`).
 ```mermaid
 flowchart LR
     subgraph "Node A"
-      A1["Scheduler tick: reads ACTIVE schedules"]
-      A2["Cron.due_between → occurrence at T"]
-      A3["Dbos.enqueue with id sched-<name>-<T>"]
+      A1["tick: reads the active schedules"]
+      A2["occurrence due at T"]
+      A3["enqueue with id sched-<name>-<T>"]
     end
     subgraph "Node B"
-      B1["Scheduler tick: reads the same ACTIVE schedules"]
-      B2["Cron.due_between → same occurrence at T"]
-      B3["Dbos.enqueue with the same id sched-<name>-<T>"]
+      B1["tick: reads the same schedules"]
+      B2["the same occurrence at T"]
+      B3["enqueue with the same id sched-<name>-<T>"]
     end
-    A3 --> C[("workflow_status\none row, id = sched-<name>-<T>")]
+    A3 --> C[("one workflow,\nid = sched-<name>-<T>")]
     B3 --> C
-    C --> D["queue's FOR UPDATE SKIP LOCKED dequeue\nonly one runner ever claims it"]
+    C --> D["the queue hands it to exactly one runner"]
 ```
 
-Every engine's `Dbos.Scheduler` polls independently (`scheduler_poll_interval_ms`, a
-`Dbos.Supervisor` option, default `30_000`), reading the full `ACTIVE` set fresh from
-`workflow_schedules` on every tick, so engines sharing one database converge on the same set
-without coordinating directly.
+Every engine polls its schedules independently (`scheduler_poll_interval_ms`, a `Dbos.Supervisor`
+option, default `30_000`), reading the active set fresh on every tick, so engines sharing one
+database converge on the same set without coordinating directly.
 
 Each due occurrence is enqueued under a deterministic id:
-`"sched-<schedule_name>-<scheduled_time_ms>"`. Two engines computing the same occurrence insert the
-same `workflow_uuid` and collapse onto one `workflow_status` row. The queue's `FOR UPDATE SKIP
-LOCKED` dequeue then guarantees exactly one runner claims that row and runs the body.
+`"sched-<schedule_name>-<scheduled_time_ms>"`. Two engines computing the same occurrence dispatch
+the same workflow id, which collapses onto one workflow, and the queue hands that workflow to
+exactly one runner.
 
 ## Catch-up after downtime
 
@@ -146,10 +145,10 @@ schedule: [cron: "0 0 3 * * *", automatic_backfill: true]
 - **`automatic_backfill: false`** (the default): the schedule's starting floor is the moment this
   process first reconciles it. Ticks that came due while no engine was running are skipped. Use it
   where dropping a missed run is fine — a "clean up old rows" job.
-- **`automatic_backfill: true`**: the floor comes from the schedule's persisted `last_fired_at`.
-  Every occurrence missed since any engine last fired it — downtime, a deploy, a newly added
-  schedule — is enqueued on the next reconcile, each under its own `sched-<name>-<time>` id and its
-  own `scheduled_time_ms`. Use it where every occurrence matters, like a monthly invoice.
+- **`automatic_backfill: true`**: the floor is the last time any engine fired the schedule. Every
+  occurrence missed since then — downtime, a deploy, a newly added schedule — is enqueued on the
+  next reconcile, each with its own `scheduled_time_ms`. Use it where every occurrence matters, like
+  a monthly invoice.
 
 ## Deactivating
 

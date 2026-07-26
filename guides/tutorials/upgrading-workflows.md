@@ -7,18 +7,18 @@ already in flight, and how to ship a change safely.
 
 ## What counts as a breaking change
 
-A checkpoint is keyed on `(workflow_uuid, function_id)` and records the step's `function_name` and
-output. Replay walks the workflow body from the top, and at each step call compares the recorded
-`function_name` at that `function_id` against the one the current code is about to run. A mismatch
-raises `Dbos.UnexpectedStepError`.
+A checkpoint records a step's name and output against its position in the call sequence. Replay
+walks the workflow body from the top and, at each step call, compares the name recorded at that
+position against the one the current code is about to run. A mismatch raises
+`Dbos.UnexpectedStepError`.
 
 | Change | Breaks replay? | Why |
 |---|---|---|
-| Reordering two steps | Yes | `function_id` 0 now names a different step than what's recorded there. |
-| Renaming a step (its `name:`, or the default `"fun/arity"`) | Yes | `function_name` recorded ≠ `function_name` expected. |
-| Adding or removing a step before an existing one | Yes | Shifts every later step's `function_id` by one. |
+| Reordering two steps | Yes | The first position now names a different step than what's recorded there. |
+| Renaming a step (its `name:`, or the default `"fun/arity"`) | Yes | The recorded name no longer matches the expected one. |
+| Adding or removing a step before an existing one | Yes | Shifts every later step's position by one. |
 | Changing how many step ids a branch allocates (an `if`/`case`/`cond` whose arms call a different number of durable operations) | Yes | The branch taken during the original run fixed the id layout; a differently-shaped branch on replay misaligns every id after it. `mix dbos.explain` flags this statically. |
-| Changing the shape of a struct/map stored as workflow `inputs`, a step's `output`, an event value, or a stream item | Yes, on decode | Values are stored as Erlang terms, so a struct's fields and module name are part of the stored value. Rows written before the change decode back into the shape they were written with. |
+| Changing the shape of a struct/map stored as a workflow's input, a step's output, an event value, or a stream item | Yes, on decode | Values are stored as Erlang terms, so a struct's fields and module name are part of the stored value. Anything written before the change decodes back into the shape it was written with. |
 | Adding a brand new step at the *end*, after every step an in-flight instance could already have completed | No, for that instance | Nothing before it shifted. Still a landmine for an instance not yet that far along, unless the new step is unconditionally reached on every remaining path. |
 | Changing a step's *body*, leaving its name, position, and id count alone | No | Replay never re-runs a completed step; only the checkpointed name and position are matched. A step not yet reached picks up the new behavior on its first execution. |
 
@@ -27,14 +27,13 @@ the previous deploy, so upgrade safety stays your call.
 
 ## Application version
 
-Every workflow row carries `application_version`, stamped at start time. Recovery and dequeue use
-it to decide which running executor may pick a row back up. It resolves once, at `Dbos.Supervisor`
-boot:
+Every workflow records the `application_version` it started under. Recovery and dequeue use it to
+decide which running executor may pick that workflow back up. It resolves once, at
+`Dbos.Supervisor` boot:
 
 1. the `:application_version` option, if given;
 2. else the `DBOS__APPVERSION` environment variable;
-3. else a computed digest over every registered workflow module's compiled code (each module's
-   `module_info(:md5)`), order-independent.
+3. else a digest of every registered workflow module's compiled code.
 
 ```elixir
 {Dbos.Supervisor,
@@ -49,16 +48,13 @@ a git SHA or release tag you control answers it directly.
 
 Two places gate on it:
 
-- **Dequeue** — an executor whose `application_version` is the most recently registered one also
-  claims `ENQUEUED` rows with a `NULL` application_version; every other executor claims only rows
-  matching its own version exactly. "Most recently registered" is whichever version has the newest
-  `application_versions.version_timestamp`, written the first time an executor of that version
-  boots.
-- **Reclaim** — a dead executor's non-queued `PENDING` rows are reassigned only to a live executor
-  whose `application_version` matches the row's, whenever `config.application_version` is set.
+- **Dequeue** — an executor claims queued workflows matching its own version. An executor running
+  the most recently booted version also claims workflows that carry no version at all.
+- **Reclaim** — a dead executor's workflows are taken over only by a live executor whose version
+  matches theirs.
 
-So bumping the version leaves an in-flight workflow started under the old version `PENDING`/
-`ENQUEUED` until an executor stamped with its version shows up to run it.
+So bumping the version leaves an in-flight workflow started under the old version waiting until an
+executor stamped with its version shows up to run it.
 
 ## Three ways to ship a change safely
 
@@ -82,11 +78,14 @@ flowchart LR
 1. Ship the new code as `v2`, running *alongside* the still-running `v1` fleet.
 2. New workflows start under `v2`; `v1` executors keep recovering and dequeuing their own
    in-flight `v1` workflows.
-3. Decommission `v1` once it has no non-terminal rows left:
+3. Decommission `v1` once it has no unfinished workflows left:
 
-```sql
-SELECT count(*) FROM dbos.workflow_status
-WHERE application_version = 'v1' AND status IN ('PENDING','ENQUEUED','DELAYED');
+```elixir
+{:ok, remaining} =
+  Dbos.Client.list(Dbos.config(),
+    application_version: "v1",
+    status: [:pending, :enqueued, :delayed]
+  )
 ```
 
 Cost: two versions of the application run at once for as long as the oldest in-flight workflow
@@ -100,11 +99,11 @@ in-flight instances keep dispatching under the old name to the old body; every n
 through the new name.
 
 ```elixir
-defworkflow process_order(order_id, amount), name: "process_order" do
+defworkflow process_order(order_id, amount), name: "MyApp.Checkout.process_order" do
   # keep this body untouched and registered until every in-flight instance has finished
 end
 
-defworkflow process_order_v2(order_id, amount), name: "process_order_v2" do
+defworkflow process_order_v2(order_id, amount), name: "MyApp.Checkout.process_order_v2" do
   # new behavior
 end
 ```
@@ -119,7 +118,7 @@ boolean: `true` for code taking the new path, `false` for an existing instance w
 skip it and keep its original step sequence intact.
 
 ```elixir
-defworkflow process_order(order_id), name: "process_order" do
+defworkflow process_order(order_id), name: "MyApp.Checkout.process_order" do
   charge = charge_card(order_id)
 
   if Dbos.patch("fraud-check") do
@@ -134,11 +133,11 @@ end
 |---|---|---|
 | A brand-new workflow | `true` | Nothing recorded at this id yet; writes the marker and takes the new path. |
 | An in-flight instance that has not reached this point | `true` | Same: no checkpoint there yet. |
-| An in-flight instance that already ran past this point | `false` | A checkpoint under some other name already sits at this id. No id is consumed, so every later step keeps its original `function_id`. |
+| An in-flight instance that already ran past this point | `false` | Some other step is already recorded at this position. No id is consumed, so every later step keeps its original position. |
 | A replay of an instance that already took this patch | `true` | The checkpoint here is the patch's own marker; replay reproduces the decision. |
 
 The `true` path consumes an id; the `false` path consumes none, which is what keeps an old
-instance's downstream `function_id`s aligned with what it recorded. `mix dbos.explain` recognizes
+instance's later steps aligned with what it recorded. `mix dbos.explain` recognizes
 `if Dbos.patch(...) do ... end` as a conditional 0-or-1-id allocation.
 
 `Dbos.patch/1` must be called from a workflow body: outside a workflow it raises
@@ -148,12 +147,12 @@ instance's downstream `function_id`s aligned with what it recorded. `mix dbos.ex
 #### Retiring the patch
 
 Once every pre-patch instance has drained, the `if Dbos.patch(...)` check comes out and the new
-step runs unconditionally. Instances that *did* record the marker may still be in flight, each with
-a `"DBOS.patch-fraud-check"` checkpoint at an id the new code no longer allocates.
-`Dbos.deprecate_patch/1` stands in that spot and absorbs it:
+step runs unconditionally. Instances that *did* record the patch may still be in flight, each
+carrying its marker at an id the new code no longer allocates. `Dbos.deprecate_patch/1` stands in
+that spot and absorbs it:
 
 ```elixir
-defworkflow process_order(order_id), name: "process_order" do
+defworkflow process_order(order_id), name: "MyApp.Checkout.process_order" do
   charge = charge_card(order_id)
 
   Dbos.deprecate_patch("fraud-check")

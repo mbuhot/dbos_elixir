@@ -1,17 +1,17 @@
 # Queues
 
-A queue is a durable, database-backed work list. Enqueueing a workflow inserts a row and returns
-immediately; a queue runner on some engine claims it later and dispatches it locally. Every
-runner across every node pulls from the same table, so concurrency limits, rate limits, and
-priority are enforced in Postgres, shared across every process.
+A queue is a durable, database-backed work list. Enqueueing a workflow records it and returns
+immediately; a queue runner on some engine claims it later and dispatches it locally. Every runner
+across every node pulls from the same queue, so concurrency limits, rate limits, and priority are
+enforced in Postgres, shared across every process.
 
 ```mermaid
 flowchart LR
-    A["Dbos.enqueue/3"] --> B[("workflow_status\nstatus = ENQUEUED")]
+    A["Dbos.enqueue/3"] --> B[("the queue,\nin Postgres")]
     B --> C1["Runner (node 1)"]
     B --> C2["Runner (node 2)"]
-    C1 -->|row-level locking| D[claims rows, dispatches locally]
-    C2 -->|row-level locking| D
+    C1 --> D[claims work, dispatches locally]
+    C2 --> D
 ```
 
 ## Declaring a queue
@@ -94,14 +94,12 @@ queues nothing further.
 
 | Limit | Scope | Counted from |
 |---|---|---|
-| `worker_concurrency` | This one engine's runner | This engine's live workflow processes for the queue, in memory. |
-| `global_concurrency` | Every engine sharing the database | `PENDING` rows for the queue, inside the claiming transaction. |
+| `worker_concurrency` | This one engine's runner | The workflows this engine is running for the queue. |
+| `global_concurrency` | Every engine sharing the database | Every workflow running for the queue, fleet-wide. |
 
 `worker_concurrency` caps local resource usage (say, ten concurrent email sends per node).
 `global_concurrency` puts a hard ceiling on a downstream dependency that does not care which node
-is calling it. Set both and each dequeue pass narrows first by
-`worker_concurrency - local_running_count`, then by `global_concurrency - pending_count`, taking
-the smaller.
+is calling it. Set both and each claim honours whichever leaves less room.
 
 ## Priority
 
@@ -109,9 +107,9 @@ the smaller.
 MyApp.Reports.generate(report_id, queue_name: "reports", priority: 1)
 ```
 
-Candidates are claimed in `priority ASC, created_at ASC` order: a lower `:priority` number runs
-first, and rows of equal priority run in enqueue order. `priority: 0` (the default) sorts ahead of
-anything positive, so most callers set `:priority` only on the rows that should jump the queue.
+A lower `:priority` number runs first, and workflows of equal priority run in enqueue order.
+`priority: 0` (the default) sorts ahead of anything positive, so most callers set `:priority` only
+on the work that should jump the queue.
 
 ## Rate limiting
 
@@ -141,7 +139,7 @@ A partitioned queue runs one independent copy of every flow-control check per di
 region) a fair, isolated slice of throughput, so one noisy tenant enqueueing thousands of jobs
 leaves every other tenant's allowance and concurrency slots intact.
 
-Each poll tick discovers the partitions that currently have `ENQUEUED` rows and runs the
+Each poll tick discovers the partitions that currently have work waiting and runs the
 dequeue-and-dispatch pass once per partition.
 
 ### Capping total throughput across all partitions
@@ -162,11 +160,11 @@ queues: [
 defmodule MyApp.TenantJobs do
   use Dbos
 
-  defworkflow route_job(tenant_id, job_id), name: "route_job" do
+  defworkflow route_job(tenant_id, job_id), name: "MyApp.TenantJobs.route_job" do
     do_job(tenant_id, job_id, queue_name: "global_jobs")
   end
 
-  defworkflow do_job(tenant_id, job_id), name: "do_job" do
+  defworkflow do_job(tenant_id, job_id), name: "MyApp.TenantJobs.do_job" do
     MyApp.Jobs.run(tenant_id, job_id)
   end
 end
@@ -190,9 +188,8 @@ mind.
 MyApp.Reminders.send(user_id, queue_name: "reminders", delay_ms: 3_600_000)
 ```
 
-`:delay_ms` inserts the row as `DELAYED`. Every runner's poll tick begins by promoting every
-`DELAYED` row whose delay has elapsed to `ENQUEUED`, on whichever engine ticks first, making it a
-normal dequeue candidate on the next pass.
+`:delay_ms` starts the workflow as `DELAYED`. Once the delay elapses, the next runner to tick
+moves it to `ENQUEUED`, and it becomes an ordinary dequeue candidate.
 
 ## Deduplication
 
@@ -203,10 +200,9 @@ MyApp.Reports.generate(report_id,
 )
 ```
 
-`:deduplication_id` reserves a single slot per `(queue_name, deduplication_id)` pair. A second
-enqueue with the same pair, while the first is still queued or running, raises
-`Dbos.QueueDeduplicatedError` carrying the id of the workflow holding the slot. No row is
-inserted.
+`:deduplication_id` reserves a single slot per queue and id. A second enqueue with the same pair,
+while the first is still queued or running, raises `Dbos.QueueDeduplicatedError` carrying the id of
+the workflow holding the slot, and enqueues nothing.
 
 ## Debouncing
 
@@ -232,8 +228,8 @@ every additional call — the "wait until the user stops typing" pattern.
 | `:engine` | Default `Dbos`. |
 
 Each call either starts a fresh `DELAYED` workflow keyed by `:debounce_key`, or bounces one still
-waiting out its delay — replacing its inputs with this call's `args` and pushing its wake time
-forward by `:period_ms`. With `:deadline_ms` set, the workflow fires within that long of the first
+waiting out its delay — replacing its arguments with this call's and pushing its wake time forward
+by `:period_ms`. With `:deadline_ms` set, the workflow fires within that long of the first
 call however often it bounces. Every bounce returns a handle to the same workflow id, stable
 across the whole burst.
 

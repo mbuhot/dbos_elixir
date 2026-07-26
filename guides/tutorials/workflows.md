@@ -20,23 +20,23 @@ These guarantees hold while the workflow body is deterministic — see the summa
 defmodule MyApp.Checkout do
   use Dbos
 
-  defworkflow process_order(order_id, amount), name: "process_order" do
+  defworkflow process_order(order_id, amount), name: "MyApp.Checkout.process_order" do
     charge = charge_card(order_id, amount)
     record_receipt(order_id, charge)
   end
 end
 ```
 
-`name:` is required — recovery dispatches a `PENDING` workflow row by its `name` column. Moving
+`name:` is required — recovery dispatches an interrupted workflow by this name. Moving
 `process_order/2` to a different module, or renaming the function, leaves an in-flight workflow
-row resolvable as long as `name:` stays the same. Compiling without `name:` is a `CompileError`.
+recoverable as long as `name:` stays the same. Compiling without `name:` is a `CompileError`.
 
 A workflow head cannot carry a `when` guard: recovery maps one name to exactly one deterministic
 body, so branching goes inside the body.
 
 ```elixir
 # rejected at compile time
-defworkflow process_order(order_id) when is_binary(order_id), name: "process_order" do
+defworkflow process_order(order_id) when is_binary(order_id), name: "MyApp.Checkout.process_order" do
   ...
 end
 ```
@@ -44,7 +44,7 @@ end
 Default arguments are supported:
 
 ```elixir
-defworkflow greet(name \\ "world"), name: "greet" do
+defworkflow greet(name \\ "world"), name: "MyApp.Checkout.greet" do
   "hello, #{name}"
 end
 ```
@@ -90,7 +90,7 @@ process_order("order-1", 4999, queue_name: "orders", delay_ms: 60_000, priority:
 | `:application_version` | Pins the code version allowed to run it |
 
 A `:queue_name` routes the dispatch onto that named queue, subject to its concurrency, rate limit
-and priority rules — see `guides/tutorials/queues.md`. `:delay_ms` and `:partition_key` apply to a
+and priority rules — see [Queues](queues.md). `:delay_ms` and `:partition_key` apply to a
 queued workflow, so each requires a `:queue_name`; `:deduplication_id` and `:partition_key` are
 mutually exclusive. An unrecognised key, or either of those combinations, raises
 `Dbos.InvalidWorkflowOptionError` at the call.
@@ -100,10 +100,10 @@ mutually exclusive. An unrecognised key, or either of those combinations, raises
 
 ```elixir
 {:ok, handle} =
-  Dbos.start("process_order", ["order-1", 4999], workflow_id: "checkout-order-1")
+  Dbos.start("MyApp.Checkout.process_order", ["order-1", 4999], workflow_id: "checkout-order-1")
 
 {:ok, handle} =
-  Dbos.enqueue("ship_order", [order_id], queue_name: "shipping", priority: 1)
+  Dbos.enqueue("MyApp.Checkout.ship_order", [order_id], queue_name: "shipping", priority: 1)
 ```
 
 ## Workflow ids
@@ -113,7 +113,7 @@ starting the *same* logical operation twice a no-op: starting a workflow id that
 row returns a handle to the existing run.
 
 ```elixir
-Dbos.start("process_order", [order_id, amount], workflow_id: "checkout-#{order_id}")
+Dbos.start("MyApp.Checkout.process_order", [order_id, amount], workflow_id: "checkout-#{order_id}")
 ```
 
 ## Handles and awaiting
@@ -140,20 +140,19 @@ workflow**: it starts as its own row, is awaited inline, and its unwrapped resul
 ordinary return value.
 
 ```elixir
-defworkflow parent_flow(order_id), name: "parent_flow" do
+defworkflow parent_flow(order_id), name: "MyApp.Checkout.parent_flow" do
   process_order(order_id, 4999)
 end
 ```
 
-A child's id defaults to `"<parent_id>-<parent_step_id>"`, derived from the parent's own id and
-the step position the child started at, so replaying the parent finds the same child id already
-recorded and reuses it.
+A child's id defaults to `"<parent_id>-<step_position>"`, so replaying the parent finds the same
+child id already recorded and reuses it.
 
 A `queue_name:` on that call puts the child on the queue and waits there for its result, so the
 parent parks until the queue dispatches it:
 
 ```elixir
-defworkflow parent_flow(order_id), name: "parent_flow" do
+defworkflow parent_flow(order_id), name: "MyApp.Checkout.parent_flow" do
   process_order(order_id, 4999, queue_name: "orders")
 end
 ```
@@ -170,7 +169,7 @@ called with different arguments on replay returns the recorded output for its po
 `System.os_time/0`, `Process.sleep/1`, bare `receive`, `send/2`, `spawn`, `Task.*`, `make_ref/0`,
 and — with `use Dbos, repo: MyApp.Repo` — a direct `Repo` call) at compile time. The full
 contract, a worked example of a silently stale replay, and the complete banned-construct table
-live in `docs/determinism.md`.
+live in [the determinism contract](../../docs/determinism.md).
 
 ## Step ids
 
@@ -184,16 +183,16 @@ different number of ids is the classic way to break this invisibly.
 | `defstep`/`deftransaction` call, `Dbos.step/2`, `Dbos.transaction/3` | 1 |
 | `Dbos.sleep/1` | 1 |
 | `Dbos.send_message/4` | 1 |
-| `Dbos.recv_message/3` | 2 (`DBOS.recv` + an internal sleep) |
+| `Dbos.recv_message/3` | 2 |
 | `Dbos.set_event/3` | 1 |
-| `Dbos.get_event/4` | 2 (`DBOS.getEvent` + an internal sleep) |
+| `Dbos.get_event/4` | 2 |
 | `Dbos.write_stream/3`, `Dbos.close_stream/2` | 1 |
 | `Dbos.enqueue/3`, `Dbos.debounce/3` | 1 |
 | `Dbos.start/3` | 1 |
 | `Dbos.await/2` | 1 |
 | `Dbos.status/2`, `Dbos.cancel/2`, `Dbos.resume/2`, `Dbos.retry/2`, `Dbos.fork/3` | 1 |
-| Call to another `defworkflow` (child workflow) | 2 (start + `DBOS.getResult`) |
-| The same call with `queue_name:` | 2 (`DBOS.enqueue` + `DBOS.getResult`) |
+| Call to another `defworkflow` (child workflow) | 2 (the start, and awaiting its result) |
+| The same call with `queue_name:` | 2 (the enqueue, and awaiting its result) |
 | `Dbos.patch/1` | 0 or 1, decided at runtime |
 
 ## `mix dbos.explain`
@@ -203,7 +202,7 @@ statically from a `defworkflow` body:
 
 ```
 $ mix dbos.explain MyApp.Checkout.process_order/2
-workflow "process_order" (MyApp.Checkout):
+workflow "MyApp.Checkout.process_order" (MyApp.Checkout):
   id 0: step reserve_stock/1 ("reserve_stock/1")
   id 1: step charge_card/2 ("charge_card/2")
   id 2: step record_receipt/2 ("record_receipt/2")

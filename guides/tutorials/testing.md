@@ -1,7 +1,6 @@
 # Testing
 
-Testing *your* application's workflows and steps. (`docs/testing.md` covers the engine's own
-suite.)
+Testing your application's workflows and steps.
 
 ## The sandbox setup you already have
 
@@ -12,14 +11,13 @@ makes it work for `Dbos` too:
 | `testing:` | Behavior |
 |---|---|
 | `:inline` | `Dbos.start/3` and `Dbos.enqueue/3` run the workflow synchronously, in the calling process, and hand back a handle to an already-finished workflow. |
-| `:manual` | `Dbos.start/3` runs the same way; `Dbos.enqueue/3` only inserts the row — nothing runs until the test calls `Dbos.Testing.drain_queue/2` or `Dbos.Testing.drain_all/1`. |
+| `:manual` | `Dbos.start/3` runs the same way; `Dbos.enqueue/3` only records the workflow — nothing runs until the test calls `Dbos.Testing.drain_queue/2` or `Dbos.Testing.drain_all/1`. |
 | not set | Production behavior: background processes, real concurrency, real timing. |
 
-Either mode starts none of `Dbos.Notifications` (the dedicated `LISTEN` connection), the wait
-parker, the executor lease, the queue runners, `Dbos.Scheduler`, the boot recovery scan, the
-cluster processes, or the admin server — every process that would otherwise touch the database on
-its own schedule, outside your test's connection. Everything runs on the connection your test
-already checked out, so there is no `Sandbox.allow/3` to call and no second connection to
+Either mode starts no background processes at all — no dedicated `LISTEN` connection, no queue
+runners, no scheduler, no lease, no boot recovery scan, no admin server. Nothing touches the
+database on its own schedule, outside your test's connection. Everything runs on the connection your
+test already checked out, so there is no `Sandbox.allow/3` to call and no second connection to
 configure.
 
 ```elixir
@@ -58,7 +56,7 @@ Start it, await it, assert on the result:
 
 ```elixir
 test "process_order reserves stock and charges the card", %{engine: engine} do
-  {:ok, handle} = Dbos.start("process_order", ["order-1", 4999], engine: engine)
+  {:ok, handle} = Dbos.start("MyApp.Checkout.process_order", ["order-1", 4999], engine: engine)
 
   assert {:ok, %{reservation: %{status: :reserved}, charge: %{charge_id: "ch_order-1"}}} =
            Dbos.await(handle)
@@ -70,7 +68,7 @@ A workflow that raises completes with status `:error`, and `await` hands back
 
 ```elixir
 test "a declined card surfaces as an error result", %{engine: engine} do
-  {:ok, handle} = Dbos.start("process_order", ["order-2", 999_999_999], engine: engine)
+  {:ok, handle} = Dbos.start("MyApp.Checkout.process_order", ["order-2", 999_999_999], engine: engine)
 
   assert {:error, %MyApp.Checkout.CardDeclinedError{amount: 999_999_999}} = Dbos.await(handle)
 end
@@ -84,7 +82,7 @@ result:
 ```elixir
 test "enqueuing a report job leaves it queued until drained", %{engine: engine} do
   {:ok, handle} =
-    Dbos.enqueue("generate_report", [report_id], queue_name: "reports", engine: engine)
+    Dbos.enqueue("MyApp.Reports.generate_report", [report_id], queue_name: "reports", engine: engine)
 
   assert {:ok, %Dbos.WorkflowStatus{status: :enqueued}} =
            Dbos.status(handle.workflow_id, engine: engine)
@@ -96,14 +94,14 @@ end
 
 `drain_queue/2` claims and runs, synchronously in the caller, every currently dispatchable
 workflow on that queue, and returns how many ran (`0` when there's nothing to claim).
-`Dbos.Testing.drain_all/1` does the same across every declared queue, including the internal one
+`Dbos.Testing.drain_all/1` does the same across every declared queue, including the internal queue
 `Dbos.resume/2` and `Dbos.fork/3` target by default.
 
 A workflow that puts a child on a queue and waits for its result needs no drain at all. The wait
 claims that child and runs it inline, so a parent like this completes on its own:
 
 ```elixir
-defworkflow settle(payment_id), name: "settle" do
+defworkflow settle(payment_id), name: "MyApp.Payments.settle" do
   capture(payment_id, queue_name: "gateway")
 end
 ```
@@ -125,7 +123,7 @@ To drive the message through instead, enqueue, send, then drain:
 ```elixir
 test "an order waits for manual approval before shipping", %{engine: engine} do
   {:ok, handle} =
-    Dbos.enqueue("ship_order", [order_id],
+    Dbos.enqueue("MyApp.Checkout.ship_order", [order_id],
       queue_name: "orders",
       workflow_id: order_id,
       engine: engine
@@ -152,22 +150,21 @@ whatever was written and stops, in every mode.
 with no testing mode set:
 
 - A real `LISTEN`/`NOTIFY` wake.
-- Two executors competing for the same `PENDING` row, or a lease expiring.
+- Two executors competing for the same workflow, or a lease expiring.
 - Background timing: a queue runner's polling interval, the scheduler's cron reconciliation, a
   lease's renewal cadence.
-- `workflow_timeout_ms` cancelling a workflow on the wall clock. The deadline is still resolved and
-  persisted to `workflow_deadline_epoch_ms`, so a test can assert on it, and the background task
-  that would call `Dbos.cancel/2` at that moment stays unarmed under these modes. Drive
-  cancellation directly with `Dbos.cancel/2`.
+- `workflow_timeout_ms` cancelling a workflow on the wall clock. The deadline is still recorded, so
+  a test can assert on it, but nothing fires at that moment under these modes. Drive cancellation
+  directly with `Dbos.cancel/2`.
 
 ## Asserting on checkpoints
 
-`Dbos.Client.steps/2` returns every checkpointed `Dbos.StepInfo`, ordered by `function_id`, with
-`output`/`error` already decoded:
+`Dbos.Client.steps/2` returns every checkpointed `Dbos.StepInfo` in call order, with `output` and
+`error` already decoded:
 
 ```elixir
 test "process_order checkpoints exactly two steps, in order", %{engine: engine} do
-  {:ok, handle} = Dbos.start("process_order", ["order-1", 4999], engine: engine)
+  {:ok, handle} = Dbos.start("MyApp.Checkout.process_order", ["order-1", 4999], engine: engine)
   {:ok, _result} = Dbos.await(handle)
 
   {:ok, steps} = Dbos.Client.steps(Dbos.config(engine), handle.workflow_id)
@@ -184,7 +181,7 @@ module (an HTTP client, a payment gateway wrapper) and pass that module in as an
 it from `Application.get_env/2` at the call site inside the step body:
 
 ```elixir
-defworkflow process_order(order_id, amount), name: "process_order" do
+defworkflow process_order(order_id, amount), name: "MyApp.Checkout.process_order" do
   charge_card(order_id, amount)
 end
 

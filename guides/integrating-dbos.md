@@ -22,9 +22,8 @@ def start(_type, _args) do
 end
 ```
 
-`otp_app: :my_app` discovers every workflow module compiled into that OTP application — anything
-exporting `__dbos_workflows__/0`, which every module containing a `defworkflow` does
-automatically. A module is registered by being compiled into the app.
+`otp_app: :my_app` discovers every workflow module compiled into that OTP application. A module
+is registered by being compiled into the app.
 
 `workflows:` is additive on top of discovery, for a workflow module that lives in a dependency:
 
@@ -41,7 +40,7 @@ It takes module names, or explicit `{name, {module, function, arity}}` tuples. A
 
 ## Sharing the repo and pool
 
-`Dbos.Config` holds a `{db_module, conn}` pair, and every checkpoint write goes through it:
+`:db` names the adapter and the connection every checkpoint write goes through:
 
 | `:db` | `conn` | Use when |
 |---|---|---|
@@ -55,8 +54,8 @@ step's checkpoint commit or roll back together.
 ## The dedicated LISTEN connection
 
 Blocking waits (`Dbos.recv_message/3`, `Dbos.get_event/4`, stream reads) wake up on a Postgres
-`NOTIFY`. `LISTEN` occupies a connection for its entire lifetime, so `Dbos.Notifications` opens
-one extra connection per engine, separate from your app's pool.
+`NOTIFY`. `LISTEN` occupies a connection for its entire lifetime, so each engine opens one extra
+connection, separate from your app's pool.
 
 Where those connection options come from:
 
@@ -112,9 +111,7 @@ this engine targets and does nothing for parts already present. See `Dbos.Migrat
 
 ## Migration verification at launch
 
-`Dbos.Migrator.verify!/1` checks that `<schema>.dbos_migrations.version` and
-`<schema>.extension_migrations.version` are exactly the versions this engine targets
-(`Dbos.Migrator.expected_version/0` and `Dbos.Migrator.expected_extension_version/0`). It raises
+At boot the engine checks the installed schema is at exactly the version it targets. It raises
 and refuses to start on any mismatch or missing table — an engine running against a schema whose
 shape it does not match would checkpoint into the wrong tables.
 
@@ -136,15 +133,14 @@ where node names are often ephemeral, set `DBOS__VMID` to something stable for t
 a pod name, a task ARN — that survives a restart of *that* instance and changes for a genuinely
 new one.
 
-**`application_version`** is stamped onto every workflow a process starts
-(`workflow_status.application_version`) and gates which executor may recover a workflow started
-by a specific build. Resolved as `opts[:application_version]`, else `DBOS__APPVERSION`, else a
-hash of the compiled BEAM code of every workflow module. For a
-release, set `DBOS__APPVERSION` to a git SHA or release tag so every instance of the same
-deployment agrees on one value.
+**`application_version`** is stamped onto every workflow a process starts, and gates which
+executor may recover a workflow started by a specific build. Resolved as
+`opts[:application_version]`, else `DBOS__APPVERSION`, else a hash of the compiled code of every
+workflow module. For a release, set `DBOS__APPVERSION` to a git SHA or release tag so every
+instance of the same deployment agrees on one value.
 
-Both are read once, at `Dbos.Supervisor` boot, into the resolved `Dbos.Config` in
-`:persistent_term`. Set the environment variables before the supervisor starts.
+Both are read once, at `Dbos.Supervisor` boot, so set the environment variables before the
+supervisor starts.
 
 ## Tests
 
@@ -153,4 +149,4 @@ start each test engine with `migrations: :skip` and `testing: :inline` (or `:man
 modes start none of the background processes, so everything runs on the connection
 `Ecto.Adapters.SQL.Sandbox` already checked out for the test.
 
-See `guides/tutorials/testing.md` for the full walkthrough.
+See [Testing](tutorials/testing.md) for the full walkthrough.

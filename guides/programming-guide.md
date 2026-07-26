@@ -36,7 +36,7 @@ checkpointed — call it once, and its recorded result replaces the call on ever
 defmodule MyApp.Checkout do
   use Dbos
 
-  defworkflow process_order(order_id, amount), name: "process_order" do
+  defworkflow process_order(order_id, amount), name: "MyApp.Checkout.process_order" do
     reservation = reserve_stock(order_id)
     charge = charge_card(order_id, amount)
     %{reservation: reservation, charge: charge}
@@ -53,8 +53,8 @@ end
 ```
 
 `defworkflow` requires an explicit `name:`. Recovery re-dispatches a crashed workflow by looking
-up this name — a stable identity across deploys, independent of the module or function it was
-defined in.
+up this name, so it must be unique across your application and stable across deploys. Qualifying
+it with the defining module keeps both properties easy to hold.
 
 Wire the engine into your supervision tree, after your repo:
 
@@ -118,7 +118,7 @@ checkpoint:
 defmodule MyApp.Checkout do
   use Dbos, repo: MyApp.Repo
 
-  defworkflow process_order(order_id, amount), name: "process_order" do
+  defworkflow process_order(order_id, amount), name: "MyApp.Checkout.process_order" do
     reservation = reserve_stock(order_id)
     charge = charge_card(order_id, amount)
     receipt = record_receipt(order_id, charge)
@@ -149,15 +149,15 @@ once:
 ```
 
 ```elixir
-defworkflow process_order(order_id, amount), name: "process_order" do
+defworkflow process_order(order_id, amount), name: "MyApp.Checkout.process_order" do
   reservation = reserve_stock(order_id)
   charge = charge_card(order_id, amount)
   receipt = record_receipt(order_id, charge)
-  {:ok, ship_handle} = Dbos.enqueue("ship_order", [order_id], queue_name: "shipping")
+  {:ok, ship_handle} = Dbos.enqueue("MyApp.Checkout.ship_order", [order_id], queue_name: "shipping")
   %{reservation: reservation, charge: charge, receipt: receipt, shipment: ship_handle}
 end
 
-defworkflow ship_order(order_id), name: "ship_order" do
+defworkflow ship_order(order_id), name: "MyApp.Checkout.ship_order" do
   MyApp.Carrier.ship!(order_id)
 end
 ```
@@ -181,7 +181,7 @@ A large order needs manual approval before it ships. The workflow blocks on a me
 wait durably parks and rehydrates rather than pinning a BEAM process:
 
 ```elixir
-defworkflow process_order(order_id, amount), name: "process_order" do
+defworkflow process_order(order_id, amount), name: "MyApp.Checkout.process_order" do
   reservation = reserve_stock(order_id)
   charge = charge_card(order_id, amount)
   receipt = record_receipt(order_id, charge)
@@ -190,7 +190,7 @@ defworkflow process_order(order_id, amount), name: "process_order" do
     :approved = Dbos.recv_message("approval", :timer.hours(24))
   end
 
-  {:ok, ship_handle} = Dbos.enqueue("ship_order", [order_id], queue_name: "shipping")
+  {:ok, ship_handle} = Dbos.enqueue("MyApp.Checkout.ship_order", [order_id], queue_name: "shipping")
   %{reservation: reservation, charge: charge, receipt: receipt, shipment: ship_handle}
 end
 ```
@@ -229,10 +229,10 @@ Nothing in `MyApp.Checkout` had to detect or handle the crash. This is the guara
 
 ## Where to go next
 
-- `guides/tutorials/workflows.md` — workflow ids, handles, child workflows, `mix dbos.explain`.
-- `guides/tutorials/steps.md` — what belongs in a step, retries, step arguments on replay.
-- `guides/tutorials/transactions.md` — isolation levels and nesting rules.
-- `guides/tutorials/queues.md` — concurrency, rate limits, priorities, debouncing.
-- `guides/tutorials/workflow-communication.md` — messages, events, and streams.
-- `guides/tutorials/testing.md` — sandbox setup, queue tests, crash-and-recover tests.
-- `docs/determinism.md` — the determinism contract a workflow body must hold to.
+- [Workflows](tutorials/workflows.md) — workflow ids, handles, child workflows, `mix dbos.explain`.
+- [Steps](tutorials/steps.md) — what belongs in a step, retries, step arguments on replay.
+- [Transactions](tutorials/transactions.md) — isolation levels and nesting rules.
+- [Queues](tutorials/queues.md) — concurrency, rate limits, priorities, debouncing.
+- [Workflow Communication](tutorials/workflow-communication.md) — messages, events, and streams.
+- [Testing](tutorials/testing.md) — sandbox setup, queue tests, crash-and-recover tests.
+- [Determinism](../docs/determinism.md) — the determinism contract a workflow body must hold to.

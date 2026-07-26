@@ -19,7 +19,7 @@ they commit or roll back together.
 defmodule MyApp.Checkout do
   use Dbos, repo: MyApp.Repo
 
-  defworkflow process_order(order_id, amount), name: "process_order" do
+  defworkflow process_order(order_id, amount), name: "MyApp.Checkout.process_order" do
     charge = charge_card(order_id, amount)
     record_receipt(order_id, charge)
   end
@@ -43,11 +43,11 @@ excluded, overridable with `name:`. The one transaction-specific option is `isol
 
 `deftransaction`'s body runs inside one `Repo.transaction/2` on the pool the engine is configured
 with. Any call your body makes through that same `Repo` module — `insert!/1`, `update!/1`, a raw
-`query!/2` — enlists on that connection automatically, the way any two `Repo` calls nested inside
-an ordinary `Repo.transaction/2` do. You never thread a connection argument through by hand.
+`query!/2` — enlists on that connection automatically. You never thread a connection argument
+through by hand.
 
-Going around the pool — a hand-rolled `Postgrex.transaction/3` against the raw connection, or a
-second unrelated `Repo` — reopens the atomicity gap.
+Going around that pool — a hand-rolled `Postgrex.transaction/3`, or a second unrelated `Repo` —
+reopens the atomicity gap.
 
 `use Dbos, repo: MyApp.Repo` makes a direct `MyApp.Repo` call from inside a workflow body a
 compile error, so a write only ever happens wrapped in a `deftransaction`.
