@@ -3,6 +3,9 @@
 # itself, if unpartitioned), and dispatches every claimed workflow into Dbos.WorkflowSup. The
 # polling interval backs off exponentially on lock contention and scales back toward the base
 # interval otherwise, with multiplicative jitter applied every tick.
+#
+# Traps exits so a shutdown arriving mid-tick is handled after the tick returns, rather than
+# killing the process while it holds a database connection.
 defmodule Dbos.Queue.Runner do
   @moduledoc false
 
@@ -39,6 +42,8 @@ defmodule Dbos.Queue.Runner do
 
   @impl true
   def init({engine, %Queue{} = queue}) do
+    Process.flag(:trap_exit, true)
+
     state = %__MODULE__{
       engine: engine,
       queue: queue,
