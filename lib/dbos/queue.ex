@@ -39,8 +39,8 @@ defmodule Dbos.Queue do
 
   @doc """
   Builds a queue configuration. `opts`: `:worker_concurrency`, `:global_concurrency`,
-  `:rate_limit` (`%{limit:, period_ms:}`), `:priority_enabled` (default `false`),
-  `:partition_queue` (default `false`), `:base_polling_interval_ms` (default `1_000`). Raises
+  `:rate_limit` (`%{limit:, period_ms:}`), `:partition_queue` (default `false`),
+  `:base_polling_interval_ms` (default `1_000`). Raises
   `Dbos.InvalidQueueOptionError` on invalid combinations.
   """
   def new(name, opts \\ []) when is_binary(name) do

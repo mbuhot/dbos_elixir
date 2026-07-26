@@ -2,20 +2,6 @@
 
 The work queue. Each entry is something we intend to do. Resolved items are deleted, not ticked.
 
-## Remove the clustering angle
-
-`Dbos.Cluster` and `Dbos.Cluster.NodeWatcher` exist to shorten dead-executor detection by
-scheduling a sweep when `:nodedown` fires. Lease TTL is 60s and the orphan sweep interval is 300s,
-so the saving is real but it applies only where distributed Erlang is running.
-
-Dropping `orphan_sweep.interval_ms` to 15-30s buys the same latency for every topology, including
-one-pod-per-deployment where `:nodedown` never fires at all. Delete `Dbos.Cluster`,
-`Dbos.Cluster.NodeWatcher`, the `cluster:` supervisor option and `cluster_group` config; keep
-leases and the sweep; rename `Dbos.Cluster.OrphanSweep` once the namespace goes.
-
-Touches `guides/production-checklist.md`, which currently tells the reader to weigh
-`cluster.enabled`, and `docs/clustering.md`.
-
 ## Per-workflow application version
 
 `SystemDb.reclaim_pending_workflows/4` filters `AND application_version = $n`, so a version
@@ -39,12 +25,6 @@ Phase 0 is a gate: confirm `env.function` attributes calls inside a `defworkflow
 with `Macro.escape/1` and re-injected at `@before_compile`, and that line metadata survives the
 round trip. A no answer invalidates the design.
 
-## Drop `priority_enabled` from the queue options
-
-It gates nothing. Dequeue orders `priority ASC, created_at ASC` unconditionally; the flag is only
-persisted and rendered by the admin server. Take it out of `Dbos.Queue.new/2` and the docs, keep
-the column so the schema stays at migration version 42.
-
 ## Primitives the Phoenix integration wanted
 
 Surfaced building `sample_apps/live_approvals`:
@@ -58,20 +38,25 @@ Surfaced building `sample_apps/live_approvals`:
 - `Dbos.resume/2` is a no-op on `SUCCESS`/`ERROR`, so a workflow that errored while parked has no
   public route back. The only way through is a raw `UPDATE` to `PENDING`.
 
-## `Dbos.Migration` disappears when Ecto arrives after Dbos
-
-`lib/dbos/migration.ex` is wrapped in `if Code.ensure_loaded?(Ecto.Migration)`, evaluated when
-`dbos` compiles. An application that adds `dbos` first and `ecto_sql` second has a compiled `dbos`
-with no `Dbos.Migration` in it, and `mix ecto.migrate` fails with `UndefinedFunctionError` on a
-migration that looks correct. `mix deps.compile dbos --force` fixes it.
-
-Hit three times converting the sample apps. Every new user installing `dbos` into an app that
-already has Ecto is fine; the trap is the other order, and the error names the wrong culprit.
-Options: make the module unconditional and raise a clear message at call time, or detect the
-condition in `mix dbos.gen.migration` and say what to run.
-
 ## Integration suite fails under local Docker
 
 Four tests fail on an arm64 Mac: a stale-image `Dbos.Version` `MatchError`, then `:badrpc` and ETS
 lookup failures between node1, node2 and the runner after a clean rebuild. Unknown whether this is
 local-only. The nightly workflow added in `.github/workflows/integration.yml` will report on it.
+
+## Make the options dispatcher the primary call form
+
+`defworkflow review(id)` generates `review/1` and `review/2`, the second taking a keyword list.
+It routes through `Dbos.Macros.dispatch_workflow/3` to `Dbos.start/3`, which reads a fixed set of
+keys, so `queue_name:` and `delay_ms:` are silently discarded and the workflow starts immediately.
+
+Route through `Dbos.enqueue/3` when `opts` carries `:queue_name`, and `Dbos.start/3` otherwise, so
+one call shape covers starting, queueing and delaying. Raise on unknown keys and on incompatible
+combinations (`delay_ms:` without `queue_name:`, `partition_key:` with `deduplication_id:`).
+
+Inside a workflow the call stays start-and-await, matching the bare call it varies. `Dbos.enqueue/3`
+remains available by name for enqueue-and-continue; it already checkpoints itself, so it needs no
+wrapping step.
+
+Lead the guides with this form. `Dbos.start/3` and `Dbos.enqueue/3` become the escape hatch for
+dispatching by name.

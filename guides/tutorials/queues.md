@@ -39,7 +39,6 @@ children = [
 | `:worker_concurrency` | `nil` | Cap on workflows this engine runs at once for the queue. |
 | `:global_concurrency` | `nil` | Cap across every engine sharing the database. |
 | `:rate_limit` | `nil` | `%{limit: pos_integer, period_ms: pos_integer}`. |
-| `:priority_enabled` | `false` | Records that this queue is used with priorities; surfaced by the admin server. |
 | `:partition_queue` | `false` | See Partitioned queues, below. |
 | `:base_polling_interval_ms` | `1_000` | Starting poll interval for this queue's runner. |
 
@@ -96,8 +95,6 @@ the smaller.
 ## Priority
 
 ```elixir
-Dbos.Queue.new("reports", priority_enabled: true)
-
 Dbos.enqueue(&MyApp.Reports.generate/1, [report_id], queue_name: "reports", priority: 1)
 ```
 
