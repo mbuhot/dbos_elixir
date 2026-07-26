@@ -69,23 +69,59 @@ defmodule Dbos.Supervisor do
   """
   def start_link(opts) do
     name = Keyword.get(opts, :name, Dbos)
+    prepare(opts)
     Supervisor.start_link(__MODULE__, opts, name: process_name(name))
+  end
+
+  # Everything that touches the database at startup — verifying the schema, recording the
+  # application version, registering queues — runs here, in the process calling start_link,
+  # rather than in the supervisor. A caller holding an Ecto.Adapters.SQL.Sandbox connection can
+  # then start an engine: ownership does not reach a supervisor spawned from that process.
+  defp prepare(opts) do
+    config = build_config(opts)
+
+    Dbos.put_config(config)
+    run_migrations(Keyword.get(opts, :migrations, :verify), config)
+    SystemDb.create_application_version(config, config.application_version)
+
+    if config.testing in [:inline, :manual] do
+      Enum.each(config.queues, &SystemDb.register_queue(config, &1))
+    end
+
+    config
   end
 
   @impl true
   def init(opts) do
     name = Keyword.get(opts, :name, Dbos)
-    {db_module, conn} = Keyword.fetch!(opts, :db)
     workflow_entries = resolve_workflow_entries!(opts)
     workflows = Enum.flat_map(workflow_entries, &normalize_workflow_entry/1)
     schedules = Enum.flat_map(workflow_entries, &collect_schedules/1)
+    config = build_config(opts)
+    testing = config.testing
+
+    children =
+      if testing in [:inline, :manual] do
+        testing_children(name, workflows)
+      else
+        full_children(name, workflows, schedules, config, Keyword.get(opts, :queues, []), opts)
+      end
+
+    Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  defp build_config(opts) do
+    name = Keyword.get(opts, :name, Dbos)
+    {db_module, conn} = Keyword.fetch!(opts, :db)
+    workflow_entries = resolve_workflow_entries!(opts)
+    workflows = Enum.flat_map(workflow_entries, &normalize_workflow_entry/1)
 
     lease_sweep_opts = Keyword.get(opts, :lease_sweep, [])
     lease_opts = Keyword.get(opts, :lease, [])
     testing = fetch_testing_mode!(opts)
     queues = [internal_queue() | Keyword.get(opts, :queues, [])]
 
-    config = %Config{
+    %Config{
       name: name,
       db: db_module,
       conn: conn,
@@ -106,20 +142,6 @@ defmodule Dbos.Supervisor do
       testing: testing,
       queues: queues
     }
-
-    Dbos.put_config(config)
-    run_migrations(Keyword.get(opts, :migrations, :verify), config)
-    SystemDb.create_application_version(config, config.application_version)
-
-    children =
-      if testing in [:inline, :manual] do
-        Enum.each(queues, &SystemDb.register_queue(config, &1))
-        testing_children(name, workflows)
-      else
-        full_children(name, workflows, schedules, config, Keyword.get(opts, :queues, []), opts)
-      end
-
-    Supervisor.init(children, strategy: :one_for_one)
   end
 
   defp testing_children(name, workflows) do

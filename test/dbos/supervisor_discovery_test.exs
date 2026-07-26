@@ -45,16 +45,17 @@ defmodule Dbos.SupervisorDiscoveryTest do
   end
 
   test "neither otp_app: nor workflows: raises a clear error naming both" do
-    Process.flag(:trap_exit, true)
     name = Module.concat(__MODULE__, :"Engine#{System.unique_integer([:positive])}")
 
-    {:error, {%ArgumentError{} = error, _stacktrace}} =
-      Dbos.Supervisor.start_link(
-        name: name,
-        db: {Dbos.DB.Postgrex, Dbos.TestConn},
-        executor_id: "exec-#{System.unique_integer([:positive])}",
-        migrations: :skip
-      )
+    error =
+      assert_raise ArgumentError, fn ->
+        Dbos.Supervisor.start_link(
+          name: name,
+          db: {Dbos.DB.Postgrex, Dbos.TestConn},
+          executor_id: "exec-#{System.unique_integer([:positive])}",
+          migrations: :skip
+        )
+      end
 
     assert error.message =~ "otp_app"
     assert error.message =~ "workflows"
