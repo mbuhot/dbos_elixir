@@ -18,10 +18,13 @@ the rows carrying a compensation, and runs each undo by calling the step it name
 checkpoints itself. Nothing is caught; `[:dbos, :compensation, :stuck]` carries the step id to
 `Dbos.fork/3` from. `Dbos.unwind/2` starts one at the deterministic `"<id>-compensate"`.
 
+**Phase 3 is done**: `SystemDb.update_workflow_outcome/3` enqueues the unwind onto the internal
+queue in the same transaction as an `:error` status, guarded by whether the history holds a
+compensation and by the row not being an unwind itself. `Dbos.abort/1` raises `Dbos.AbortError` to
+reach that path deliberately, from a workflow body or a step.
+
 Remaining phases:
 
-3. Triggers: automatic enqueue in the terminal transaction for the exception path, and
-   `Dbos.abort/1`.
 4. `CANCELLING` status, the process-side transition, and lease-sweep pickup.
 5. Descendants named by `getResult`/`enqueue`/`forkWorkflow`: each resolved to a workflow id and
    handed its own compensator, awaited in reverse order.

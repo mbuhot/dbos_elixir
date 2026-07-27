@@ -13,6 +13,7 @@ defmodule Dbos.SystemDb do
 
   require Logger
 
+  alias Dbos.Compensation
   alias Dbos.Config
   alias Dbos.DB.Retry
   alias Dbos.InsertWorkflowResult
@@ -70,7 +71,7 @@ defmodule Dbos.SystemDb do
       0,
       Map.get(params, :workflow_timeout_ms),
       Map.get(params, :workflow_deadline_epoch_ms),
-      nil,
+      Map.get(params, :parent_workflow_id),
       Uuid.v4(),
       Serialization.format_name(),
       delay_until_epoch_ms,
@@ -352,8 +353,60 @@ defmodule Dbos.SystemDb do
   overwrite a row already `:success`/`:error`/`:cancelled`; if the row was
   cancelled underneath this call, raises `Dbos.WorkflowCancelledError` instead of reporting the
   outcome this call intended to write.
+
+  An `:error` outcome also enqueues this workflow's unwind, in the same transaction as the status
+  it is reporting, so a workflow is never `ERROR` with compensable effects and no compensator to
+  reverse them. Only when its history holds at least one compensation, and never for an unwind's
+  own row — see `Dbos.Compensation`.
   """
   def update_workflow_outcome(%Config{} = config, workflow_id, attrs) do
+    {:ok, outcome} =
+      transaction(config, [], fn conn ->
+        tx_config = %{config | conn: conn}
+        result = write_workflow_outcome(tx_config, workflow_id, attrs)
+        maybe_enqueue_unwind(tx_config, workflow_id, Map.fetch!(attrs, :status))
+        result
+      end)
+
+    outcome
+  end
+
+  defp maybe_enqueue_unwind(config, workflow_id, :error) do
+    if unwindable?(config, workflow_id) do
+      insert_enqueued_workflow(config, %{
+        workflow_id: Compensation.workflow_id(workflow_id),
+        name: Compensation.workflow_name(),
+        inputs: [workflow_id],
+        queue_name: Dbos.Queue.internal_queue_name(),
+        parent_workflow_id: workflow_id
+      })
+    end
+
+    :ok
+  end
+
+  defp maybe_enqueue_unwind(_config, _workflow_id, _status), do: :ok
+
+  # Whether this workflow has anything to unwind: at least one checkpoint carrying a compensation,
+  # and not an unwind itself — an undo that declared its own `compensate:` would otherwise start
+  # the recursion the compensation workflow exists to end.
+  defp unwindable?(config, workflow_id) do
+    sql = """
+    SELECT ws.name <> $2 AND EXISTS (
+      SELECT 1 FROM #{table(config, "operation_outputs")} oo
+      WHERE oo.workflow_uuid = ws.workflow_uuid AND oo.ex_compensation IS NOT NULL
+    )
+    FROM #{table(config, "workflow_status")} ws
+    WHERE ws.workflow_uuid = $1
+    """
+
+    case query(config, sql, [workflow_id, Compensation.workflow_name()]) do
+      {:ok, %{rows: [[unwindable]]}} -> unwindable
+      {:ok, %{rows: []}} -> false
+    end
+  end
+
+  defp write_workflow_outcome(config, workflow_id, attrs) do
     status = Map.fetch!(attrs, :status)
     output = Map.get(attrs, :output)
     error = Map.get(attrs, :error)

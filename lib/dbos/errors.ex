@@ -299,6 +299,20 @@ defmodule Dbos.TestingModeAwaitError do
   end
 end
 
+defmodule Dbos.AbortError do
+  @moduledoc """
+  Raised by `Dbos.abort/1` to fail the current workflow deliberately. Its `reason` is any term
+  describing why; it lands in the workflow's recorded error like any other exception, so the
+  workflow reaches `ERROR` and its unwind is enqueued with it.
+  """
+
+  defexception [:reason]
+
+  @impl true
+  def message(%__MODULE__{reason: reason}) when is_binary(reason), do: reason
+  def message(%__MODULE__{reason: reason}), do: "workflow aborted: #{inspect(reason)}"
+end
+
 defmodule Dbos.MaxStepRetriesExceededError do
   @moduledoc "Raised when a step exhausts its configured retry budget, wrapping the last underlying failure."
 

@@ -412,6 +412,17 @@ defmodule Dbos do
   end
 
   @doc """
+  Fails the current workflow deliberately, raising `Dbos.AbortError` with `reason`.
+
+  The workflow reaches `ERROR` and its unwind is enqueued in the same transaction, so every step
+  that declared `compensate:` is reversed. Use it where the business transaction cannot go on but
+  nothing has actually gone wrong — a declined payment, a rejected approval — so the unwind reads
+  as a decision rather than a bug. Callable from a workflow body or a step; the exception
+  propagates either way.
+  """
+  def abort(reason), do: raise(Dbos.AbortError, reason: reason)
+
+  @doc """
   Starts the workflow that unwinds `workflow_id`: every step of its history that declared
   `compensate:` is run in reverse. Returns `{:ok, %Dbos.WorkflowHandle{}}` without waiting for it;
   `Dbos.await/2` blocks for the count of undos it ran.
