@@ -92,6 +92,10 @@ status — rather than `CANCELLED`. It stops at its next checkpoint, unwinds, an
 `CANCELLED` is terminal, so it cannot say whether the effects were ever reversed. `CANCELLING` can,
 which is what lets the engine finish a cancellation whose executor died halfway through.
 
+A workflow parked on a long durable wait is redispatched immediately rather than left until that
+wait's deadline — by the engine it parked on. One parked on a peer waits for that peer's own timer,
+so a cancellation crossing nodes is as prompt as the wait is long.
+
 ## The unwind is a workflow
 
 Each unwind is a durable workflow of its own, `"<workflow_id>-compensate"`, and each undo is one of

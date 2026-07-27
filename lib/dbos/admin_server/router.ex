@@ -54,7 +54,11 @@ defmodule Dbos.AdminServer.Router do
   defp dispatch(engine, :post, ["dbos-global-timeout"], body) do
     config = Dbos.config(engine)
     %{"cutoff_epoch_timestamp_ms" => cutoff} = decode(body)
-    SystemDb.cancel_all_before(config, cutoff)
+
+    config
+    |> SystemDb.cancel_all_before(cutoff)
+    |> then(&Dbos.wake_cancelled(engine, &1))
+
     {204, "", "application/json"}
   end
 

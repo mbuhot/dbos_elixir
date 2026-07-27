@@ -115,6 +115,19 @@ defmodule Dbos.Waits do
     raise Dbos.Waits.Parked, workflow_id: workflow_id
   end
 
+  @doc """
+  Wakes `workflow_id` now if it is parked on this engine, redispatching it ahead of its deadline.
+  A no-op when it is not parked here, so a caller does not have to know which it is.
+
+  This is how a status change reaches a parked workflow: a wait that gave up its process has no
+  process to notify, and its own timer is set for the deadline it was parked on — which may be
+  hours away. Only this engine's parked waits are visible; one parked on a peer is woken by that
+  peer's timer.
+  """
+  def wake_parked(engine, workflow_id) do
+    GenServer.cast(process_name(engine), {:wake, workflow_id})
+  end
+
   @doc "How many waits are currently parked for `engine`."
   def count(engine), do: :ets.info(table_name(engine), :size)
 
@@ -160,6 +173,12 @@ defmodule Dbos.Waits do
     end
 
     {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_cast({:wake, workflow_id}, state) do
+    safely(workflow_id, fn -> wake(state.engine, workflow_id) end)
+    {:noreply, state}
   end
 
   @impl true
@@ -238,12 +257,18 @@ defmodule Dbos.Waits do
     end
   end
 
+  # A CANCELLING row is redispatched alongside a PENDING one: the replay raises
+  # Dbos.WorkflowCancellingError at its first checkpoint check, and the process commits CANCELLED
+  # together with the workflow's unwind. Without that, a cancelled workflow that had parked would
+  # sit until the deadline of the wait it parked on.
+  @redispatched_statuses [:pending, :cancelling]
+
   defp redispatch(engine, workflow_id) do
     config = Dbos.config(engine)
 
     case SystemDb.get_workflow_status(config, workflow_id) do
-      {:ok, %WorkflowStatus{status: :pending, executor_id: executor_id} = workflow}
-      when executor_id == config.executor_id ->
+      {:ok, %WorkflowStatus{status: status, executor_id: executor_id} = workflow}
+      when status in @redispatched_statuses and executor_id == config.executor_id ->
         redispatch_pending(engine, workflow)
 
       {:ok, %WorkflowStatus{}} ->

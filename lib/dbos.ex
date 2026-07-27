@@ -460,7 +460,9 @@ defmodule Dbos do
 
   A workflow that is still running and has compensable effects goes to `CANCELLING` instead: it
   stops at its next checkpoint, reverses what it did, and reaches `CANCELLED` once the unwind is
-  enqueued. `Dbos.await/2` keeps waiting through that, since `CANCELLING` is not terminal. A
+  enqueued. A workflow parked on a durable wait is redispatched immediately rather than left until
+  that wait's deadline — but only by the engine it parked on; one parked on a peer waits for that
+  peer's timer. `Dbos.await/2` keeps waiting through that, since `CANCELLING` is not terminal. A
   workflow with nothing to compensate is cancelled outright.
 
   `opts[:cancel_children]` (default `false`) cancels its descendant tree in the same
@@ -474,10 +476,21 @@ defmodule Dbos do
     Runtime.run_step(StepNames.cancel_workflow(), [], fn ->
       config
       |> cancel_with_descendants(workflow_id, cancel_children?)
-      |> Enum.each(&wake_live_process(engine, &1))
+      |> then(&wake_cancelled(engine, &1))
     end)
 
     :ok
+  end
+
+  @doc false
+  # Every cancellation path ends here: a cancelled workflow has to notice, and where it is has to
+  # be irrelevant to the caller. A live process is sent a wake; a parked wait is redispatched ahead
+  # of the deadline it parked on, which is otherwise how long the cancellation would take to land.
+  def wake_cancelled(engine, workflow_ids) do
+    Enum.each(workflow_ids, fn workflow_id ->
+      wake_live_process(engine, workflow_id)
+      Dbos.Waits.wake_parked(engine, workflow_id)
+    end)
   end
 
   defp cancel_with_descendants(config, workflow_id, false) do
