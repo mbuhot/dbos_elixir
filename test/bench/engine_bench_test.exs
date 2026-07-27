@@ -91,7 +91,7 @@ defmodule Dbos.EngineBenchTest do
 
   test "sequential two-step workflows: latency and Postgres round-trips per workflow" do
     CountingDB.reset()
-    engine = start_engine(db: {CountingDB, Dbos.TestConn})
+    engine = start_engine(db: {CountingDB, {Dbos.DB.Postgrex, Dbos.TestConn}})
 
     {elapsed, :ok} = :timer.tc(fn -> run_sequentially(engine, @sequential_workflows) end)
     counts = CountingDB.counts()
@@ -174,7 +174,7 @@ defmodule Dbos.EngineBenchTest do
 
     engine =
       start_engine(
-        db: {CountingDB, Dbos.TestConn},
+        db: {CountingDB, {Dbos.DB.Postgrex, Dbos.TestConn}},
         queues: [Queue.new("idle-q")]
       )
 

@@ -99,11 +99,51 @@ Under 3% of a whole workflow, and the measurement sits close enough to the noise
 rounds disagree on which arm is faster. It buys the idle savings above, and it is what lets a
 cancellation reach a workflow parked on another node.
 
+## The published DBOS benchmark
+
+`dbos-inc/dbos-workflow-benchmarks` compares DBOS against AWS Step Functions on one workload: a
+workflow that invokes a transaction `i` times, timed server-side around the start-and-await, reported
+as a latency distribution over `n` iterations. The transaction reads a counter for a name and writes
+it back. That workload is ported here, statement for statement, against the same `dbos_hello` table,
+with the application tables in the same database as the system tables — the arrangement their DBOS
+Cloud deployment uses.
+
+Round-trips are exactly linear in the transaction count, which makes them the regression detector:
+
+| Transactions per workflow | Round-trips |
+|---|---|
+| 1 | 15 |
+| 2 | 23 |
+| 5 | 47 |
+| 10 | 87 |
+| 20 | 167 |
+
+`7 + 8i`, holding to the decimal across runs. The eight cover the engine's statements; the body's own
+two go through the `Repo` directly, so a connection carries ten per transaction.
+
+| Statement | Per transaction |
+|---|---|
+| `SELECT status FROM workflow_status` | 1 |
+| `SELECT output, error, function_name, serialization` | 1 |
+| `INSERT operation_outputs` | 1 |
+| `UPDATE workflow_status SET executor_id` | 1 |
+| `BEGIN`/`COMMIT` (the check, then the body) | 4 |
+
+Wall-clock, measured locally, is a floor rather than a comparison against any published figure:
+
+| Transactions | Median | p95 |
+|---|---|---|
+| 1 | ~3.3 ms | ~5 ms |
+| 5 | ~9 ms | ~11 ms |
+| 20 | ~32 ms | ~40 ms |
+
+Fitted through the medians: **~1.5 ms per transaction**, on ~1.6 ms of fixed cost per workflow.
+
 ## Comparing against upstream
 
-Upstream ships no benchmarks and no profiling tests. Its `chaos_tests` run ten thousand workflows
-with a chaos monkey restarting Postgres underneath, asserting every result is correct and timing
-nothing. So the comparison is per-statement, read from its SQL, rather than a number to race:
+Upstream ships no benchmarks in the Go SDK and no profiling tests. Its `chaos_tests` run ten thousand
+workflows with a chaos monkey restarting Postgres underneath, asserting every result is correct and
+timing nothing. So the comparison is per-statement, read from its SQL, rather than a number to race:
 
 | Path | Upstream | Here |
 |---|---|---|
@@ -113,3 +153,11 @@ nothing. So the comparison is per-statement, read from its SQL, rather than a nu
 | Dequeue | version lookup + candidate `SELECT` + claim `UPDATE`, one transaction | same |
 | Success outcome | one guarded `UPDATE` | same |
 | Error outcome | one guarded `UPDATE` | `UPDATE` and the unwind enqueue, one transaction |
+
+A transaction is the one path with a structural difference. Upstream, when the application and system
+tables share a database, runs the replay check, the body and the checkpoint in a single transaction,
+bracketing the body in a `SAVEPOINT` so a failure discards its writes and leaves the transaction
+usable. `deftransaction` commits the replay check on its own, then runs the body and its checkpoint
+together. Both land on ten round-trips per transaction — the savepoint pair against the extra
+`BEGIN`/`COMMIT` — and both make the body atomic with the checkpoint that records it, which is the
+guarantee a transaction exists for.

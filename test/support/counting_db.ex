@@ -1,8 +1,13 @@
 defmodule Dbos.CountingDB do
   @moduledoc """
-  `Dbos.DB` adapter counting the statements and transactions an engine issues, delegating each to
-  `Dbos.DB.Postgrex`. Round-trips to Postgres are `statements + 2 * transactions`, the two being the
+  `Dbos.DB` adapter counting the statements and transactions an engine issues, delegating each to an
+  inner adapter. Round-trips to Postgres are `statements + 2 * transactions`, the two being the
   `BEGIN` and `COMMIT` a transaction adds.
+
+  Configure it with the inner adapter as its connection, so it wraps either backend:
+
+      db: {Dbos.CountingDB, {Dbos.DB.Postgrex, Dbos.TestConn}}
+      db: {Dbos.CountingDB, {Dbos.DB.Ecto, Dbos.TestRepo}}
   """
 
   @behaviour Dbos.DB
@@ -24,13 +29,6 @@ defmodule Dbos.CountingDB do
     :ok
   end
 
-  @doc "Statement counts by the first line of each statement, most frequent first."
-  def tally do
-    @tally
-    |> :ets.tab2list()
-    |> Enum.sort_by(fn {_sql, count} -> -count end)
-  end
-
   @doc "The counts since the last `reset/0`."
   def counts do
     statements = :counters.get(:persistent_term.get(@statements), 1)
@@ -43,12 +41,31 @@ defmodule Dbos.CountingDB do
     }
   end
 
+  @doc "Statement counts by the first line of each statement, most frequent first."
+  def tally do
+    @tally
+    |> :ets.tab2list()
+    |> Enum.sort_by(fn {_sql, count} -> -count end)
+  end
+
   @impl Dbos.DB
-  def query(conn, sql, params) do
+  def query({adapter, conn}, sql, params) do
     :counters.add(:persistent_term.get(@statements), 1, 1)
     record(sql)
-    Dbos.DB.Postgrex.query(conn, sql, params)
+    adapter.query(conn, sql, params)
   end
+
+  @impl Dbos.DB
+  def transaction({adapter, conn}, opts, fun) do
+    :counters.add(:persistent_term.get(@transactions), 1, 1)
+    adapter.transaction(conn, opts, fn tx_conn -> fun.({adapter, tx_conn}) end)
+  end
+
+  @impl Dbos.DB
+  def in_transaction?({adapter, conn}), do: adapter.in_transaction?(conn)
+
+  @impl Dbos.DB
+  def rollback({adapter, conn}, reason), do: adapter.rollback(conn, reason)
 
   # An engine outliving the process that called reset/0 still issues statements — a lease expiring on
   # shutdown, say — and by then the tally table has gone with its owner.
@@ -62,16 +79,4 @@ defmodule Dbos.CountingDB do
   defp fingerprint(sql) do
     sql |> String.split("\n", parts: 2) |> hd() |> String.trim()
   end
-
-  @impl Dbos.DB
-  def transaction(conn, opts, fun) do
-    :counters.add(:persistent_term.get(@transactions), 1, 1)
-    Dbos.DB.Postgrex.transaction(conn, opts, fun)
-  end
-
-  @impl Dbos.DB
-  def in_transaction?(conn), do: Dbos.DB.Postgrex.in_transaction?(conn)
-
-  @impl Dbos.DB
-  def rollback(conn, reason), do: Dbos.DB.Postgrex.rollback(conn, reason)
 end
