@@ -53,6 +53,7 @@ defmodule Dbos.AdminServer.Render do
     %{
       "name" => orphan.name,
       "application_version" => orphan.application_version,
+      "workflow_version" => orphan.workflow_version,
       "reason" => Atom.to_string(orphan.reason),
       "count" => orphan.count,
       "oldest_created_at_epoch_ms" => stringify(orphan.oldest_created_at_epoch_ms),

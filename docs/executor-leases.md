@@ -63,7 +63,7 @@ the old pod's `PENDING` rows are recovered by the sweep once its lease lapses.
 | `node` | Its Erlang node name, for a human reading the table. |
 | `lease_expires_epoch_ms` | The lease is live while this is in the future. |
 | `renewed_at_epoch_ms` | When it last heartbeat. |
-| `ex_capabilities` | JSONB array of `{"name", "version"}` — every workflow name this executor has registered, paired with its `application_version`. |
+| `ex_capabilities` | JSONB array of `{"name", "version"}` — every workflow this executor has registered, paired with the version its `defworkflow` declares (`null` when it declares none). |
 
 `ex_capabilities` is what makes the fleet-wide question answerable from the database alone: "can
 any live executor claim this row?" is a join, not a poll of every node. It is republished on every
@@ -75,22 +75,23 @@ which every consumer reads as *unknown* — an executor mid-upgrade is never ass
 ## Orphan detection
 
 An orphan is a non-queued `PENDING` row that no live executor can claim: no live lease advertises
-its workflow name, or some advertise the name but none at the row's `application_version`. A row
+its workflow name, or some advertise the name but none at the row's `ex_workflow_version`. A row
 whose own executor still holds a live lease is not an orphan — it is being run.
 
-`Dbos.Recovery.orphans/1` returns one entry per `{name, application_version}` group, with a count,
+`Dbos.Recovery.orphans/1` returns one entry per `{name, application_version, workflow_version}`
+group, with a count,
 the oldest row's age, one example id, and the reason. `GET /dbos-orphans` and `mix dbos.orphans`
 serve the same query, and each group also emits `[:dbos, :recovery, :orphaned]`.
 
 ```sql
-SELECT ws.name, ws.application_version, count(*)
+SELECT ws.name, ws.application_version, ws.ex_workflow_version, count(*)
   FROM workflow_status ws
  WHERE ws.status = 'PENDING' AND ws.queue_name IS NULL
    AND NOT EXISTS (SELECT 1 FROM live WHERE live.executor_id = ws.executor_id)
    AND NOT EXISTS (SELECT 1 FROM caps
                     WHERE caps.name = ws.name
-                      AND caps.version IS NOT DISTINCT FROM ws.application_version)
- GROUP BY 1, 2
+                      AND caps.version IS NOT DISTINCT FROM ws.ex_workflow_version)
+ GROUP BY 1, 2, 3
 ```
 
 While any live executor's `ex_capabilities` is `NULL`, the query reports nothing: an unknown
@@ -104,11 +105,18 @@ work rather than with history — 50,000 `PENDING` rows against a 20-executor fl
 
 ## Capability-aware reclaim
 
-A reclaim only reassigns rows whose workflow `name` this engine has registered, and whose
-`application_version` matches this engine's. A fleet is normally heterogeneous — different nodes
-run different workflow modules — so encountering a name this engine does not implement is routine,
-and taking it would strand the row permanently under a healthy lease. An engine with an empty
-registry reclaims nothing.
+A reclaim only reassigns rows this engine can actually run: the row's `name` and its
+`ex_workflow_version` must match one of the `{name, version}` pairs the registry holds. `NULL`
+matches `NULL`, so a workflow declaring no `version:` is claimable by any engine registering its
+name.
+
+A fleet is normally heterogeneous — different nodes run different workflow modules — so
+encountering a name this engine does not implement is routine, and taking it would strand the row
+permanently under a healthy lease. An engine with an empty registry reclaims nothing.
+
+`application_version` plays no part here. It moves on every deploy, which would strand every
+in-flight workflow on every deploy; the declared workflow version is the identity that only moves
+when a body's replay contract does.
 
 ## The reclaim query
 
@@ -118,8 +126,10 @@ UPDATE workflow_status
  WHERE workflow_uuid IN (
    SELECT workflow_uuid FROM workflow_status
     WHERE executor_id = ANY($dead_executor_ids) AND status = 'PENDING' AND queue_name IS NULL
-      AND name = ANY($registered_names)
-      AND application_version = $this_version
+      AND EXISTS (
+        SELECT 1 FROM unnest($names, $versions) AS reg(reg_name, reg_version)
+         WHERE reg_name = name AND ex_workflow_version IS NOT DISTINCT FROM reg_version
+      )
     ORDER BY created_at ASC
     LIMIT $batch_size
     FOR UPDATE SKIP LOCKED

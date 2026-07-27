@@ -235,7 +235,9 @@ defmodule Dbos.Supervisor do
 
   defp resolve_application_version(opts, workflows) do
     Keyword.get(opts, :application_version) || System.get_env("DBOS__APPVERSION") ||
-      Version.compute(Enum.map(workflows, fn {_name, {module, _fun, _arity}} -> module end))
+      Version.compute(
+        Enum.map(workflows, fn {_name, {module, _fun, _arity}, _version} -> module end)
+      )
   end
 
   defp run_migrations(:verify, config), do: Migrator.verify!(config)
@@ -251,10 +253,14 @@ defmodule Dbos.Supervisor do
 
   defp process_name(name), do: Module.concat(name, Supervisor)
 
-  defp normalize_workflow_entry({_name, {_module, _fun, _arity}} = entry), do: [entry]
+  defp normalize_workflow_entry({name, {_module, _fun, _arity} = mfa}), do: [{name, mfa, nil}]
+
+  defp normalize_workflow_entry({_name, {_module, _fun, _arity}, _version} = entry), do: [entry]
 
   defp normalize_workflow_entry(module) when is_atom(module) do
-    Enum.map(module.__dbos_workflows__(), fn {name, mfa, _ast} -> {name, mfa} end)
+    Enum.map(module.__dbos_workflows__(), fn {name, mfa, version, _ast} ->
+      {name, mfa, version}
+    end)
   end
 
   defp collect_schedules(module) when is_atom(module) do

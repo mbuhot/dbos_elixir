@@ -69,7 +69,8 @@ Keyed on `workflow_uuid`. Selected columns:
 | `name` | The registered workflow name recovery dispatches on, independent of module or function. |
 | `inputs` / `output` / `error` | Encoded — see "Opaque columns" below. |
 | `executor_id` | Which executor currently owns this row. |
-| `application_version` | Stamped at start; gates which executor may recover or dequeue this row. |
+| `application_version` | Stamped at start; gates which executor may dequeue this row. |
+| `ex_workflow_version` | The version this workflow's `defworkflow` declares, `NULL` when it declares none; gates which executor may recover this row. |
 | `queue_name` / `queue_partition_key` / `priority` | Present only for a queued workflow. |
 | `deduplication_id` | The unique-slot key for a queue's dedup/debounce mechanism, `NULL` otherwise. |
 | `parent_workflow_id` | Set for a child workflow started from inside another workflow. |

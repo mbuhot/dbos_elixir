@@ -26,12 +26,12 @@ defmodule Dbos.Explain do
       body_fun = Dbos.Macros.body_function_name(fun)
 
       module.__dbos_workflows__()
-      |> Enum.find(fn {_name, {mod, bfun, barity}, _ast} ->
+      |> Enum.find(fn {_name, {mod, bfun, barity}, _version, _ast} ->
         mod == module and bfun == body_fun and barity == arity
       end)
       |> case do
         nil -> {:error, "#{inspect(module)} has no defworkflow #{fun}/#{arity}"}
-        {name, _mfa, ast} -> {:ok, name, ast}
+        {name, _mfa, _version, ast} -> {:ok, name, ast}
       end
     else
       {:error, reason} -> {:error, "could not load #{inspect(module)}: #{inspect(reason)}"}
@@ -50,7 +50,7 @@ defmodule Dbos.Explain do
   end
 
   defp local_workflow_heads(module) do
-    Enum.map(module.__dbos_workflows__(), fn {name, {mod, body_fun, arity}, _ast} ->
+    Enum.map(module.__dbos_workflows__(), fn {name, {mod, body_fun, arity}, _version, _ast} ->
       fun_name =
         body_fun
         |> Atom.to_string()

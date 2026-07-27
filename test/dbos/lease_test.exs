@@ -15,7 +15,8 @@ defmodule Dbos.LeaseTest do
         executor_id: "exec-#{System.unique_integer([:positive])}",
         workflows: [{"add/2", {SampleWorkflows, :add, 2}}],
         migrations: :skip
-      ] ++ extra_opts
+      ]
+      |> Keyword.merge(extra_opts)
 
     start_supervised!({Dbos.Supervisor, opts}, id: name)
     Recovery.await_boot_recovery(name)
@@ -44,12 +45,26 @@ defmodule Dbos.LeaseTest do
   end
 
   test "the lease publishes the workflows this executor can run and at which version" do
+    name =
+      start_engine(
+        application_version: "v1",
+        workflows: [{"add/2", {SampleWorkflows, :add, 2}, "3"}]
+      )
+
+    config = Dbos.config(name)
+
+    lease = SystemDb.get_executor_lease(config, config.executor_id)
+
+    assert lease.capabilities == [%{name: "add/2", version: "3"}]
+  end
+
+  test "a workflow declaring no version publishes a null one" do
     name = start_engine(application_version: "v1")
     config = Dbos.config(name)
 
     lease = SystemDb.get_executor_lease(config, config.executor_id)
 
-    assert lease.capabilities == [%{name: "add/2", version: "v1"}]
+    assert lease.capabilities == [%{name: "add/2", version: nil}]
   end
 
   test "an executor that has never published its capabilities reports none rather than an empty set" do

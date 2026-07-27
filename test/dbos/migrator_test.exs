@@ -87,7 +87,9 @@ defmodule Dbos.MigratorTest do
 
     assert Migrator.create!(config) == :ok
     assert Migrator.verify!(config) == :ok
-    assert Migrator.current_version(config, "extension_migrations") == {:ok, 2}
+
+    assert Migrator.current_version(config, "extension_migrations") ==
+             {:ok, Migrator.expected_extension_version()}
 
     assert %{rows: [["exec-before-upgrade", "v1", nil]]} =
              Postgrex.query!(
@@ -96,17 +98,17 @@ defmodule Dbos.MigratorTest do
                []
              )
 
-    assert %{rows: [["wf-before-upgrade", "PENDING"]]} =
+    assert %{rows: [["wf-before-upgrade", "PENDING", nil]]} =
              Postgrex.query!(
                conn,
-               ~s(SELECT workflow_uuid, status FROM "dbos".workflow_status),
+               ~s(SELECT workflow_uuid, status, ex_workflow_version FROM "dbos".workflow_status),
                []
              )
 
-    assert SystemDb.renew_lease(config, 60_000, capabilities: ["add/2"]) == :ok
+    assert SystemDb.renew_lease(config, 60_000, capabilities: [{"add/2", "3"}]) == :ok
 
     assert SystemDb.get_executor_lease(config, config.executor_id).capabilities == [
-             %{name: "add/2", version: nil}
+             %{name: "add/2", version: "3"}
            ]
 
     stop_database(conn, "dbos_migrator_upgrade_test")

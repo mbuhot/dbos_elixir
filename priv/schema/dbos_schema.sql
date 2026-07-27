@@ -697,3 +697,13 @@ INSERT INTO "dbos".extension_migrations (version) VALUES (1);
 ALTER TABLE "dbos".executor_leases ADD COLUMN IF NOT EXISTS ex_capabilities JSONB;
 
 UPDATE "dbos".extension_migrations SET version = 2;
+
+-- extension migration 3: per-workflow version
+
+ALTER TABLE "dbos".workflow_status ADD COLUMN IF NOT EXISTS ex_workflow_version TEXT;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_workflow_status_reclaim"
+  ON "dbos".workflow_status ("executor_id", "name", "ex_workflow_version")
+  WHERE "status" = 'PENDING' AND "queue_name" IS NULL;
+
+UPDATE "dbos".extension_migrations SET version = 3;

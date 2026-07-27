@@ -1168,12 +1168,12 @@ defmodule Dbos.SystemDbTest do
   end
 
   describe "reclaim_pending_workflows/4 is capability-aware" do
-    test "reassigns only rows whose name is in registered_names", %{config: config} do
+    test "reassigns only rows naming a workflow this executor registers", %{config: config} do
       insert_pending(config, "exec-dead", "wf-alpha", "alpha/1")
       insert_pending(config, "exec-dead", "wf-beta", "beta/1")
 
       reclaimed =
-        SystemDb.reclaim_pending_workflows(config, ["exec-dead"], ["beta/1"])
+        SystemDb.reclaim_pending_workflows(config, ["exec-dead"], [{"beta/1", nil}])
 
       assert Enum.map(reclaimed, & &1.workflow_uuid) == ["wf-beta"]
 
@@ -1184,7 +1184,35 @@ defmodule Dbos.SystemDbTest do
       assert beta_status.executor_id == config.executor_id
     end
 
-    test "an empty registered_names list reclaims nothing rather than matching everything", %{
+    test "leaves a row whose declared version this executor does not register", %{config: config} do
+      insert_pending(config, "exec-dead", "wf-v1", "versioned/1", "1")
+
+      assert SystemDb.reclaim_pending_workflows(config, ["exec-dead"], [{"versioned/1", "2"}]) ==
+               []
+
+      {:ok, status} = SystemDb.get_workflow_status(config, "wf-v1")
+      assert status.executor_id == "exec-dead"
+    end
+
+    test "reassigns a row whose declared version this executor registers", %{config: config} do
+      insert_pending(config, "exec-dead", "wf-v2", "versioned/1", "2")
+
+      reclaimed =
+        SystemDb.reclaim_pending_workflows(config, ["exec-dead"], [{"versioned/1", "2"}])
+
+      assert Enum.map(reclaimed, & &1.workflow_uuid) == ["wf-v2"]
+    end
+
+    test "a row declaring no version is left to an executor registering the name at one", %{
+      config: config
+    } do
+      insert_pending(config, "exec-dead", "wf-undeclared", "versioned/1")
+
+      assert SystemDb.reclaim_pending_workflows(config, ["exec-dead"], [{"versioned/1", "2"}]) ==
+               []
+    end
+
+    test "an empty capability list reclaims nothing rather than matching everything", %{
       config: config
     } do
       insert_pending(config, "exec-dead", "wf-anything", "anything/1")
@@ -1197,27 +1225,31 @@ defmodule Dbos.SystemDbTest do
   end
 
   describe "list_reclaimable_pending_workflow_ids/3 is capability-aware" do
-    test "only lists ids whose name is in registered_names", %{config: config} do
+    test "only lists ids naming a workflow this executor registers", %{config: config} do
       insert_pending(config, "exec-dead", "wf-alpha-2", "alpha/1")
       insert_pending(config, "exec-dead", "wf-beta-2", "beta/1")
 
-      assert SystemDb.list_reclaimable_pending_workflow_ids(config, ["exec-dead"], ["beta/1"]) ==
-               ["wf-beta-2"]
+      assert SystemDb.list_reclaimable_pending_workflow_ids(
+               config,
+               ["exec-dead"],
+               [{"beta/1", nil}]
+             ) == ["wf-beta-2"]
     end
 
-    test "an empty registered_names list returns no ids", %{config: config} do
+    test "an empty capability list returns no ids", %{config: config} do
       insert_pending(config, "exec-dead", "wf-anything-2", "anything/1")
 
       assert SystemDb.list_reclaimable_pending_workflow_ids(config, ["exec-dead"], []) == []
     end
   end
 
-  defp insert_pending(config, executor_id, workflow_id, name) do
+  defp insert_pending(config, executor_id, workflow_id, name, version \\ nil) do
     SystemDb.insert_workflow_status(%{config | executor_id: executor_id}, %{
       workflow_id: workflow_id,
       status: :pending,
       name: name,
-      inputs: [1]
+      inputs: [1],
+      ex_workflow_version: version
     })
   end
 end

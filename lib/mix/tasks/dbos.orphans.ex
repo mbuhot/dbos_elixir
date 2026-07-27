@@ -9,8 +9,8 @@ defmodule Mix.Tasks.Dbos.Orphans do
       mix dbos.orphans --engine MyApp.Dbos
 
   Run this after a deploy. A group here is work that will sit untouched until something that can
-  run it is deployed: either a build registering that workflow name, or one whose
-  `application_version` matches the rows'.
+  run it is deployed: either a build registering that workflow name, or one declaring it at the
+  version the rows carry.
 
   The answer is fleet-wide, read from the capabilities every executor publishes with its lease,
   so it holds regardless of which node the task runs on.
@@ -53,7 +53,16 @@ defmodule Mix.Tasks.Dbos.Orphans do
   defp render([]), do: "No orphaned PENDING workflows: every one of them has a live claimant."
 
   defp render(orphans) do
-    header = ["count", "name", "application_version", "reason", "oldest", "example"]
+    header = [
+      "count",
+      "name",
+      "workflow_version",
+      "application_version",
+      "reason",
+      "oldest",
+      "example"
+    ]
+
     rows = Enum.map(orphans, &row/1)
     widths = widths([header | rows])
 
@@ -65,6 +74,7 @@ defmodule Mix.Tasks.Dbos.Orphans do
     [
       to_string(orphan.count),
       orphan.name,
+      to_string(orphan.workflow_version),
       to_string(orphan.application_version),
       to_string(orphan.reason),
       age(orphan.oldest_created_at_epoch_ms),

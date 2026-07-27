@@ -404,7 +404,7 @@ defmodule Dbos.RecoveryTest do
     refute_received {:declined, _, _}
   end
 
-  test "reports the workflows left behind by an application version this executor does not run",
+  test "reports the workflows left behind by a workflow version this executor does not run",
        %{
          config: config,
          name: name
@@ -416,19 +416,23 @@ defmodule Dbos.RecoveryTest do
       status: :pending,
       name: "add/2",
       inputs: [1, 2],
-      application_version: "v1"
+      application_version: "v1",
+      ex_workflow_version: "1"
     })
 
     watch_declined()
 
     log = capture_log(fn -> Recovery.reclaim(name, ["exec-dead"]) end)
 
-    assert log =~ "1 PENDING workflow(s) named \"add/2\" (version \"v1\", this executor \"v2\")"
+    assert log =~
+             "1 PENDING workflow(s) named \"add/2\" (workflow version \"1\", " <>
+               "application version \"v1\")"
+
     assert log =~ "version_mismatch"
     assert log =~ "wf-old-version"
 
     assert_received {:declined, %{count: 1}, metadata}
-    assert metadata.row_version == "v1"
+    assert metadata.row_version == "1"
     assert metadata.executor_version == "v2"
     assert metadata.reason == :version_mismatch
 

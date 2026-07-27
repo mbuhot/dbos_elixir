@@ -8,8 +8,9 @@ defmodule Dbos.Recovery do
   `await_boot_recovery/1` blocks until the boot pass has finished, which tests need before
   asserting on recovered work.
 
-  Recovery is capability-aware: only workflows whose name this engine has registered are ever
-  reassigned. A deployment is normally heterogeneous, so a name this engine doesn't implement is
+  Recovery is capability-aware: a row is reassigned only to an executor registering its `name` at
+  its declared `version:`, with an undeclared version claimable by any executor registering the
+  name. A deployment is normally heterogeneous, so a workflow this engine doesn't implement is
   left exactly where it is for whichever peer does implement it to claim.
 
   A recovered workflow replays from its checkpoints. A queued one is handed back to its queue
@@ -19,7 +20,7 @@ defmodule Dbos.Recovery do
   ## Declined workflows
 
   A reclaim pass that drains its batch reports what it left behind: every `PENDING` row still
-  owned by a dead executor, grouped by name, the row's `application_version` and a
+  owned by a dead executor, grouped by name, the row's declared workflow version and a
   `t:decline_reason/0`. Each group logs one warning and emits one `[:dbos, :recovery, :declined]`
   event measuring `%{count: n}`, so a population no live executor can claim is a steady signal
   rather than silence.
@@ -46,25 +47,26 @@ defmodule Dbos.Recovery do
 
   @typedoc """
   Why a reclaim pass left a `PENDING` row where it was: this executor has no workflow registered
-  under that name, the row's `application_version` differs from this executor's, or the row was
-  claimable and another transaction held it.
+  under that name, it registers the name at a different declared version, or the row was claimable
+  and another transaction held it.
   """
   @type decline_reason :: :name_not_registered | :version_mismatch | :locked_elsewhere
 
   @typedoc """
   Why no live executor can claim an orphaned group: the fleet holds no live lease at all, no live
-  executor advertises the workflow name, or some advertise the name but none at the row's
-  `application_version`.
+  executor advertises the workflow name, or some advertise the name but none at the row's declared
+  workflow version.
   """
   @type orphan_reason :: :no_live_executors | :name_not_registered | :version_mismatch
 
   @typedoc """
-  One `{name, application_version}` group of `PENDING` rows no live executor can claim, with why,
-  how many, how long the oldest has been waiting, and one id to look at.
+  One `{name, application_version, workflow_version}` group of `PENDING` rows no live executor can
+  claim, with why, how many, how long the oldest has been waiting, and one id to look at.
   """
   @type orphan :: %{
           name: String.t(),
           application_version: String.t() | nil,
+          workflow_version: String.t() | nil,
           reason: orphan_reason(),
           count: non_neg_integer(),
           oldest_created_at_epoch_ms: integer(),
@@ -100,7 +102,7 @@ defmodule Dbos.Recovery do
   """
   def reclaim(engine_name, dead_executor_ids, opts \\ []) do
     config = Dbos.config(engine_name)
-    registered_names = Registry.registered_names(engine_name)
+    capabilities = Registry.capabilities(engine_name)
     metadata = %{engine: engine_name, executor_ids: dead_executor_ids}
 
     Telemetry.span_recovery(metadata, fn ->
@@ -112,13 +114,13 @@ defmodule Dbos.Recovery do
           engine_name,
           config,
           dead_executor_ids,
-          registered_names,
+          capabilities,
           opts,
           MapSet.new(),
           1
         )
 
-      report_declined(outcome, engine_name, config, dead_executor_ids, registered_names, handled)
+      report_declined(outcome, engine_name, config, dead_executor_ids, capabilities, handled)
 
       queued_ids ++ ids
     end)
@@ -170,13 +172,13 @@ defmodule Dbos.Recovery do
          engine_name,
          config,
          dead_executor_ids,
-         registered_names,
+         capabilities,
          opts,
          handled,
          pass
        ) do
     reclaimed =
-      SystemDb.reclaim_pending_workflows(config, dead_executor_ids, registered_names, opts)
+      SystemDb.reclaim_pending_workflows(config, dead_executor_ids, capabilities, opts)
 
     Enum.each(reclaimed, &recover_one(engine_name, config, &1))
 
@@ -187,7 +189,7 @@ defmodule Dbos.Recovery do
       batch_exhausted?(opts, reclaimed) ->
         {ids, handled, :batch_exhausted}
 
-      rescan?(config, dead_executor_ids, registered_names, handled, pass) ->
+      rescan?(config, dead_executor_ids, capabilities, handled, pass) ->
         Process.sleep(@rescan_base_delay_ms * Integer.pow(2, pass - 1))
 
         {rest, handled, outcome} =
@@ -195,7 +197,7 @@ defmodule Dbos.Recovery do
             engine_name,
             config,
             dead_executor_ids,
-            registered_names,
+            capabilities,
             opts,
             handled,
             pass + 1
@@ -208,13 +210,13 @@ defmodule Dbos.Recovery do
     end
   end
 
-  defp rescan?(config, dead_executor_ids, registered_names, handled, pass) do
+  defp rescan?(config, dead_executor_ids, capabilities, handled, pass) do
     pass < @rescan_passes and
       Enum.any?(
         SystemDb.list_reclaimable_pending_workflow_ids(
           config,
           dead_executor_ids,
-          registered_names
+          capabilities
         ),
         &(not MapSet.member?(handled, &1))
       )
@@ -227,25 +229,25 @@ defmodule Dbos.Recovery do
     end
   end
 
-  defp report_declined(:batch_exhausted, _engine, _config, _dead_ids, _names, _handled), do: :ok
+  defp report_declined(:batch_exhausted, _engine, _config, _dead_ids, _caps, _handled), do: :ok
 
-  defp report_declined(:drained, engine_name, config, dead_executor_ids, names, handled) do
+  defp report_declined(:drained, engine_name, config, dead_executor_ids, capabilities, handled) do
     config
     |> SystemDb.list_unclaimed_pending_workflow_groups(
       dead_executor_ids,
-      names,
+      capabilities,
       MapSet.to_list(handled)
     )
-    |> Enum.each(&report_declined_group(engine_name, config, names, &1))
+    |> Enum.each(&report_declined_group(engine_name, config, capabilities, &1))
   end
 
-  defp report_declined_group(engine_name, config, registered_names, group) do
-    reason = decline_reason(group, registered_names)
+  defp report_declined_group(engine_name, config, capabilities, group) do
+    reason = decline_reason(group, capabilities)
 
     Logger.warning(
       "dbos: leaving #{group.count} PENDING workflow(s) named #{inspect(group.name)} " <>
-        "(version #{inspect(group.application_version)}, this executor " <>
-        "#{inspect(config.application_version)}) unclaimed: #{reason}; " <>
+        "(workflow version #{inspect(group.workflow_version)}, application version " <>
+        "#{inspect(group.application_version)}) unclaimed: #{reason}; " <>
         "for example #{group.example_workflow_id}"
     )
 
@@ -253,7 +255,7 @@ defmodule Dbos.Recovery do
       %{
         engine: engine_name,
         name: group.name,
-        row_version: group.application_version,
+        row_version: group.workflow_version,
         executor_version: config.application_version,
         reason: reason
       },
@@ -268,7 +270,7 @@ defmodule Dbos.Recovery do
       %{
         engine: engine_name,
         name: group.name,
-        row_version: group.application_version,
+        row_version: group.workflow_version,
         reason: reason
       },
       group.count
@@ -277,6 +279,7 @@ defmodule Dbos.Recovery do
     %{
       name: group.name,
       application_version: group.application_version,
+      workflow_version: group.workflow_version,
       reason: reason,
       count: group.count,
       oldest_created_at_epoch_ms: group.oldest_created_at_epoch_ms,
@@ -288,10 +291,12 @@ defmodule Dbos.Recovery do
   defp orphan_reason(%{name_advertised: true}), do: :version_mismatch
   defp orphan_reason(%{name_advertised: false}), do: :name_not_registered
 
-  defp decline_reason(%{claimable: true}, _registered_names), do: :locked_elsewhere
+  defp decline_reason(%{claimable: true}, _capabilities), do: :locked_elsewhere
 
-  defp decline_reason(%{name: name}, registered_names) do
-    if name in registered_names, do: :version_mismatch, else: :name_not_registered
+  defp decline_reason(%{name: name}, capabilities) do
+    if Enum.any?(capabilities, fn {registered, _version} -> registered == name end),
+      do: :version_mismatch,
+      else: :name_not_registered
   end
 
   defp clear_one(config, workflow_id) do

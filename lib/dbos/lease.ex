@@ -4,8 +4,8 @@
 # through, so a node that cannot renew also cannot write conflicting checkpoints: this is the
 # property that makes the lease Dbos.LeaseSweep's sole authority for automatic reclaim.
 #
-# Each renewal republishes this executor's capabilities — its registered workflow names, paired
-# with its application_version — into the lease row, which is what lets Dbos.Recovery.orphans/1
+# Each renewal republishes this executor's capabilities — the {name, version} pairs its registry
+# holds — into the lease row, which is what lets Dbos.Recovery.orphans/1
 # answer "can any live executor claim this row?" across the whole fleet.
 #
 # Writes the first lease synchronously in init/1, before Dbos.Recovery starts, so this engine's
@@ -54,7 +54,7 @@ defmodule Dbos.Lease do
 
   defp renew(engine_name) do
     config = Dbos.config(engine_name)
-    capabilities = Dbos.Registry.registered_names(engine_name)
+    capabilities = Dbos.Registry.capabilities(engine_name)
     SystemDb.renew_lease(config, config.lease_ttl_ms, capabilities: capabilities)
   rescue
     error ->

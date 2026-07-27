@@ -28,7 +28,7 @@ defmodule Dbos.SystemDb do
     recovery_attempts updated_at workflow_timeout_ms workflow_deadline_epoch_ms inputs
     deduplication_id priority queue_partition_key owner_xid parent_workflow_id
     class_name config_name serialization delay_until_epoch_ms attributes
-    schedule_name debounce_deadline_epoch_ms is_debounced
+    schedule_name debounce_deadline_epoch_ms is_debounced ex_workflow_version
   )
 
   @enqueue_columns ~w(
@@ -36,7 +36,7 @@ defmodule Dbos.SystemDb do
     assumed_role queue_name deduplication_id priority queue_partition_key
     application_version created_at updated_at recovery_attempts workflow_timeout_ms
     workflow_deadline_epoch_ms parent_workflow_id owner_xid serialization
-    delay_until_epoch_ms
+    delay_until_epoch_ms ex_workflow_version
   )
 
   @doc """
@@ -73,7 +73,8 @@ defmodule Dbos.SystemDb do
       nil,
       Uuid.v4(),
       Serialization.format_name(),
-      delay_until_epoch_ms
+      delay_until_epoch_ms,
+      declared_workflow_version(config, params)
     ]
 
     placeholders = 1..length(@enqueue_columns) |> Enum.map_join(", ", &"$#{&1}")
@@ -91,6 +92,28 @@ defmodule Dbos.SystemDb do
       {:error, error} ->
         handle_enqueue_error(error, workflow_id, params)
     end
+  end
+
+  # The version a workflow declared with `version:` on its `defworkflow`, stamped onto the row so
+  # reclaim can match it against what an executor registers. `attrs` may carry it explicitly, which
+  # is how a fork copies the original's.
+  defp declared_workflow_version(config, attrs) do
+    case Map.fetch(attrs, :ex_workflow_version) do
+      {:ok, version} -> version
+      :error -> Dbos.Registry.version(config.name, Map.get(attrs, :name, ""))
+    end
+  end
+
+  # This engine's registered `(name, version)` capabilities as the parallel text arrays every
+  # `unnest`-joined version predicate takes.
+  defp registry_pairs(%Config{name: engine_name}) do
+    engine_name
+    |> Dbos.Registry.capabilities()
+    |> unzip_capabilities()
+  end
+
+  defp unzip_capabilities(capabilities) do
+    {Enum.map(capabilities, &elem(&1, 0)), Enum.map(capabilities, &elem(&1, 1))}
   end
 
   defp enqueue_status(delay_ms, now) when is_integer(delay_ms) and delay_ms > 0,
@@ -450,27 +473,27 @@ defmodule Dbos.SystemDb do
 
   @doc """
   Atomically reassigns up to `opts[:batch_size]` non-queued `PENDING` rows owned by any of
-  `dead_executor_ids`, and whose `name` is in `registered_names`, to `config.executor_id`.
-  `opts[:batch_size]` defaults to unbounded. Filters by `config.application_version` when set,
-  since this executor can only usefully re-run code matching its own registered version. Queued
-  rows are excluded — the caller clears their queue assignment via
-  `list_queued_pending_workflow_ids/2`/`clear_queue_assignment/2` instead. `FOR UPDATE SKIP
-  LOCKED` lets concurrent callers claim disjoint batches without blocking on each other, the same
-  pattern `dequeue_candidate_ids/4` uses. Returns the reassigned rows as `Dbos.WorkflowStatus`
-  structs.
+  `dead_executor_ids` to `config.executor_id`, restricted to the rows this executor can actually
+  run: `capabilities` is the `{name, version}` pairs it registers, and a row matches when its
+  `name` and `ex_workflow_version` match one of them. `NULL` matches `NULL`, so a workflow that
+  declares no `version:` is claimable by any executor registering its name.
 
-  `registered_names` being `[]` reclaims nothing — an executor with no registered workflows can
-  run none of them, so nothing is claimed rather than the filter being skipped and matching every
-  row.
+  `opts[:batch_size]` defaults to unbounded. Queued rows are excluded — the caller clears their
+  queue assignment via `list_queued_pending_workflow_ids/2`/`clear_queue_assignment/2` instead.
+  `FOR UPDATE SKIP LOCKED` lets concurrent callers claim disjoint batches without blocking on each
+  other, the same pattern `dequeue_candidate_ids/4` uses. Returns the reassigned rows as
+  `Dbos.WorkflowStatus` structs.
+
+  `capabilities` being `[]` reclaims nothing — an executor with no registered workflows can run
+  none of them, so nothing is claimed rather than the filter being skipped and matching every row.
   """
-  def reclaim_pending_workflows(config, dead_executor_ids, registered_names, opts \\ [])
+  def reclaim_pending_workflows(config, dead_executor_ids, capabilities, opts \\ [])
 
   def reclaim_pending_workflows(%Config{}, _dead_executor_ids, [], _opts), do: []
 
-  def reclaim_pending_workflows(%Config{} = config, dead_executor_ids, registered_names, opts) do
-    batch_size = Keyword.get(opts, :batch_size)
-    {version_predicate, version_params, next_index} = application_version_predicate(config, 5)
-    {limit_clause, limit_params} = reclaim_limit_clause(batch_size, next_index)
+  def reclaim_pending_workflows(%Config{} = config, dead_executor_ids, capabilities, opts) do
+    {names, versions} = unzip_capabilities(capabilities)
+    {limit_clause, limit_params} = reclaim_limit_clause(Keyword.get(opts, :batch_size), 6)
 
     sql = """
     UPDATE #{table(config, "workflow_status")}
@@ -478,7 +501,7 @@ defmodule Dbos.SystemDb do
         WHERE workflow_uuid IN (
           SELECT workflow_uuid FROM #{table(config, "workflow_status")}
           WHERE #{reclaim_scope_predicate(2)}
-            AND #{capability_predicate(4, version_predicate)}
+            AND #{capability_predicate(4)}
           ORDER BY created_at ASC
           #{limit_clause}
           FOR UPDATE SKIP LOCKED
@@ -488,8 +511,7 @@ defmodule Dbos.SystemDb do
 
     params =
       [config.executor_id] ++
-        reclaim_scope_params(dead_executor_ids) ++
-        [registered_names] ++ version_params ++ limit_params
+        reclaim_scope_params(dead_executor_ids) ++ [names, versions] ++ limit_params
 
     {:ok, result} = query(config, sql, params)
     Enum.map(result.rows, &WorkflowStatus.from_row/1)
@@ -498,18 +520,21 @@ defmodule Dbos.SystemDb do
   defp reclaim_limit_clause(nil, _index), do: {"", []}
   defp reclaim_limit_clause(batch_size, index), do: {"LIMIT $#{index}", [batch_size]}
 
-  defp application_version_predicate(%{application_version: nil}, index), do: {nil, [], index}
-
-  defp application_version_predicate(%{application_version: version}, index),
-    do: {"application_version = $#{index}", [version], index + 1}
-
   defp reclaim_scope_predicate(index),
     do: "executor_id = ANY($#{index}) AND status = $#{index + 1} AND queue_name IS NULL"
 
-  defp capability_predicate(names_index, nil), do: "name = ANY($#{names_index})"
-
-  defp capability_predicate(names_index, version_predicate),
-    do: "name = ANY($#{names_index}) AND #{version_predicate}"
+  # Whether the scanned row names a workflow this executor registers, at the same declared
+  # version. `IS NOT DISTINCT FROM` is what makes an undeclared workflow — `NULL` on both sides —
+  # claimable rather than permanently stranded.
+  defp capability_predicate(names_index) do
+    """
+    EXISTS (
+      SELECT 1
+      FROM unnest($#{names_index}::text[], $#{names_index + 1}::text[]) AS reg(reg_name, reg_version)
+      WHERE reg_name = name AND ex_workflow_version IS NOT DISTINCT FROM reg_version
+    )\
+    """
+  end
 
   defp reclaim_scope_params(dead_executor_ids),
     do: [dead_executor_ids, Status.to_string(:pending)]
@@ -519,41 +544,38 @@ defmodule Dbos.SystemDb do
   `reclaim_pending_workflows/4` claims from, without taking any lock. A row appears here after a
   reclaim pass exactly when that pass skipped it, either because a concurrent executor holds its
   lock or because a backend that has not finished being torn down still does. Filtered by
-  `registered_names` the same way `reclaim_pending_workflows/4` is; `[]` returns no ids rather
-  than skipping the filter.
+  `capabilities` the same way `reclaim_pending_workflows/4` is; `[]` returns no ids rather than
+  skipping the filter.
   """
-  def list_reclaimable_pending_workflow_ids(config, dead_executor_ids, registered_names)
+  def list_reclaimable_pending_workflow_ids(config, dead_executor_ids, capabilities)
 
   def list_reclaimable_pending_workflow_ids(%Config{}, _dead_executor_ids, []), do: []
 
-  def list_reclaimable_pending_workflow_ids(
-        %Config{} = config,
-        dead_executor_ids,
-        registered_names
-      ) do
-    {version_predicate, version_params, _next_index} = application_version_predicate(config, 4)
+  def list_reclaimable_pending_workflow_ids(%Config{} = config, dead_executor_ids, capabilities) do
+    {names, versions} = unzip_capabilities(capabilities)
 
     sql = """
     SELECT workflow_uuid FROM #{table(config, "workflow_status")}
     WHERE #{reclaim_scope_predicate(1)}
-      AND #{capability_predicate(3, version_predicate)}
+      AND #{capability_predicate(3)}
     """
 
-    params = reclaim_scope_params(dead_executor_ids) ++ [registered_names] ++ version_params
+    params = reclaim_scope_params(dead_executor_ids) ++ [names, versions]
     {:ok, result} = query(config, sql, params)
     Enum.map(result.rows, fn [id] -> id end)
   end
 
   @doc """
   Every non-queued `PENDING` row owned by any of `dead_executor_ids` that a reclaim pass left
-  behind, grouped by `{name, application_version, claimable}` with a count and one example id.
+  behind, grouped by `{name, application_version, workflow_version, claimable}` with a count and
+  one example id.
 
   The unfiltered sibling of `list_reclaimable_pending_workflow_ids/3`: it scans exactly the rows
-  `reclaim_pending_workflows/4` scans, drops the `registered_names` and `config.application_version`
-  filters from the `WHERE` clause, and reports them as the `claimable` boolean instead — the same
-  predicate the two claiming queries apply, so a row reported as `claimable` is one this executor
-  could have taken. `handled_workflow_ids` are excluded, so rows the caller just reclaimed and
-  redispatched are not reported against themselves.
+  `reclaim_pending_workflows/4` scans, drops the `capabilities` filter from the `WHERE` clause,
+  and reports it as the `claimable` boolean instead — the same predicate the two claiming queries
+  apply, so a row reported as `claimable` is one this executor could have taken.
+  `handled_workflow_ids` are excluded, so rows the caller just reclaimed and redispatched are not
+  reported against themselves.
 
   Aggregating in Postgres keeps one row per group on the wire however large the left-behind
   population grows.
@@ -561,31 +583,38 @@ defmodule Dbos.SystemDb do
   def list_unclaimed_pending_workflow_groups(
         %Config{} = config,
         dead_executor_ids,
-        registered_names,
+        capabilities,
         handled_workflow_ids
       ) do
-    {version_predicate, version_params, next_index} = application_version_predicate(config, 4)
+    {names, versions} = unzip_capabilities(capabilities)
 
     sql = """
-    SELECT name, application_version,
-           COALESCE(#{capability_predicate(3, version_predicate)}, false) AS claimable,
+    SELECT name, application_version, ex_workflow_version,
+           #{capability_predicate(3)} AS claimable,
            count(*), min(workflow_uuid)
     FROM #{table(config, "workflow_status")}
     WHERE #{reclaim_scope_predicate(1)}
-      AND NOT (workflow_uuid = ANY($#{next_index}))
-    GROUP BY 1, 2, 3
+      AND NOT (workflow_uuid = ANY($5))
+    GROUP BY 1, 2, 3, 4
     """
 
     params =
-      reclaim_scope_params(dead_executor_ids) ++
-        [registered_names] ++ version_params ++ [handled_workflow_ids]
+      reclaim_scope_params(dead_executor_ids) ++ [names, versions, handled_workflow_ids]
 
     {:ok, result} = query(config, sql, params)
 
-    Enum.map(result.rows, fn [name, application_version, claimable, count, example_id] ->
+    Enum.map(result.rows, fn [
+                               name,
+                               application_version,
+                               workflow_version,
+                               claimable,
+                               count,
+                               example_id
+                             ] ->
       %{
         name: name,
         application_version: application_version,
+        workflow_version: workflow_version,
         claimable: claimable,
         count: count,
         example_workflow_id: example_id
@@ -617,9 +646,9 @@ defmodule Dbos.SystemDb do
   checkpoints.
 
   `opts[:capabilities]` publishes what this executor can run as a JSON array of
-  `{"name", "version"}` objects — every registered workflow name paired with this executor's
-  `application_version` — so `list_orphan_pending_workflow_groups/1` can answer "can any live
-  executor claim this row?" for the whole fleet. Omitted, the column is written `NULL`, which
+  `{"name", "version"}` objects — the `{name, version}` pairs it registers, the same identity
+  reclaim matches a row against — so `list_orphan_pending_workflow_groups/1` can answer "can any
+  live executor claim this row?" for the whole fleet. Omitted, the column is written `NULL`, which
   reads as "capabilities unknown" rather than "runs nothing".
   """
   def renew_lease(%Config{} = config, ttl_ms, opts \\ []) do
@@ -644,18 +673,18 @@ defmodule Dbos.SystemDb do
       to_string(node()),
       now + ttl_ms,
       now,
-      encoded_capabilities(config, Keyword.get(opts, :capabilities))
+      encoded_capabilities(Keyword.get(opts, :capabilities))
     ]
 
     query(config, sql, params)
     :ok
   end
 
-  defp encoded_capabilities(_config, nil), do: nil
+  defp encoded_capabilities(nil), do: nil
 
-  defp encoded_capabilities(config, names) do
-    names
-    |> Enum.map(&%{"name" => &1, "version" => config.application_version})
+  defp encoded_capabilities(capabilities) do
+    capabilities
+    |> Enum.map(fn {name, version} -> %{"name" => name, "version" => version} end)
     |> JSON.encode!()
   end
 
@@ -714,13 +743,14 @@ defmodule Dbos.SystemDb do
 
   @doc """
   Every non-queued `PENDING` row no live executor in the fleet can claim, grouped by
-  `{name, application_version}` with a count, the oldest `created_at`, one example id, and
-  whether any live executor advertises that workflow name at all.
+  `{name, application_version, workflow_version}` with a count, the oldest `created_at`, one
+  example id, and whether any live executor advertises that workflow name at all.
 
-  A lease counts as live when it expires after now. Its `ex_capabilities` is the `(name, version)`
-  set that executor accepts; a `NULL` there means the executor has not published its capabilities
-  yet, and is read as "could claim anything" so a fleet mid-upgrade reports no orphans rather than
-  false ones. A row whose own executor holds a live lease is excluded — it is being run, not
+  A lease counts as live when it expires after now. Its `ex_capabilities` is the
+  `(name, declared version)` set that executor accepts, matched against the row's own
+  `ex_workflow_version` — the identity `reclaim_pending_workflows/4` claims on. A `NULL` there
+  means the executor has not published its capabilities yet, and is read as "could claim
+  anything" so a fleet mid-upgrade reports no orphans rather than false ones. A row whose own executor holds a live lease is excluded — it is being run, not
   waiting for a claimant.
 
   Also returns the number of live leases, so a caller can tell an empty fleet apart from a fleet
@@ -748,7 +778,7 @@ defmodule Dbos.SystemDb do
       FROM live, jsonb_to_recordset(live.ex_capabilities) AS cap(name text, version text)
       WHERE live.ex_capabilities IS NOT NULL
     )
-    SELECT ws.name, ws.application_version,
+    SELECT ws.name, ws.application_version, ws.ex_workflow_version,
            EXISTS (SELECT 1 FROM caps WHERE caps.name = ws.name) AS name_advertised,
            count(*), min(ws.created_at), min(ws.workflow_uuid),
            (SELECT count(*) FROM live) AS live_executors
@@ -759,10 +789,10 @@ defmodule Dbos.SystemDb do
       AND NOT EXISTS (
         SELECT 1 FROM caps
         WHERE caps.name = ws.name
-          AND caps.version IS NOT DISTINCT FROM ws.application_version
+          AND caps.version IS NOT DISTINCT FROM ws.ex_workflow_version
       )
-    GROUP BY 1, 2, 3, 7
-    ORDER BY 4 DESC
+    GROUP BY 1, 2, 3, 4, 8
+    ORDER BY 5 DESC
     """
 
     {:ok, result} = query(config, sql, [Status.to_string(:pending), now])
@@ -770,6 +800,7 @@ defmodule Dbos.SystemDb do
     Enum.map(result.rows, fn [
                                name,
                                application_version,
+                               workflow_version,
                                name_advertised,
                                count,
                                oldest_created_at,
@@ -779,6 +810,7 @@ defmodule Dbos.SystemDb do
       %{
         name: name,
         application_version: application_version,
+        workflow_version: workflow_version,
         name_advertised: name_advertised,
         count: count,
         oldest_created_at_epoch_ms: oldest_created_at,
@@ -1098,7 +1130,8 @@ defmodule Dbos.SystemDb do
   defp fetch_forkable_workflow!(config, workflow_id) do
     sql = """
     SELECT name, authenticated_user, assumed_role, authenticated_roles, application_version,
-           application_id, inputs, serialization, class_name, config_name, attributes
+           application_id, inputs, serialization, class_name, config_name, attributes,
+           ex_workflow_version
     FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1
     """
 
@@ -1122,7 +1155,8 @@ defmodule Dbos.SystemDb do
            serialization,
            class_name,
            config_name,
-           attributes
+           attributes,
+           ex_workflow_version
          ],
          new_workflow_id,
          queue_name,
@@ -1135,8 +1169,9 @@ defmodule Dbos.SystemDb do
         (workflow_uuid, status, name, queue_name, authenticated_user, assumed_role,
          authenticated_roles, executor_id, application_version, application_id, created_at,
          recovery_attempts, updated_at, inputs, owner_xid, class_name, config_name, serialization,
-         attributes, forked_from)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+         attributes, forked_from, ex_workflow_version)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+            $20, $21)
     """
 
     params = [
@@ -1159,7 +1194,8 @@ defmodule Dbos.SystemDb do
       config_name,
       serialization,
       attributes,
-      original_workflow_id
+      original_workflow_id,
+      ex_workflow_version
     ]
 
     {:ok, _result} = query(config, sql, params)
@@ -1902,6 +1938,12 @@ defmodule Dbos.SystemDb do
     UPDATE #{table(config, "workflow_status")}
         SET status = $1, application_version = $2, executor_id = $3, started_at_epoch_ms = $4,
             rate_limited = $5,
+            ex_workflow_version = (
+                SELECT reg.version
+                FROM unnest($8::text[], $9::text[]) AS reg(name, version)
+                WHERE reg.name = #{table(config, "workflow_status")}.name
+                LIMIT 1
+            ),
             workflow_deadline_epoch_ms = CASE
                 WHEN workflow_timeout_ms IS NOT NULL AND workflow_deadline_epoch_ms IS NULL
                 THEN $4 + workflow_timeout_ms
@@ -1911,6 +1953,8 @@ defmodule Dbos.SystemDb do
         RETURNING name, inputs, serialization, config_name
     """
 
+    {names, versions} = registry_pairs(config)
+
     params = [
       Status.to_string(:pending),
       config.application_version,
@@ -1918,7 +1962,9 @@ defmodule Dbos.SystemDb do
       now,
       rate_limited,
       workflow_id,
-      Status.to_string(:enqueued)
+      Status.to_string(:enqueued),
+      names,
+      versions
     ]
 
     case query(config, sql, params) do
@@ -1986,12 +2032,17 @@ defmodule Dbos.SystemDb do
       Map.get(attrs, :schedule_name),
       Map.get(attrs, :debounce_deadline_epoch_ms),
       Map.get(attrs, :is_debounced, false),
+      declared_workflow_version(config, attrs),
       Status.to_string(:enqueued),
       Status.to_string(:delayed),
       recovery_increment
     ]
 
-    placeholders = 1..length(@insert_workflow_status_columns) |> Enum.map_join(", ", &"$#{&1}")
+    column_count = length(@insert_workflow_status_columns)
+    placeholders = 1..column_count |> Enum.map_join(", ", &"$#{&1}")
+    enqueued = "$#{column_count + 1}"
+    delayed = "$#{column_count + 2}"
+    increment = "$#{column_count + 3}"
 
     sql = """
     INSERT INTO #{table(config, "workflow_status")} (#{Enum.join(@insert_workflow_status_columns, ", ")})
@@ -1999,12 +2050,13 @@ defmodule Dbos.SystemDb do
     ON CONFLICT (workflow_uuid)
         DO UPDATE SET
             recovery_attempts = CASE
-                WHEN EXCLUDED.status NOT IN ($30, $31) THEN workflow_status.recovery_attempts + $32
+                WHEN EXCLUDED.status NOT IN (#{enqueued}, #{delayed})
+                THEN workflow_status.recovery_attempts + #{increment}
                 ELSE workflow_status.recovery_attempts
             END,
             updated_at = EXCLUDED.updated_at,
             executor_id = CASE
-                WHEN EXCLUDED.status IN ($30, $31) THEN workflow_status.executor_id
+                WHEN EXCLUDED.status IN (#{enqueued}, #{delayed}) THEN workflow_status.executor_id
                 ELSE EXCLUDED.executor_id
             END
         RETURNING recovery_attempts, status, name, queue_name, queue_partition_key, workflow_timeout_ms, workflow_deadline_epoch_ms, owner_xid

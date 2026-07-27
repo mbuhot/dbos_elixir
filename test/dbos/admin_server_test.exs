@@ -232,7 +232,7 @@ defmodule Dbos.AdminServerTest do
 
   test "GET /dbos-orphans reports a workflow no live executor can run, with why" do
     engine =
-      start_engine([{"add/2", {SampleWorkflows, :add, 2}}],
+      start_engine([{"add/2", {SampleWorkflows, :add, 2}, "2"}],
         application_version: "v1",
         lease_sweep: [enabled: false]
       )
@@ -242,13 +242,20 @@ defmodule Dbos.AdminServerTest do
 
     SystemDb.insert_workflow_status(
       %{config | executor_id: "exec-gone", application_version: "v0"},
-      %{workflow_id: "wf-admin-orphan", status: :pending, name: "add/2", inputs: [1, 2]}
+      %{
+        workflow_id: "wf-admin-orphan",
+        status: :pending,
+        name: "add/2",
+        inputs: [1, 2],
+        ex_workflow_version: "1"
+      }
     )
 
     assert {200, body} = get(port, "/dbos-orphans")
 
     assert [orphan] = JSON.decode!(body)
     assert orphan["name"] == "add/2"
+    assert orphan["workflow_version"] == "1"
     assert orphan["application_version"] == "v0"
     assert orphan["reason"] == "version_mismatch"
     assert orphan["count"] == 1

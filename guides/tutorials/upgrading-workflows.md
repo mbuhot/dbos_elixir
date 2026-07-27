@@ -27,9 +27,8 @@ the previous deploy, so upgrade safety stays your call.
 
 ## Application version
 
-Every workflow records the `application_version` it started under. Recovery and dequeue use it to
-decide which running executor may pick that workflow back up. It resolves once, at
-`Dbos.Supervisor` boot:
+Every workflow records the `application_version` it started under. Dequeue uses it to decide which
+running executor may claim a queued workflow. It resolves once, at `Dbos.Supervisor` boot:
 
 1. the `:application_version` option, if given;
 2. else the `DBOS__APPVERSION` environment variable;
@@ -46,27 +45,77 @@ Pin it explicitly for a real release. The computed fallback moves whenever any r
 module's compiled code changes, which makes "which version is this" hard to answer from the outside;
 a git SHA or release tag you control answers it directly.
 
-Two places gate on it:
+One place gates on it: **dequeue** — an executor claims queued workflows matching its own version,
+and an executor running the most recently booted version also claims workflows that carry no
+version at all.
 
-- **Dequeue** — an executor claims queued workflows matching its own version. An executor running
-  the most recently booted version also claims workflows that carry no version at all.
-- **Reclaim** — a dead executor's workflows are taken over only by a live executor whose version
-  matches theirs.
+Recovery gates on the workflow's own version instead, below.
 
-So bumping the version leaves an in-flight workflow started under the old version waiting until an
-executor stamped with its version shows up to run it.
+## Workflow version
 
-## Three ways to ship a change safely
+A workflow declares its own version, and recovery claims a `PENDING` row only on an executor
+registering that name at that version:
 
-### 1. Bump `application_version`
+```elixir
+defworkflow charge(order_id), name: "MyApp.Billing.charge", version: "2" do
+  ...
+end
+```
 
-Old in-flight workflows keep waiting for an executor stamped with their own version — the *old*
-deployment, kept running until its workflows drain.
+| The row declares | An executor registering the name at | Recovery |
+|---|---|---|
+| `"2"` | `"2"` | Claims it |
+| `"2"` | `"1"`, or nothing | Leaves it |
+| nothing | anything | Claims it |
+
+`version:` is optional, and omitting it is the right default for most workflows: a deploy that
+changes anything else in the application still recovers them. Declare one on a workflow whose body
+you are about to change in a way the table above calls breaking, so instances mid-flight under the
+old body wait for the old build rather than crashing against the new one.
+
+Bumping the version is the developer's call, exactly as keeping the body deterministic is. Nothing
+is computed or inferred — the engine records what it is told.
+
+`mix dbos.orphans` reports any group left with no executor able to claim it, so a version bumped
+without a build still running the old one is visible rather than silent.
+
+## Four ways to ship a change safely
+
+### 1. Bump the workflow's `version:`
+
+Old in-flight instances of *that one workflow* wait for a build still registering the old version;
+every other workflow keeps recovering across the deploy untouched.
+
+```elixir
+defworkflow process_order(order_id, amount),
+  name: "MyApp.Checkout.process_order",
+  version: "2" do
+  # the changed body
+end
+```
+
+Keep the previous build running until its instances drain, then retire it:
+
+```elixir
+{:ok, remaining} =
+  Dbos.Client.list(Dbos.config(),
+    name: "MyApp.Checkout.process_order",
+    status: [:pending]
+  )
+```
+
+Cost is the same two-fleet overlap as bumping `application_version`, narrowed to the workflows that
+actually changed.
+
+### 2. Bump `application_version`
+
+This holds back *queued* work: an `ENQUEUED` row is dequeued by an executor at its own version, so
+a `v1` fleet keeps draining the `v1` queue while `v2` takes new arrivals.
 
 ```mermaid
 flowchart LR
     subgraph "old fleet — application_version = v1"
-        A["in-flight workflows, version = v1"]
+        A["queued workflows, version = v1"]
     end
     subgraph "new fleet — application_version = v2"
         B["new workflows, version = v2"]
@@ -76,8 +125,7 @@ flowchart LR
 ```
 
 1. Ship the new code as `v2`, running *alongside* the still-running `v1` fleet.
-2. New workflows start under `v2`; `v1` executors keep recovering and dequeuing their own
-   in-flight `v1` workflows.
+2. New workflows start under `v2`; `v1` executors keep dequeuing their own queued `v1` workflows.
 3. Decommission `v1` once it has no unfinished workflows left:
 
 ```elixir
@@ -88,11 +136,16 @@ flowchart LR
   )
 ```
 
-Cost: two versions of the application run at once for as long as the oldest in-flight workflow
-takes to finish. Start the `v2` fleet deliberately — whichever version boots first becomes "latest"
-and starts absorbing `NULL`-version rows.
+A workflow already running — `PENDING`, off its queue — is recovered on the workflow version, so
+`v2` picks it up regardless of the fleet version it started under. That is the point: a deploy
+should not strand work whose body it can still replay. Combine this with strategy 1 on the
+workflows whose bodies actually changed.
 
-### 2. A new workflow name
+Cost: two versions of the application run at once for as long as the oldest queued workflow takes
+to start. Start the `v2` fleet deliberately — whichever version boots first becomes "latest" and
+starts absorbing `NULL`-version rows.
+
+### 3. A new workflow name
 
 Give the changed workflow a new `name:`, leaving the existing one in place and registered. Old
 in-flight instances keep dispatching under the old name to the old body; every new invocation goes
@@ -111,7 +164,7 @@ end
 Both bodies live in one deployed version, so no parallel fleet is needed. The cost is code you keep
 around until the old name's last instance drains, plus a naming scheme to track.
 
-### 3. A patch
+### 4. A patch
 
 `Dbos.patch/1` inserts new steps into a workflow body under one version and one name. It returns a
 boolean: `true` for code taking the new path, `false` for an existing instance whose replay must
@@ -175,7 +228,8 @@ delete the line.
 
 | Strategy | In-flight workflow's fate | Cost |
 |---|---|---|
-| Bump `application_version` | Waits for an executor still running the old version; runs to completion unchanged | Run two fleets until the old one drains |
+| Bump the workflow's `version:` | Waits for a build still registering that name at its own version; every other workflow recovers as normal | Run two builds until that workflow drains |
+| Bump `application_version` | A queued one waits for an executor still running the old version; a running one is recovered by either | Run two fleets until the old one drains |
 | New workflow name | Keeps dispatching to the untouched old body under the old name | Keep the old function and name registered until it drains |
 | Patch (`Dbos.patch/1`) | Sees `false` at the patch point and skips the new step, keeping its recorded sequence | Keep the check in the code until every pre-patch instance drains |
 | Change the workflow in place | `Dbos.UnexpectedStepError` on its next step, or a decode failure on a changed struct shape | Broken workflow, manual recovery |

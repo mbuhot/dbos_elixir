@@ -124,7 +124,7 @@ defmodule Dbos.Macros do
     quote do
       unquote_splicing(workflow_asts)
 
-      @doc "This module's registered workflows: `[{name, {module, function, arity}}]`."
+      @doc "This module's registered workflows: `[{name, {module, function, arity}, version, body_ast}]`."
       def __dbos_workflows__, do: unquote(Macro.escape(workflows_meta))
 
       @doc "This module's registered cron schedules: `[%{schedule_name:, workflow_name:, cron:, ...}]`."
@@ -179,6 +179,13 @@ defmodule Dbos.Macros do
   Runs the determinism check over the body at compile time. Does not support a `when` guard
   on the head (a workflow's name must map to exactly one deterministic body — see
   `docs/determinism.md`); does support default arguments.
+
+  `version:` declares this workflow's own replay version, a string. Recovery claims a `PENDING`
+  row only on an executor registering the same name at the same version, so a deploy that leaves
+  this workflow's definition alone keeps recovering its in-flight instances however much the rest
+  of the application changed. Bump it when a change to the body breaks replay of the version
+  before it. Omitted, the workflow is claimable by any executor registering its name — see
+  [Upgrading Workflows](upgrading-workflows.md).
 
   `schedule:` declares this workflow as cron-scheduled (`Dbos.Scheduler`, `workflow_schedules`).
   Either a bare cron string (`"0 * * * * *"`,
@@ -328,7 +335,7 @@ defmodule Dbos.Macros do
 
     workflow_defs
     |> Enum.zip(workflows_meta)
-    |> Enum.each(fn {{_call, _opts, line, _doc}, {name, mfa, _block}} ->
+    |> Enum.each(fn {{_call, _opts, line, _doc}, {name, mfa, _version, _block}} ->
       State.add_entry(env.module, %{
         kind: :workflow,
         name: name,
@@ -355,6 +362,7 @@ defmodule Dbos.Macros do
     reject_guard!(call, env, line)
     {fun_name, args, arity} = workflow_head_info(call)
     name = fetch_required_name!(extra_opts, fun_name, arity, env, line)
+    version = fetch_version!(extra_opts, fun_name, arity, env, line)
 
     Dbos.Determinism.check!(block, %{env: env, workflow_name: name, repo: repo})
 
@@ -388,7 +396,22 @@ defmodule Dbos.Macros do
 
     schedule_meta = build_schedule_meta(Keyword.get(extra_opts, :schedule), name)
 
-    {ast, {name, {env.module, body_fun, arity}, block}, schedule_meta}
+    {ast, {name, {env.module, body_fun, arity}, version, block}, schedule_meta}
+  end
+
+  defp fetch_version!(extra_opts, fun_name, arity, env, line) do
+    case Keyword.get(extra_opts, :version) do
+      version when is_binary(version) or is_nil(version) ->
+        version
+
+      other ->
+        raise CompileError,
+          file: env.file,
+          line: line,
+          description:
+            "defworkflow #{fun_name}/#{arity}'s version: must be a string literal, got: " <>
+              Macro.to_string(other)
+    end
   end
 
   defp doc_attribute_ast(nil), do: nil

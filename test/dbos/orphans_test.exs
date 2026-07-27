@@ -13,7 +13,7 @@ defmodule Dbos.OrphansTest do
       db: {Dbos.DB.Postgrex, Dbos.TestConn},
       executor_id: "exec-live-#{System.unique_integer([:positive])}",
       application_version: "v1",
-      workflows: [{"add/2", {SampleWorkflows, :add, 2}}],
+      workflows: [{"add/2", {SampleWorkflows, :add, 2}, "2"}],
       lease_sweep: [enabled: false],
       migrations: :skip
     ]
@@ -31,7 +31,8 @@ defmodule Dbos.OrphansTest do
       workflow_id: workflow_id,
       status: :pending,
       name: attrs.name,
-      inputs: [1, 2]
+      inputs: [1, 2],
+      ex_workflow_version: Map.get(attrs, :workflow_version)
     })
   end
 
@@ -74,13 +75,15 @@ defmodule Dbos.OrphansTest do
     insert_pending(config, "wf-old-version", %{
       executor_id: "exec-gone",
       application_version: "v0",
-      name: "add/2"
+      name: "add/2",
+      workflow_version: "1"
     })
 
     orphan = group(Recovery.orphans(engine), "add/2")
 
     assert orphan.reason == :version_mismatch
     assert orphan.count == 1
+    assert orphan.workflow_version == "1"
     assert orphan.application_version == "v0"
     assert orphan.example_workflow_id == "wf-old-version"
   end
@@ -92,7 +95,8 @@ defmodule Dbos.OrphansTest do
     insert_pending(config, "wf-claimable", %{
       executor_id: "exec-gone",
       application_version: "v1",
-      name: "add/2"
+      name: "add/2",
+      workflow_version: "2"
     })
 
     assert group(Recovery.orphans(engine), "add/2") == nil
@@ -102,12 +106,13 @@ defmodule Dbos.OrphansTest do
     engine: engine,
     config: config
   } do
-    lease(config, "exec-busy", ttl_ms: 60_000, capabilities: ["something_else/0"])
+    lease(config, "exec-busy", ttl_ms: 60_000, capabilities: [{"something_else/0", nil}])
 
     insert_pending(config, "wf-running", %{
       executor_id: "exec-busy",
       application_version: "v0",
-      name: "add/2"
+      name: "add/2",
+      workflow_version: "1"
     })
 
     assert group(Recovery.orphans(engine), "add/2") == nil
@@ -120,7 +125,8 @@ defmodule Dbos.OrphansTest do
     insert_pending(config, "wf-during-upgrade", %{
       executor_id: "exec-gone",
       application_version: "v0",
-      name: "add/2"
+      name: "add/2",
+      workflow_version: "1"
     })
 
     assert group(Recovery.orphans(engine), "add/2") == nil
@@ -130,12 +136,13 @@ defmodule Dbos.OrphansTest do
     engine: engine,
     config: config
   } do
-    lease(config, "exec-expired", ttl_ms: -1, capabilities: ["add/2"])
+    lease(config, "exec-expired", ttl_ms: -1, capabilities: [{"add/2", "1"}])
 
     insert_pending(config, "wf-expired-peer", %{
       executor_id: "exec-gone",
       application_version: "v0",
-      name: "add/2"
+      name: "add/2",
+      workflow_version: "1"
     })
 
     assert group(Recovery.orphans(engine), "add/2").reason == :version_mismatch
@@ -149,7 +156,8 @@ defmodule Dbos.OrphansTest do
       insert_pending(config, "wf-group-#{index}", %{
         executor_id: "exec-gone",
         application_version: "v0",
-        name: "add/2"
+        name: "add/2",
+        workflow_version: "1"
       })
     end
 
@@ -180,14 +188,15 @@ defmodule Dbos.OrphansTest do
     insert_pending(config, "wf-telemetry", %{
       executor_id: "exec-gone",
       application_version: "v0",
-      name: "add/2"
+      name: "add/2",
+      workflow_version: "1"
     })
 
     Recovery.orphans(engine)
 
     assert_receive {:orphaned, %{count: 1}, metadata}
     assert metadata.name == "add/2"
-    assert metadata.row_version == "v0"
+    assert metadata.row_version == "1"
     assert metadata.reason == :version_mismatch
   end
 
@@ -198,7 +207,8 @@ defmodule Dbos.OrphansTest do
     insert_pending(config, "wf-fleet-down", %{
       executor_id: "exec-gone",
       application_version: "v1",
-      name: "add/2"
+      name: "add/2",
+      workflow_version: "2"
     })
 
     SystemDb.expire_lease(config)
@@ -225,7 +235,8 @@ defmodule Dbos.OrphansTest do
       insert_pending(config, "wf-task", %{
         executor_id: "exec-gone",
         application_version: "v0",
-        name: "add/2"
+        name: "add/2",
+        workflow_version: "1"
       })
 
       output = task_output(engine)
