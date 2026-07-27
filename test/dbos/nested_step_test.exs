@@ -121,7 +121,7 @@ defmodule Dbos.NestedStepTest do
 
     {:ok, status} = SystemDb.get_workflow_status(config, workflow_id)
     assert status.status == :error
-    assert %Dbos.OperationInStepError{step: "outer/1"} = status.error.value
+    assert %Dbos.OperationInStepError{name: "outer/1"} = status.error.value
   end
 
   test "send_message from inside a step is refused" do
@@ -134,7 +134,7 @@ defmodule Dbos.NestedStepTest do
     {:ok, status} = SystemDb.get_workflow_status(config, workflow_id)
     assert status.status == :error
 
-    assert %Dbos.OperationInStepError{step: "outer/1", operation: "call DBOS.send"} =
+    assert %Dbos.OperationInStepError{name: "outer/1", operation: "call DBOS.send"} =
              status.error.value
   end
 
@@ -148,7 +148,7 @@ defmodule Dbos.NestedStepTest do
     {:ok, status} = SystemDb.get_workflow_status(config, workflow_id)
     assert status.status == :error
 
-    assert %Dbos.OperationInStepError{step: "outer/1", operation: "call DBOS.setEvent"} =
+    assert %Dbos.OperationInStepError{name: "outer/1", operation: "call DBOS.setEvent"} =
              status.error.value
   end
 end

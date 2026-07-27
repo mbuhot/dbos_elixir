@@ -203,6 +203,12 @@ defmodule Dbos.SampleWorkflows do
     end)
   end
 
+  def send_in_transaction do
+    Dbos.transaction("outer_tx/0", [], fn _conn ->
+      Dbos.send_message("somewhere", "topic", :payload)
+    end)
+  end
+
   def transaction_in_step do
     Dbos.Runtime.run_step("outer_step/0", [], fn ->
       Dbos.transaction("inner_tx/0", [], fn _conn -> :ok end)

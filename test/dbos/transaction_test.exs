@@ -92,12 +92,26 @@ defmodule Dbos.TransactionTest do
     assert {:error, %Dbos.NestedTransactionError{}} = Dbos.await(handle)
   end
 
-  test "a plain step inside a transaction is rejected by the added guard" do
+  test "a plain step inside a transaction is folded in, recording no durability row of its own" do
     engine =
       start_engine([{"step_in_transaction/0", {SampleWorkflows, :step_in_transaction, 0}}])
 
+    config = Dbos.config(engine)
     {:ok, handle} = Dbos.start("step_in_transaction/0", [], engine: engine)
-    assert {:error, %Dbos.StepInTransactionError{}} = Dbos.await(handle)
+    assert {:ok, :ok} = Dbos.await(handle)
+
+    {:ok, steps} = Dbos.SystemDb.get_workflow_steps(config, handle.workflow_id)
+    assert Enum.map(steps, & &1.function_name) == ["outer_tx/0"]
+  end
+
+  test "an engine primitive inside a transaction is refused, naming the transaction" do
+    engine =
+      start_engine([{"send_in_transaction/0", {SampleWorkflows, :send_in_transaction, 0}}])
+
+    {:ok, handle} = Dbos.start("send_in_transaction/0", [], engine: engine)
+
+    assert {:error, %Dbos.OperationInStepError{kind: :transaction, name: "outer_tx/0"}} =
+             Dbos.await(handle)
   end
 
   test "a transaction inside a plain step is allowed and records no extra durability row" do

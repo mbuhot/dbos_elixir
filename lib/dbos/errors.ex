@@ -175,41 +175,34 @@ defmodule Dbos.NestedTransactionError do
   end
 end
 
-defmodule Dbos.StepInTransactionError do
-  @moduledoc """
-  Raised when `Dbos.Runtime.run_step/3` (or any durable operation built on it — `send_message`,
-  `recv_message`, `set_event`, etc.) is called from inside a `Dbos.transaction/3` body.
-  """
-
-  defexception [:workflow_id, :function_name]
-
-  @impl true
-  def message(%__MODULE__{workflow_id: workflow_id, function_name: function_name}) do
-    "workflow #{workflow_id}: cannot call step #{inspect(function_name)} from within a Dbos.transaction/3 body"
-  end
-end
-
 defmodule Dbos.OperationInStepError do
   @moduledoc """
-  Raised when a durable operation other than a step runs inside a step body: starting,
-  enqueuing, forking or awaiting a workflow, or `send_message`, `recv_message`, `set_event`,
-  `get_event`, `sleep` and the rest of the engine's own primitives.
+  Raised when a durable operation other than a step runs inside a step or transaction body:
+  starting, enqueuing, forking or awaiting a workflow, or `send_message`, `recv_message`,
+  `set_event`, `get_event`, `sleep` and the rest of the engine's own primitives.
 
-  A step is one checkpoint. Any of these would consume a step id of its own, and replay returns
-  the enclosing step from its checkpoint without running the body, so that id is never consumed
-  again and every later step shifts onto the wrong one. Perform them from the workflow body.
+  A `deftransaction` is a step that commits its checkpoint together with its write, so the two
+  bodies carry the same rule. Either is one checkpoint, and any of these operations would
+  consume a step id of its own; replay returns the enclosing body from its checkpoint without
+  running it, so that id is never consumed again and every later step shifts onto the wrong one.
+  Perform them from the workflow body.
 
-  Calling a step from a step is allowed: the inner call becomes part of the caller's execution
-  rather than a checkpoint of its own.
+  Calling a step from either body is allowed: the inner call becomes part of the caller's
+  execution rather than a checkpoint of its own.
   """
 
-  defexception [:workflow_id, :step, :operation]
+  defexception [:workflow_id, :kind, :name, :operation]
 
   @impl true
-  def message(%__MODULE__{workflow_id: workflow_id, step: step, operation: operation}) do
-    "workflow #{workflow_id}: cannot #{operation} from within step #{inspect(step)}. " <>
-      "A step is a single checkpoint; run this from the workflow body. Calling another step " <>
-      "from here is fine — it becomes part of this step rather than a checkpoint of its own."
+  def message(%__MODULE__{
+        workflow_id: workflow_id,
+        kind: kind,
+        name: name,
+        operation: operation
+      }) do
+    "workflow #{workflow_id}: cannot #{operation} from within #{kind} #{inspect(name)}. " <>
+      "A #{kind} is a single checkpoint; run this from the workflow body. Calling a step from " <>
+      "here is fine — it becomes part of this #{kind} rather than a checkpoint of its own."
   end
 end
 

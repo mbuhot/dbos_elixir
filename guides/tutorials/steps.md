@@ -91,10 +91,11 @@ step has a stable identity worth naming and reusing.
 A step may call another step. The inner call is folded into the caller: it runs as ordinary code,
 takes no step id, and writes no checkpoint of its own. Factoring one step out of another is
 therefore safe, and the extracted function keeps working whether it is reached from a workflow
-body or from another step.
+body, from another step, or from a `deftransaction` — a transaction is a step that commits its
+checkpoint together with its write, so the same rule governs both.
 
 Everything else durable belongs in the workflow body, and raises `Dbos.OperationInStepError`
-from inside a step:
+from inside either body:
 
 | Refused inside a step | Where it belongs |
 |---|---|
@@ -107,6 +108,9 @@ The reason is the step-id sequence. Each of those is a durable operation that ta
 own, but a step is one checkpoint: replay returns it from that checkpoint without running its
 body, so an id consumed inside would never be consumed again and every later step would shift
 onto the wrong one. A nested *step* is exempt because it takes no id at all.
+
+This mirrors upstream DBOS, where a step body receives a plain context rather than a DBOS one,
+making every operation in that table unrepresentable inside it.
 
 ## Retries
 

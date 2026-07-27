@@ -68,7 +68,8 @@ end
 | Nesting | Outcome |
 |---|---|
 | `deftransaction` inside another `deftransaction`'s body | Raises `Dbos.NestedTransactionError`. |
-| A `defstep`, or any durable operation (`Dbos.send_message/4`, `Dbos.recv_message/3`, `Dbos.set_event/3`, ...), inside a `deftransaction`'s body | Raises `Dbos.StepInTransactionError`. |
+| A `defstep` inside a `deftransaction`'s body | Allowed, and folded in: it runs as ordinary code, takes no step id and writes no checkpoint of its own. Its side effect happens inside the open database transaction, so a later rollback cannot undo it — keep external calls out of a transaction body. |
+| Any other durable operation (`Dbos.send_message/4`, `Dbos.recv_message/3`, `Dbos.set_event/3`, starting or awaiting a workflow, ...) inside a `deftransaction`'s body | Raises `Dbos.OperationInStepError`. |
 | `deftransaction` inside a plain `defstep`'s body | Allowed. Runs a real transaction and commits it, recording no checkpoint row of its own — it rides on the enclosing step's checkpoint. A replay that re-runs the enclosing step re-runs this inner transaction, so its body must tolerate re-execution. |
 
 ## What happens on failure

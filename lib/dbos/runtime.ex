@@ -36,7 +36,7 @@ defmodule Dbos.Runtime do
             deadline_epoch_ms: integer | nil,
             step_id: integer,
             in_step: String.t() | false,
-            in_transaction: boolean
+            in_transaction: String.t() | false
           }
   end
 
@@ -126,7 +126,7 @@ defmodule Dbos.Runtime do
       not in_workflow?() ->
         fun.()
 
-      current_step() && not engine_operation?(name) ->
+      enclosing_body() && not engine_operation?(name) ->
         fun.()
 
       true ->
@@ -139,10 +139,16 @@ defmodule Dbos.Runtime do
   # operation that would need a checkpoint of its own.
   defp engine_operation?(name), do: String.starts_with?(name, "DBOS.")
 
-  @doc "The name of the step this process is inside, or `nil` when it is not inside one."
-  def current_step do
+  @doc """
+  The step or transaction body this process is inside as `{kind, name}`, or `nil` outside both.
+
+  A `deftransaction` is a step that commits its checkpoint with its write, so both are single
+  checkpoints and both refuse the same operations.
+  """
+  def enclosing_body do
     case Process.get(@context_key) do
-      %Context{in_step: name} when is_binary(name) -> name
+      %Context{in_transaction: name} when is_binary(name) -> {:transaction, name}
+      %Context{in_step: name} when is_binary(name) -> {:step, name}
       _other -> nil
     end
   end
@@ -156,15 +162,16 @@ defmodule Dbos.Runtime do
   def run_step_at(function_id, name, opts \\ [], fun) do
     context = fetch_context!()
 
-    if context.in_transaction do
-      raise Dbos.StepInTransactionError, workflow_id: context.workflow_id, function_name: name
-    end
+    case enclosing_body() do
+      nil ->
+        :ok
 
-    if context.in_step do
-      raise Dbos.OperationInStepError,
-        workflow_id: context.workflow_id,
-        step: context.in_step,
-        operation: "call #{name}"
+      {kind, enclosing} ->
+        raise Dbos.OperationInStepError,
+          workflow_id: context.workflow_id,
+          kind: kind,
+          name: enclosing,
+          operation: "call #{name}"
     end
 
     case SystemDb.check_operation_execution(
@@ -294,7 +301,7 @@ defmodule Dbos.Runtime do
 
     {:ok, value} =
       context.config.db.transaction(context.config.conn, [isolation: isolation], fn conn ->
-        value = with_flag(:in_transaction, true, fn -> fun.(conn) end)
+        value = with_flag(:in_transaction, name, fn -> fun.(conn) end)
         completed_at = System.os_time(:millisecond)
         tx_config = %{context.config | conn: conn}
 

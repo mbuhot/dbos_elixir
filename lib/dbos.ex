@@ -403,8 +403,9 @@ defmodule Dbos do
   `conn` and the step's `operation_outputs` checkpoint commit together in one database
   transaction. Must be called from inside a workflow. Raises
   `Dbos.NestedTransactionError` from inside another transaction's body, and
-  `Dbos.StepInTransactionError` if any durable step is called from inside this transaction's
-  body. `opts[:isolation]`: `:read_committed` | `:repeatable_read` | `:serializable`.
+  `Dbos.OperationInStepError` if a durable operation other than a step runs inside this one.
+  A step called from here is folded in, taking no id and writing no checkpoint of its own.
+  `opts[:isolation]`: `:read_committed` | `:repeatable_read` | `:serializable`.
   """
   def transaction(name, opts \\ [], fun) do
     Runtime.run_transaction(name, opts, fun)
@@ -539,14 +540,15 @@ defmodule Dbos do
   # that replay never consumes again. Calling a step from a step is fine — it becomes part of
   # the caller's execution rather than a checkpoint of its own.
   defp refuse_in_step!(operation) do
-    case Runtime.current_step() do
+    case Runtime.enclosing_body() do
       nil ->
         :ok
 
-      step ->
+      {kind, name} ->
         raise Dbos.OperationInStepError,
           workflow_id: Runtime.current_workflow_id(),
-          step: step,
+          kind: kind,
+          name: name,
           operation: operation
     end
   end
