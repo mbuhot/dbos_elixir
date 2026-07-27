@@ -110,7 +110,7 @@ defmodule Dbos.Messaging do
       result =
         Notifications.wait_until(engine, deadline_ms, fn ->
           SystemDb.notification_pending?(config, workflow_id, topic) or
-            SystemDb.workflow_cancelled?(config, workflow_id)
+            SystemDb.workflow_cancellation(config, workflow_id) != nil
         end)
 
       raise_if_cancelled!(config, workflow_id)
@@ -222,7 +222,7 @@ defmodule Dbos.Messaging do
       result =
         Notifications.wait_until(engine, deadline_ms, fn ->
           event_present?(config, target_workflow_id, key) or
-            SystemDb.workflow_cancelled?(config, workflow_id)
+            SystemDb.workflow_cancellation(config, workflow_id) != nil
         end)
 
       raise_if_cancelled!(config, workflow_id)
@@ -344,7 +344,7 @@ defmodule Dbos.Messaging do
       values != [] or closed ->
         {values, %{state | offset: next_offset, closed: closed}}
 
-      workflow_terminal?(config, workflow_id) ->
+      workflow_halted?(config, workflow_id) ->
         {final_values, final_offset, _closed} =
           SystemDb.read_stream_page(config, workflow_id, key, state.offset)
 
@@ -376,7 +376,7 @@ defmodule Dbos.Messaging do
     end
   end
 
-  defp workflow_terminal?(config, workflow_id) do
+  defp workflow_halted?(config, workflow_id) do
     case SystemDb.get_workflow_status(config, workflow_id) do
       {:ok, %{status: status}} -> status not in [:pending, :enqueued, :delayed]
       {:error, :not_found} -> false
@@ -417,7 +417,7 @@ defmodule Dbos.Messaging do
 
     Notifications.wait_until(engine, deadline_ms, fn ->
       System.os_time(:millisecond) >= deadline_ms or
-        SystemDb.workflow_cancelled?(config, workflow_id)
+        SystemDb.workflow_cancellation(config, workflow_id) != nil
     end)
 
     {raise_if_cancelled!(config, workflow_id), :resolved}
@@ -438,8 +438,10 @@ defmodule Dbos.Messaging do
   end
 
   defp raise_if_cancelled!(config, workflow_id) do
-    if SystemDb.workflow_cancelled?(config, workflow_id) do
-      raise Dbos.WorkflowCancelledError, workflow_id: workflow_id
+    case SystemDb.workflow_cancellation(config, workflow_id) do
+      nil -> nil
+      :cancelled -> raise Dbos.WorkflowCancelledError, workflow_id: workflow_id
+      :cancelling -> raise Dbos.WorkflowCancellingError, workflow_id: workflow_id
     end
   end
 end

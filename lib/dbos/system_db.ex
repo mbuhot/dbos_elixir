@@ -371,7 +371,7 @@ defmodule Dbos.SystemDb do
     outcome
   end
 
-  defp maybe_enqueue_unwind(config, workflow_id, :error) do
+  defp maybe_enqueue_unwind(config, workflow_id, status) when status in [:error, :cancelled] do
     if unwindable?(config, workflow_id) do
       insert_enqueued_workflow(config, %{
         workflow_id: Compensation.workflow_id(workflow_id),
@@ -392,10 +392,7 @@ defmodule Dbos.SystemDb do
   # the recursion the compensation workflow exists to end.
   defp unwindable?(config, workflow_id) do
     sql = """
-    SELECT ws.name <> $2 AND EXISTS (
-      SELECT 1 FROM #{table(config, "operation_outputs")} oo
-      WHERE oo.workflow_uuid = ws.workflow_uuid AND oo.ex_compensation IS NOT NULL
-    )
+    SELECT #{unwindable_predicate(config, 2)}
     FROM #{table(config, "workflow_status")} ws
     WHERE ws.workflow_uuid = $1
     """
@@ -404,6 +401,18 @@ defmodule Dbos.SystemDb do
       {:ok, %{rows: [[unwindable]]}} -> unwindable
       {:ok, %{rows: []}} -> false
     end
+  end
+
+  # Whether the `ws` row in scope has anything to unwind, with the compensator's own name at
+  # `$name_index`. An unwind is excluded from unwinding: an undo declaring its own `compensate:`
+  # would otherwise start the recursion the compensation workflow exists to end.
+  defp unwindable_predicate(config, name_index) do
+    """
+    (ws.name <> $#{name_index} AND EXISTS (
+      SELECT 1 FROM #{table(config, "operation_outputs")} oo
+      WHERE oo.workflow_uuid = ws.workflow_uuid AND oo.ex_compensation IS NOT NULL
+    ))\
+    """
   end
 
   defp write_workflow_outcome(config, workflow_id, attrs) do
@@ -899,6 +908,37 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
+  The ids of `CANCELLING` rows whose executor's lease has expired, or who never renewed one — a
+  workflow cancelled while running whose process died before it could commit `CANCELLED` and
+  enqueue its unwind. `Dbos.LeaseSweep` finishes each one on its behalf.
+
+  This is the whole reason `CANCELLING` exists as a status of its own: `CANCELLED` is terminal, so
+  a row that reached it cannot say whether its effects were ever reversed.
+  """
+  def list_stale_cancelling_workflow_ids(%Config{} = config) do
+    now = System.os_time(:millisecond)
+
+    sql = """
+    SELECT ws.workflow_uuid
+    FROM #{table(config, "workflow_status")} ws
+    LEFT JOIN #{table(config, "executor_leases")} el ON el.executor_id = ws.executor_id
+    WHERE ws.status = $1
+      AND (el.executor_id IS NULL OR el.lease_expires_epoch_ms <= $2)
+    """
+
+    {:ok, result} = query(config, sql, [Status.to_string(:cancelling), now])
+    Enum.map(result.rows, fn [id] -> id end)
+  end
+
+  @doc """
+  Finishes a `CANCELLING` workflow abandoned by its executor: commits `CANCELLED`, which enqueues
+  its unwind in the same transaction.
+  """
+  def finish_cancelling(%Config{} = config, workflow_id) do
+    update_workflow_outcome(config, workflow_id, %{status: :cancelled})
+  end
+
+  @doc """
   The distinct `executor_id`s among `PENDING` rows whose lease has expired, or who have never
   renewed one at all, for `Dbos.LeaseSweep`. `updated_at` plays no part: a workflow
   legitimately sitting untouched for days in a durable sleep or `recv_message` is not a signal
@@ -926,19 +966,44 @@ defmodule Dbos.SystemDb do
   "existing".
   """
   def cancel_workflows(%Config{} = config, workflow_ids) do
+    {:ok, existing} =
+      transaction(config, [], fn conn ->
+        tx_config = %{config | conn: conn}
+
+        tx_config
+        |> transition_cancelled(workflow_ids)
+        |> Enum.each(fn {workflow_id, status} ->
+          maybe_enqueue_unwind(tx_config, workflow_id, status)
+        end)
+
+        existing_workflow_ids(tx_config, workflow_ids)
+      end)
+
+    existing
+  end
+
+  # A workflow that is running and has compensable effects goes to CANCELLING rather than
+  # CANCELLED: its process stops at its next checkpoint check and commits CANCELLED together with
+  # the unwind, and if that process is already gone the lease sweep does it instead. Everything
+  # else is cancelled outright, exactly as before, and an unwind is enqueued here for a row that
+  # holds compensable history but has no process to notice — one re-enqueued by a retry, say.
+  defp transition_cancelled(config, workflow_ids) do
     now = System.os_time(:millisecond)
 
     sql = """
-    WITH existing AS (
-      SELECT workflow_uuid FROM #{table(config, "workflow_status")} WHERE workflow_uuid = ANY($3)
-    ), updated AS (
-      UPDATE #{table(config, "workflow_status")}
-          SET status = $1, updated_at = $2, completed_at = $2, started_at_epoch_ms = NULL,
-              queue_name = NULL, deduplication_id = NULL
-          WHERE workflow_uuid = ANY($3) AND status NOT IN ($4, $5, $6)
-          RETURNING workflow_uuid
-    )
-    SELECT workflow_uuid FROM existing
+    UPDATE #{table(config, "workflow_status")} ws
+        SET status = CASE WHEN #{unwindable_predicate(config, 6)} AND ws.status = $7
+                          THEN $8 ELSE $1 END,
+            updated_at = $2,
+            completed_at = CASE WHEN #{unwindable_predicate(config, 6)} AND ws.status = $7
+                                THEN ws.completed_at ELSE $2 END,
+            started_at_epoch_ms = CASE WHEN #{unwindable_predicate(config, 6)} AND ws.status = $7
+                                       THEN ws.started_at_epoch_ms ELSE NULL END,
+            queue_name = CASE WHEN #{unwindable_predicate(config, 6)} AND ws.status = $7
+                              THEN ws.queue_name ELSE NULL END,
+            deduplication_id = NULL
+        WHERE ws.workflow_uuid = ANY($3) AND ws.status NOT IN ($4, $5, $1, $8)
+        RETURNING ws.workflow_uuid, ws.status
     """
 
     params = [
@@ -947,10 +1012,21 @@ defmodule Dbos.SystemDb do
       workflow_ids,
       Status.to_string(:success),
       Status.to_string(:error),
-      Status.to_string(:cancelled)
+      Compensation.workflow_name(),
+      Status.to_string(:pending),
+      Status.to_string(:cancelling)
     ]
 
     {:ok, result} = query(config, sql, params)
+    Enum.map(result.rows, fn [id, status] -> {id, Status.from_string(status)} end)
+  end
+
+  defp existing_workflow_ids(config, workflow_ids) do
+    sql = """
+    SELECT workflow_uuid FROM #{table(config, "workflow_status")} WHERE workflow_uuid = ANY($1)
+    """
+
+    {:ok, result} = query(config, sql, [workflow_ids])
     Enum.map(result.rows, fn [id] -> id end)
   end
 
@@ -1094,13 +1170,21 @@ defmodule Dbos.SystemDb do
     Enum.map(result.rows, fn [id] -> id end)
   end
 
-  @doc "Whether `workflow_id`'s status is currently `CANCELLED`."
-  def workflow_cancelled?(%Config{} = config, workflow_id) do
+  @doc """
+  How `workflow_id` has been cancelled, if at all: `:cancelled`, `:cancelling` (cancelled, with
+  effects still to reverse), or `nil`. A durable wait breaks out of either, since neither may go
+  on running forward.
+  """
+  def workflow_cancellation(%Config{} = config, workflow_id) do
     sql = "SELECT status FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1"
+    cancelled = Status.to_string(:cancelled)
+    cancelling = Status.to_string(:cancelling)
 
     case query(config, sql, [workflow_id]) do
-      {:ok, %{rows: [[status]]}} -> status == Status.to_string(:cancelled)
-      {:ok, %{rows: []}} -> false
+      {:ok, %{rows: [[^cancelled]]}} -> :cancelled
+      {:ok, %{rows: [[^cancelling]]}} -> :cancelling
+      {:ok, %{rows: [[_status]]}} -> nil
+      {:ok, %{rows: []}} -> nil
     end
   end
 
@@ -2197,6 +2281,10 @@ defmodule Dbos.SystemDb do
 
   defp ensure_not_cancelled!(:cancelled, workflow_id) do
     raise Dbos.WorkflowCancelledError, workflow_id: workflow_id
+  end
+
+  defp ensure_not_cancelled!(:cancelling, workflow_id) do
+    raise Dbos.WorkflowCancellingError, workflow_id: workflow_id
   end
 
   defp ensure_not_cancelled!(_status, _workflow_id), do: :ok

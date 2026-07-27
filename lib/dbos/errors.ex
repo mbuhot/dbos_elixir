@@ -9,6 +9,23 @@ defmodule Dbos.WorkflowCancelledError do
   end
 end
 
+defmodule Dbos.WorkflowCancellingError do
+  @moduledoc """
+  Raised at a workflow's next checkpoint check once its status is `:cancelling`: it has been
+  cancelled, and has compensable effects to reverse before it can be `:cancelled`.
+
+  Caught by `Dbos.WorkflowProcess`, which stops the forward path and commits `CANCELLED` together
+  with the workflow's unwind. Not an error a workflow should catch — see `Dbos.Compensation`.
+  """
+
+  defexception [:workflow_id]
+
+  @impl true
+  def message(%__MODULE__{workflow_id: workflow_id}) do
+    "workflow #{workflow_id} is cancelling; stop running steps and let it unwind"
+  end
+end
+
 defmodule Dbos.UnexpectedStepError do
   @moduledoc """
   Raised when a checkpointed step's recorded `function_name` does not match the step now

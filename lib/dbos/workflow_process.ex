@@ -1,7 +1,8 @@
 # One running workflow instance: establishes the Dbos.Runtime context, invokes the registered
 # function with its decoded inputs, and records the outcome. A Dbos.WorkflowCancelledError
 # escaping the body means the row is already CANCELLED, so it is swallowed, leaving the status as
-# recorded.
+# recorded. A Dbos.WorkflowCancellingError means it has effects to reverse first, so this commits
+# CANCELLED, which enqueues the unwind alongside it.
 defmodule Dbos.WorkflowProcess do
   @moduledoc false
 
@@ -66,6 +67,8 @@ defmodule Dbos.WorkflowProcess do
   defp classify_failure(:error, %Dbos.WorkflowCancelledError{}, _stacktrace),
     do: :already_cancelled
 
+  defp classify_failure(:error, %Dbos.WorkflowCancellingError{}, _stacktrace), do: :cancelling
+
   defp classify_failure(:error, %Dbos.Waits.Parked{}, _stacktrace), do: :parked
 
   defp classify_failure(:error, %Dbos.ConcurrentCheckpointConflictError{}, _stacktrace),
@@ -76,6 +79,12 @@ defmodule Dbos.WorkflowProcess do
   defp record_outcome(_config, _engine, _workflow_id, :already_cancelled), do: :ok
 
   defp record_outcome(_config, _engine, _workflow_id, :parked), do: :ok
+
+  # The forward path stopped because this workflow is cancelling. Committing CANCELLED is what
+  # enqueues its unwind, in that same transaction — see Dbos.SystemDb.update_workflow_outcome/3.
+  defp record_outcome(config, engine, workflow_id, :cancelling) do
+    write_outcome(config, engine, workflow_id, %{status: :cancelled})
+  end
 
   defp record_outcome(_config, engine, workflow_id, :concurrent_conflict) do
     Dbos.await(%WorkflowHandle{engine: engine, workflow_id: workflow_id})

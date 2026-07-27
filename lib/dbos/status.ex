@@ -1,5 +1,13 @@
 defmodule Dbos.Status do
-  @moduledoc "The seven workflow statuses stored as strings in `workflow_status.status`, as atoms."
+  @moduledoc """
+  The workflow statuses stored as strings in `workflow_status.status`, as atoms.
+
+  `:cancelling` is this engine's own addition, and the only non-terminal status a workflow reaches
+  by being cancelled: a workflow with compensable effects stops going forward, unwinds, and only
+  then becomes `:cancelled`. `:cancelled` is terminal, so it cannot say whether the unwind has
+  happened yet; `:cancelling` can, which is what lets the lease sweep finish one whose executor
+  died mid-cancellation.
+  """
 
   @type t ::
           :pending
@@ -7,6 +15,7 @@ defmodule Dbos.Status do
           | :delayed
           | :success
           | :error
+          | :cancelling
           | :cancelled
           | :max_recovery_attempts_exceeded
 
@@ -16,6 +25,7 @@ defmodule Dbos.Status do
     delayed: "DELAYED",
     success: "SUCCESS",
     error: "ERROR",
+    cancelling: "CANCELLING",
     cancelled: "CANCELLED",
     max_recovery_attempts_exceeded: "MAX_RECOVERY_ATTEMPTS_EXCEEDED"
   }

@@ -23,9 +23,15 @@ queue in the same transaction as an `:error` status, guarded by whether the hist
 compensation and by the row not being an unwind itself. `Dbos.abort/1` raises `Dbos.AbortError` to
 reach that path deliberately, from a workflow body or a step.
 
+**Phase 4 is done**: `:cancelling` is a non-terminal status. `Dbos.cancel/2` puts a running
+workflow with compensable history there instead of `CANCELLED`; its next checkpoint check raises
+`Dbos.WorkflowCancellingError`, and the process commits `CANCELLED` with the unwind. A durable wait
+breaks out of `:cancelling` as it does out of `:cancelled`, so a blocked workflow stops at once
+rather than waiting out its timeout. The lease sweep finishes a `CANCELLING` row whose executor's
+lease has lapsed.
+
 Remaining phases:
 
-4. `CANCELLING` status, the process-side transition, and lease-sweep pickup.
 5. Descendants named by `getResult`/`enqueue`/`forkWorkflow`: each resolved to a workflow id and
    handed its own compensator, awaited in reverse order.
 6. `compensate:` on `send_message`/`set_event`/`write_stream`.

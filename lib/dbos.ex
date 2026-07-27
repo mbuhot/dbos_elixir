@@ -445,6 +445,11 @@ defmodule Dbos do
   @doc """
   Marks `workflow_id` `CANCELLED`, waking a live process so a blocked wait ends promptly.
 
+  A workflow that is still running and has compensable effects goes to `CANCELLING` instead: it
+  stops at its next checkpoint, reverses what it did, and reaches `CANCELLED` once the unwind is
+  enqueued. `Dbos.await/2` keeps waiting through that, since `CANCELLING` is not terminal. A
+  workflow with nothing to compensate is cancelled outright.
+
   `opts[:cancel_children]` (default `false`) cancels its descendant tree in the same
   transaction. Cancelling a terminal workflow is a no-op. Inside a workflow this consumes a
   step id and checkpoints; outside one it consumes none.
@@ -798,7 +803,8 @@ defmodule Dbos do
         {:error,
          %Dbos.MaxRecoveryAttemptsExceededError{workflow_id: workflow_id, attempts: attempts}}
 
-      {:ok, %WorkflowStatus{status: status}} when status in [:pending, :enqueued, :delayed] ->
+      {:ok, %WorkflowStatus{status: status}}
+      when status in [:pending, :enqueued, :delayed, :cancelling] ->
         if config.testing in [:inline, :manual] do
           run_for_testing(config, engine, workflow_id, status, poll_interval_ms, deadline)
         else
@@ -830,8 +836,9 @@ defmodule Dbos do
     end
   end
 
-  defp run_for_testing(_config, _engine, workflow_id, :pending, _poll_interval_ms, _deadline) do
-    raise Dbos.TestingModeAwaitError, workflow_id: workflow_id, status: :pending
+  defp run_for_testing(_config, _engine, workflow_id, status, _poll_interval_ms, _deadline)
+       when status in [:pending, :cancelling] do
+    raise Dbos.TestingModeAwaitError, workflow_id: workflow_id, status: status
   end
 
   defp wait_or_timeout(config, engine, workflow_id, poll_interval_ms, deadline) do

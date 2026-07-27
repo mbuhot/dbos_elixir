@@ -13,6 +13,8 @@ defmodule Dbos.LeaseSweep do
 
   use GenServer
 
+  require Logger
+
   alias Dbos.Recovery
   alias Dbos.SystemDb
 
@@ -53,6 +55,27 @@ defmodule Dbos.LeaseSweep do
     config
     |> SystemDb.list_expired_lease_pending_executor_ids()
     |> reclaim_orphans(engine_name, config.reclaim_batch_size)
+
+    finish_abandoned_cancellations(config)
+  end
+
+  # A workflow cancelled while running unwinds itself, and its process commits CANCELLED with the
+  # unwind. If that process died first the row sits CANCELLING with nothing to finish it, so the
+  # sweep does — the same lease authority, applied to the cancellation path.
+  defp finish_abandoned_cancellations(config) do
+    config
+    |> SystemDb.list_stale_cancelling_workflow_ids()
+    |> Enum.each(&finish_one(config, &1))
+  end
+
+  defp finish_one(config, workflow_id) do
+    SystemDb.finish_cancelling(config, workflow_id)
+  rescue
+    error ->
+      Logger.error(
+        "dbos: could not finish cancelling workflow #{workflow_id}; the sweep continues: " <>
+          Exception.format_banner(:error, error, __STACKTRACE__)
+      )
   end
 
   defp reclaim_orphans([], _engine_name, _batch_size), do: :ok
