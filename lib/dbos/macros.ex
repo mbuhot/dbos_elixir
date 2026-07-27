@@ -184,7 +184,12 @@ defmodule Dbos.Macros do
   row only on an executor registering the same name at the same version, so a deploy that leaves
   this workflow's definition alone keeps recovering its in-flight instances however much the rest
   of the application changed. Bump it when a change to the body breaks replay of the version
-  before it. Omitted, the workflow is claimable by any executor registering its name — see
+  before it. Omitted, the workflow is claimable by any executor registering its name.
+
+  `version: :application_version` resolves to the engine's own `application_version` at boot, so
+  the workflow moves with every deploy. For a workflow that changes so often that tracking a
+  number by hand is noise: each deploy's instances are held back for the build that started them,
+  at the cost of keeping that build alive until they drain. See
   [Upgrading Workflows](upgrading-workflows.md).
 
   `schedule:` declares this workflow as cron-scheduled (`Dbos.Scheduler`, `workflow_schedules`).
@@ -404,13 +409,16 @@ defmodule Dbos.Macros do
       version when is_binary(version) or is_nil(version) ->
         version
 
+      :application_version ->
+        :application_version
+
       other ->
         raise CompileError,
           file: env.file,
           line: line,
           description:
-            "defworkflow #{fun_name}/#{arity}'s version: must be a string literal, got: " <>
-              Macro.to_string(other)
+            "defworkflow #{fun_name}/#{arity}'s version: must be a string literal or " <>
+              ":application_version, got: " <> Macro.to_string(other)
     end
   end
 

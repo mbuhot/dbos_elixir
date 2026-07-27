@@ -95,10 +95,14 @@ defmodule Dbos.Supervisor do
   def init(opts) do
     name = Keyword.get(opts, :name, Dbos)
     workflow_entries = resolve_workflow_entries!(opts)
-    workflows = Enum.flat_map(workflow_entries, &normalize_workflow_entry/1)
     schedules = Enum.flat_map(workflow_entries, &collect_schedules/1)
     config = build_config(opts)
     testing = config.testing
+
+    workflows =
+      workflow_entries
+      |> Enum.flat_map(&normalize_workflow_entry/1)
+      |> Enum.map(&resolve_version(&1, config.application_version))
 
     children =
       if testing in [:inline, :manual] do
@@ -262,6 +266,14 @@ defmodule Dbos.Supervisor do
       {name, mfa, version}
     end)
   end
+
+  # `version: :application_version` on a defworkflow resolves here, where the engine's own version
+  # is known: the workflow's version becomes whatever this deploy is called, so every deploy holds
+  # its in-flight instances back for the build that started them.
+  defp resolve_version({name, mfa, :application_version}, application_version),
+    do: {name, mfa, application_version}
+
+  defp resolve_version(entry, _application_version), do: entry
 
   defp collect_schedules(module) when is_atom(module) do
     if function_exported?(module, :__dbos_schedules__, 0),

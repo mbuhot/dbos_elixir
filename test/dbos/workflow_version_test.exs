@@ -21,6 +21,10 @@ defmodule Dbos.WorkflowVersionTest do
     defworkflow parent(amount), name: "versioned.parent", version: "7" do
       priced(amount)
     end
+
+    defworkflow churning(amount), name: "versioned.churning", version: :application_version do
+      amount - 1
+    end
   end
 
   defp start_engine(opts) do
@@ -171,6 +175,26 @@ defmodule Dbos.WorkflowVersionTest do
     assert status.executor_id == "exec-new"
   end
 
+  test "version: :application_version records the version this engine booted under" do
+    engine = start_engine(application_version: "release-42")
+    Dbos.put_engine(engine)
+
+    {:ok, handle} = VersionedWorkflows.churning(5)
+    assert {:ok, 4} = Dbos.await(handle)
+
+    assert stamped_version(handle.workflow_id) == "release-42"
+  end
+
+  test "version: :application_version publishes the resolved version as a capability" do
+    engine = start_engine(application_version: "release-42")
+
+    capabilities = Dbos.Registry.capabilities(engine)
+
+    assert {"versioned.churning", "release-42"} in capabilities
+    assert {"versioned.priced", "2"} in capabilities
+    assert {"versioned.undeclared", nil} in capabilities
+  end
+
   test "a child workflow carries its own declared version, not its parent's" do
     engine = start_engine([])
     Dbos.put_engine(engine)
@@ -214,6 +238,6 @@ defmodule Dbos.WorkflowVersionTest do
       end
 
     assert error.description =~ "bad/1"
-    assert error.description =~ "must be a string literal"
+    assert error.description =~ "must be a string literal or :application_version"
   end
 end

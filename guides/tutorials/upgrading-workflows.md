@@ -79,6 +79,27 @@ is computed or inferred — the engine records what it is told.
 `mix dbos.orphans` reports any group left with no executor able to claim it, so a version bumped
 without a build still running the old one is visible rather than silent.
 
+### Moving with every deploy
+
+Some workflows reach across enough of the system that almost any change touches them, and tracking
+a number by hand is noise. Hand the version to the deploy:
+
+```elixir
+defworkflow nightly_reconcile(date), name: "MyApp.Ops.nightly_reconcile",
+  version: :application_version do
+  ...
+end
+```
+
+It resolves to the engine's own `application_version` at boot, so this workflow — and only this
+workflow — is pinned to the build that started each instance. Every deploy holds its in-flight
+instances back for its own fleet, which is the strictest setting available and costs you keeping
+that fleet alive until they drain. Everything else in the application keeps recovering across the
+deploy.
+
+Pin `application_version` explicitly when you use this; the computed fallback moves on any
+registered module's bytecode changing, which makes "which build claims this row" hard to answer.
+
 ## Four ways to ship a change safely
 
 ### 1. Bump the workflow's `version:`
@@ -229,6 +250,7 @@ delete the line.
 | Strategy | In-flight workflow's fate | Cost |
 |---|---|---|
 | Bump the workflow's `version:` | Waits for a build still registering that name at its own version; every other workflow recovers as normal | Run two builds until that workflow drains |
+| `version: :application_version` | Waits for the exact build it started under, every deploy | Run the old fleet until that workflow drains, every deploy |
 | Bump `application_version` | A queued one waits for an executor still running the old version; a running one is recovered by either | Run two fleets until the old one drains |
 | New workflow name | Keeps dispatching to the untouched old body under the old name | Keep the old function and name registered until it drains |
 | Patch (`Dbos.patch/1`) | Sees `false` at the patch point and skips the new step, keeping its recorded sequence | Keep the check in the code until every pre-patch instance drains |
