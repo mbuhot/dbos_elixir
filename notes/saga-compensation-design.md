@@ -18,9 +18,9 @@ unwind if the process dies partway through it.
    froze into its compensation record. Step inputs are persisted per-step, opt-in, by naming them
    in `compensate:`.
 
-3. **The unwind is its own durable workflow.** It checkpoints each undo, recovers like anything
-   else, and has independent status and retries. This ends the "what compensates the compensator"
-   recursion.
+3. **The unwind is its own durable workflow**, one per workflow unwound. It checkpoints each undo,
+   recovers like anything else, and has independent status and retries. This ends the "what
+   compensates the compensator" recursion.
 
 4. **Rollback is for the error path.** A `PENDING` workflow left by a node crash is *recovered*.
    Compensation is triggered by a terminal business failure.
@@ -120,38 +120,63 @@ done?" is answered by that workflow's own status.
 
 ## The unwind
 
-One compensation workflow per failed parent. Deterministic id `"#{parent_id}-compensate"`, with
-`parent_workflow_id` set. Walks `operation_outputs` in descending `function_id`, running each
-recorded undo as its own durable step.
+One compensation workflow per workflow to be unwound, taking that workflow's id as its input.
+Deterministic id `"#{target_id}-compensate"`, with `parent_workflow_id` set. It walks that one
+workflow's `operation_outputs` in descending `function_id`, running each recorded undo as its own
+durable step.
+
+Its input is a target id rather than "the workflow that failed", because a workflow is also
+unwound when it succeeded and something above it failed.
+
+### One history each
+
+A step cannot start, enqueue, fork, await or cancel a workflow — each of those takes a step id of
+its own, and a step is one checkpoint (`Dbos.OperationInStepError`). So everything the unwind does
+to another workflow happens in the compensator's *body*, and the undos alone are its steps.
+
+That settles how the unwind crosses a workflow boundary: it does not read another workflow's rows.
+On reaching a row that spawned a descendant, the compensator starts *that* workflow's compensator
+as a child and awaits it. Depth is ordinary workflow nesting, so a partially-finished deep unwind
+recovers on the machinery that already exists for parent and child, and each level retries and
+resumes on its own.
+
+The walk is also complete by construction: only a workflow body can spawn a workflow, so every
+descendant a workflow has appears in that workflow's own history. No step can have spawned one
+behind the walk's back.
 
 ### Engine-internal steps
 
 Every built-in durable operation records a `function_name` prefixed `DBOS.`
-(`Dbos.StepNames`). Skipped by default, with three exceptions:
+(`Dbos.StepNames`). Skipped by default, with three exceptions, each naming a descendant:
 
-| `function_name` | Handling |
+| `function_name` | Where the descendant's id is |
 |---|---|
-| `DBOS.getResult` | Recurse into the child's history via `child_workflow_id` |
-| `DBOS.enqueue` | The step's `output` is a workflow id — see below |
-| `DBOS.forkWorkflow` | The step's `output` is a workflow id — see below |
+| `DBOS.getResult` | `child_workflow_id` |
+| `DBOS.enqueue` | the step's `output` |
+| `DBOS.forkWorkflow` | the step's `output` |
 
 `enqueue` and `forkWorkflow` do not set `child_workflow_id`; they return the new id as the step's
 output.
 
-### Spawned workflows
+### Descendants
 
-A workflow launched and never awaited may be in any state when the unwind reaches it:
+A descendant may be in any state when the unwind reaches it, and every state resolves to "ask that
+workflow to unwind itself":
 
 | State | Action |
 |---|---|
 | `ENQUEUED`, `DELAYED` | → `CANCELLED`. No history to unwind, and it must not start later. |
 | `PENDING` | → `CANCELLING`. It unwinds itself through the cancellation path. |
-| `SUCCESS` | Recurse into its history. |
+| `SUCCESS` | Start its compensator and await it. |
 | `ERROR`, `CANCELLED`, `CANCELLING` | Skip. Already unwinding or unwound. |
 
-Descendants are awaited before the parent's walk continues. Their effects happened later, so they
+Descendants are awaited before the walk continues past them. Their effects happened later, so they
 are reversed first. Parallel sibling unwinds are given up deliberately: the error path is where
 predictable ordering matters most.
+
+`"#{target_id}-compensate"` being derived from the target means starting a compensator is
+idempotent: a replay of the walk, and a descendant that reached its own compensator through its own
+failure, converge on one workflow id rather than two unwinds of the same history.
 
 ### When an undo fails
 
@@ -184,6 +209,8 @@ two rows named `"reserve/1"` from different modules.
 
 - Compensation crosses workflow boundaries only through recorded history. A workflow reached by
   neither `getResult`, `enqueue`, nor `forkWorkflow` is invisible.
+- One `workflow_status` row per level of nesting unwound, since each level runs its own
+  compensator.
 - The compensating MFA is resolved from a database row, so the unwind path itself is beyond the
   determinism compiler's reach. Each undo's *body* is checked at its definition site.
 - Undo actions are at-least-once and must be idempotent.

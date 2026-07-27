@@ -14,12 +14,14 @@ matching arity in the same module.
 
 Remaining phases:
 
-2. The compensation workflow: reverse walk, `DBOS.` filtering, undo-per-step, fail-fast, and
+2. The compensation workflow: it takes a target workflow id, walks that one history in reverse,
+   filters `DBOS.` names, runs each undo as its own step, fails fast, and emits
    `[:dbos, :compensation, :stuck]`.
 3. Triggers: automatic enqueue in the terminal transaction for the exception path, and
    `Dbos.abort/1`.
 4. `CANCELLING` status, the process-side transition, and lease-sweep pickup.
-5. Recursion into `getResult`/`enqueue`/`forkWorkflow` descendants, awaited.
+5. Descendants named by `getResult`/`enqueue`/`forkWorkflow`: each resolved to a workflow id and
+   handed its own compensator, awaited in reverse order.
 6. `compensate:` on `send_message`/`set_event`/`write_stream`.
 7. `widget_store` reworked as the saga demo, covering both the failure and the
    nothing-to-unwind branches.
