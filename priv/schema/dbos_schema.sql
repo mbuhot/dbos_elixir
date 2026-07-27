@@ -707,3 +707,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_workflow_status_reclaim"
   WHERE "status" = 'PENDING' AND "queue_name" IS NULL;
 
 UPDATE "dbos".extension_migrations SET version = 3;
+
+-- extension migration 4: step compensation records
+
+ALTER TABLE "dbos".operation_outputs ADD COLUMN IF NOT EXISTS ex_compensation TEXT;
+
+UPDATE "dbos".extension_migrations SET version = 4;

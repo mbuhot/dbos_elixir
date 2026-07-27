@@ -302,8 +302,8 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Checkpoints a step outcome: `output`/`error` are already-encoded
-  strings (or `nil`). `ON CONFLICT (workflow_uuid, function_id) DO NOTHING`, then, only on the
+  Checkpoints a step outcome: `output`/`error`/`compensation` are already-encoded strings (or
+  `nil`), the last being the recipe for reversing this step's effect. `ON CONFLICT (workflow_uuid, function_id) DO NOTHING`, then, only on the
   branch that actually inserted a row, re-stamps `workflow_status.executor_id` to
   `config.executor_id`, swallowing its own failure with a logged warning. A retried write that
   matches the stored row byte-for-byte (including timestamps) is an idempotent no-op; one with a
@@ -2154,27 +2154,7 @@ defmodule Dbos.SystemDb do
   defp decode_recorded_step(_output, error), do: {:replay_failure, Serialization.decode(error)}
 
   defp try_insert_operation_output(config, attrs) do
-    workflow_id = Map.fetch!(attrs, :workflow_id)
-    function_id = Map.fetch!(attrs, :function_id)
-    function_name = Map.fetch!(attrs, :function_name)
-    output = Map.get(attrs, :output)
-    error = Map.get(attrs, :error)
-    started_at = Map.fetch!(attrs, :started_at)
-    completed_at = Map.fetch!(attrs, :completed_at)
-    child_workflow_id = Map.get(attrs, :child_workflow_id)
-
-    {columns, values} =
-      operation_output_columns_and_values(
-        workflow_id,
-        function_id,
-        output,
-        error,
-        function_name,
-        started_at,
-        completed_at,
-        child_workflow_id
-      )
-
+    {columns, values} = operation_output_columns_and_values(attrs)
     placeholders = 1..length(values) |> Enum.map_join(", ", &"$#{&1}")
 
     sql = """
@@ -2187,55 +2167,30 @@ defmodule Dbos.SystemDb do
     {:inserted, num_rows > 0}
   end
 
-  defp operation_output_columns_and_values(
-         workflow_id,
-         function_id,
-         output,
-         error,
-         function_name,
-         started_at,
-         completed_at,
-         nil
-       ) do
-    {
-      ~w(workflow_uuid function_id output error function_name started_at_epoch_ms completed_at_epoch_ms serialization),
-      [
-        workflow_id,
-        function_id,
-        output,
-        error,
-        function_name,
-        started_at,
-        completed_at,
-        Serialization.format_name()
-      ]
-    }
-  end
+  # `child_workflow_id` and `ex_compensation` are written only when present, so a step that has
+  # neither produces the same statement it always did.
+  defp operation_output_columns_and_values(attrs) do
+    required = [
+      {"workflow_uuid", Map.fetch!(attrs, :workflow_id)},
+      {"function_id", Map.fetch!(attrs, :function_id)},
+      {"output", Map.get(attrs, :output)},
+      {"error", Map.get(attrs, :error)},
+      {"function_name", Map.fetch!(attrs, :function_name)},
+      {"started_at_epoch_ms", Map.fetch!(attrs, :started_at)},
+      {"completed_at_epoch_ms", Map.fetch!(attrs, :completed_at)},
+      {"serialization", Serialization.format_name()}
+    ]
 
-  defp operation_output_columns_and_values(
-         workflow_id,
-         function_id,
-         output,
-         error,
-         function_name,
-         started_at,
-         completed_at,
-         child_workflow_id
-       ) do
-    {
-      ~w(workflow_uuid function_id output error function_name started_at_epoch_ms completed_at_epoch_ms serialization child_workflow_id),
-      [
-        workflow_id,
-        function_id,
-        output,
-        error,
-        function_name,
-        started_at,
-        completed_at,
-        Serialization.format_name(),
-        child_workflow_id
-      ]
-    }
+    optional =
+      Enum.reject(
+        [
+          {"child_workflow_id", Map.get(attrs, :child_workflow_id)},
+          {"ex_compensation", Map.get(attrs, :compensation)}
+        ],
+        fn {_column, value} -> is_nil(value) end
+      )
+
+    Enum.unzip(required ++ optional)
   end
 
   defp reconcile_existing_operation_output(config, attrs) do

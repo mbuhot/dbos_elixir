@@ -117,7 +117,9 @@ defmodule Dbos.Runtime do
   directly and records nothing.
 
   `opts`: `:max_retries` (default `0`), `:base_interval_ms` (default `100`), `:backoff_factor`
-  (default `2.0`), `:max_interval_ms` (default `5000`).
+  (default `2.0`), `:max_interval_ms` (default `5000`), and `:compensation` — a zero-arity
+  function returning this step's compensation record, called only on the branch that checkpoints
+  a success.
   """
   def run_step(name, opts \\ [], fun)
 
@@ -192,16 +194,28 @@ defmodule Dbos.Runtime do
   end
 
   defp execute_and_checkpoint_step(context, function_id, name, opts, fun) do
+    {compensation, retry_opts} = Keyword.pop(opts, :compensation)
     started_at = System.os_time(:millisecond)
 
     outcome =
-      with_flag(:in_step, name, fn -> run_with_retries(context.workflow_id, name, opts, fun) end)
+      with_flag(:in_step, name, fn ->
+        run_with_retries(context.workflow_id, name, retry_opts, fun)
+      end)
 
     completed_at = System.os_time(:millisecond)
 
     case outcome do
       {:ok, value} ->
-        record_step_success(context, function_id, name, value, started_at, completed_at)
+        record_step_success(
+          context,
+          function_id,
+          name,
+          value,
+          started_at,
+          completed_at,
+          compensation
+        )
+
         value
 
       {:failed, kind, value, stacktrace} ->
@@ -220,15 +234,43 @@ defmodule Dbos.Runtime do
     end
   end
 
-  defp record_step_success(context, function_id, name, value, started_at, completed_at) do
+  defp record_step_success(
+         context,
+         function_id,
+         name,
+         value,
+         started_at,
+         completed_at,
+         compensation
+       ) do
     SystemDb.record_operation_result(context.config, %{
       workflow_id: context.workflow_id,
       function_id: function_id,
       function_name: name,
       output: Serialization.encode(value),
       started_at: started_at,
-      completed_at: completed_at
+      completed_at: completed_at,
+      compensation: encoded_compensation(compensation, value)
     })
+  end
+
+  # Built here rather than at the call site so the record is written only when the step actually
+  # checkpoints a success: a replayed step, a folded one, and a failed one all skip it, and the
+  # bound arguments are never evaluated on those paths.
+  defp encoded_compensation(nil, _value), do: nil
+
+  defp encoded_compensation(compensation, value) when is_function(compensation, 0) do
+    Serialization.encode(substitute_checkpoint(compensation.(), value))
+  end
+
+  defp substitute_checkpoint(%{undo: {module, function, args}} = record, value) do
+    substituted =
+      Enum.map(args, fn
+        :__checkpoint__ -> value
+        arg -> arg
+      end)
+
+    %{record | undo: {module, function, substituted}}
   end
 
   defp record_step_failure(
@@ -297,6 +339,7 @@ defmodule Dbos.Runtime do
 
   defp execute_and_checkpoint_transaction(context, function_id, name, opts, fun) do
     isolation = Keyword.get(opts, :isolation)
+    compensation = Keyword.get(opts, :compensation)
     started_at = System.os_time(:millisecond)
 
     {:ok, value} =
@@ -311,7 +354,8 @@ defmodule Dbos.Runtime do
           function_name: name,
           output: Serialization.encode(value),
           started_at: started_at,
-          completed_at: completed_at
+          completed_at: completed_at,
+          compensation: encoded_compensation(compensation, value)
         })
 
         value

@@ -7,11 +7,13 @@ The work queue. Each entry is something we intend to do. Resolved items are dele
 `compensate:` on a step, recorded onto the step's checkpoint row, unwound in reverse by a separate
 durable workflow. Design and rationale in `notes/saga-compensation-design.md`.
 
-Phases:
+**Phase 1 is done**: extension migration 4 adds `operation_outputs.ex_compensation`, `compensate:`
+on `defstep`/`deftransaction` expands to a closure the runtime calls only on the branch that
+checkpoints a success, and the `@before_compile` check rejects a target that is not a step of
+matching arity in the same module.
 
-1. Extension migration 4 (`operation_outputs.ex_compensation`), the `compensate:` option on
-   `defstep`/`deftransaction`, the `@before_compile` contract check, and the record written at
-   checkpoint time.
+Remaining phases:
+
 2. The compensation workflow: reverse walk, `DBOS.` filtering, undo-per-step, fail-fast, and
    `[:dbos, :compensation, :stuck]`.
 3. Triggers: automatic enqueue in the terminal transaction for the exception path, and

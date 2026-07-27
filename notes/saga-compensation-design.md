@@ -173,8 +173,8 @@ body has strictly more context — it sees the local bindings, including any id 
 failure. And a node that dies mid-step writes no row at all, so the step is re-executed on
 recovery rather than compensated, which is the better outcome.
 
-Cleanup inside a step's `rescue` must be plain inline code. A nested `defstep` call corrupts the
-`function_id` sequence (see `TODO.md`).
+Cleanup inside a step's `rescue` is plain code either way: a nested `defstep` call folds into the
+enclosing step and writes no checkpoint of its own, so it is never something the unwind can see.
 
 **A name-keyed `undo/2` convention.** `function_name` defaults to `"fun/arity"` with no module
 qualification, and a workflow freely calls steps defined in other modules, so one history can hold

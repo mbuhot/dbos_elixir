@@ -61,6 +61,7 @@ defmodule Dbos.Macros do
         ]
 
       Module.register_attribute(__MODULE__, :dbos_steps, accumulate: true)
+      Module.register_attribute(__MODULE__, :dbos_compensations, accumulate: true)
       Module.register_attribute(__MODULE__, :dbos_workflow_defs, accumulate: true)
       Module.register_attribute(__MODULE__, :dbos_deterministic, accumulate: false)
       @dbos_repo unquote(repo)
@@ -111,8 +112,12 @@ defmodule Dbos.Macros do
 
     repo = Module.get_attribute(env.module, :dbos_repo)
 
+    compensations =
+      env.module |> Module.get_attribute(:dbos_compensations, []) |> List.wrap() |> Enum.reverse()
+
     reject_duplicate_workflows!(workflow_defs, env)
     reject_ambiguous_opts_arity!(workflow_defs, env)
+    reject_unresolvable_compensations!(compensations, steps_meta, env)
 
     built = Enum.map(workflow_defs, &build_workflow(&1, env, repo))
     workflow_asts = Enum.map(built, &elem(&1, 0))
@@ -139,6 +144,14 @@ defmodule Dbos.Macros do
   Wraps `call`'s body in `Dbos.Runtime.run_step/3`. The step name defaults to `"name/arity"`;
   override with `name:`. Any other option (`:max_retries`, `:base_interval_ms`,
   `:backoff_factor`, `:max_interval_ms`) is forwarded to `Dbos.RetryPolicy`.
+
+  `compensate:` names the step that reverses this one, as a capture of a `defstep` or
+  `deftransaction` in the same module: `&release_stock(product_id, quantity, &1)`. `&1` stands for
+  this step's checkpointed return value and may sit at any one argument position; every other
+  argument is frozen by value when this step checkpoints. The recipe is written onto the
+  checkpoint row itself, so it survives a later rename of this module and needs no registry.
+  Recorded only when the step actually checkpoints — a replayed step, a failed one, and one folded
+  into an enclosing step all record nothing.
   """
   defmacro defstep(call, do_block), do: build_step(call, do_block, __CALLER__)
 
@@ -147,7 +160,8 @@ defmodule Dbos.Macros do
 
   @doc """
   Wraps `call`'s body in `Dbos.transaction/3`. The step name defaults to `"name/arity"`; override
-  with `name:`. `opts[:isolation]` is forwarded to `Dbos.transaction/3`.
+  with `name:`. `opts[:isolation]` is forwarded to `Dbos.transaction/3`. `compensate:` works
+  exactly as it does on `defstep/3`.
   """
   defmacro deftransaction(call, do_block), do: build_transaction(call, do_block, __CALLER__)
 
@@ -245,13 +259,15 @@ defmodule Dbos.Macros do
     {block, extra_opts} = Keyword.pop!(opts, :do)
     {fun_name, arity} = head_name_arity(call)
     step_name = Keyword.get(extra_opts, :name, "#{fun_name}/#{arity}")
-    run_opts = Keyword.delete(extra_opts, :name)
+    {compensation, extra_opts} = pop_compensation!(extra_opts, step_name, env)
+    run_opts = extra_opts |> Keyword.delete(:name) |> put_compensation(compensation)
 
     Dbos.Determinism.check_step!(block, %{env: env, step_name: step_name})
 
     quote do
       @dbos_steps {unquote(step_name), {unquote(fun_name), unquote(arity)},
                    unquote(Macro.escape(%{kind: :step, line: env.line}))}
+      unquote(compensation_attribute(compensation, step_name, env))
       def unquote(call), do: unquote(wrap_run_step(step_name, run_opts, block))
     end
   end
@@ -260,15 +276,128 @@ defmodule Dbos.Macros do
     {block, extra_opts} = Keyword.pop!(opts, :do)
     {fun_name, arity} = head_name_arity(call)
     step_name = Keyword.get(extra_opts, :name, "#{fun_name}/#{arity}")
-    run_opts = Keyword.delete(extra_opts, :name)
+    {compensation, extra_opts} = pop_compensation!(extra_opts, step_name, env)
+    run_opts = extra_opts |> Keyword.delete(:name) |> put_compensation(compensation)
 
     Dbos.Determinism.check_step!(block, %{env: env, step_name: step_name})
 
     quote do
       @dbos_steps {unquote(step_name), {unquote(fun_name), unquote(arity)},
                    unquote(Macro.escape(%{kind: :transaction, line: env.line}))}
+      unquote(compensation_attribute(compensation, step_name, env))
       def unquote(call), do: unquote(wrap_transaction(step_name, run_opts, block))
     end
+  end
+
+  # `compensate:` names a step in this module that reverses this one. The bound arguments are the
+  # step's own, so the recipe has to be built where they are in scope: this expands to a
+  # zero-arity closure the runtime calls only on the branch that checkpoints a success.
+  # `:__checkpoint__` holds the slot `&1` occupied, and the runtime substitutes the step's
+  # recorded output there.
+  defp pop_compensation!(extra_opts, step_name, env) do
+    case Keyword.pop(extra_opts, :compensate) do
+      {nil, rest} -> {nil, rest}
+      {capture, rest} -> {parse_compensation!(capture, step_name, env), rest}
+    end
+  end
+
+  defp put_compensation(run_opts, nil), do: run_opts
+
+  defp put_compensation(run_opts, %{undo_ast: undo_ast}),
+    do: Keyword.put(run_opts, :compensation, undo_ast)
+
+  defp compensation_attribute(nil, _step_name, _env), do: nil
+
+  defp compensation_attribute(%{target: target}, step_name, env) do
+    quote do
+      @dbos_compensations {unquote(step_name), unquote(Macro.escape(target)), unquote(env.line)}
+    end
+  end
+
+  defp parse_compensation!({:&, _, [{:/, _, [{fun, _, context}, 1]}]}, step_name, env)
+       when is_atom(fun) and is_atom(context) do
+    build_compensation(fun, [:__checkpoint__], step_name, env)
+  end
+
+  defp parse_compensation!({:&, _, [{fun, _, args}]}, step_name, env)
+       when is_atom(fun) and is_list(args) do
+    reject_bad_checkpoint_slot!(args, step_name, env)
+    build_compensation(fun, Enum.map(args, &checkpoint_slot/1), step_name, env)
+  end
+
+  defp parse_compensation!(other, step_name, env) do
+    raise CompileError,
+      file: env.file,
+      line: env.line,
+      description:
+        "step #{inspect(step_name)}'s compensate: must be a capture of a step in this module, " <>
+          "such as `&release_stock(product_id, &1)` or `&release_stock/1`, got: " <>
+          Macro.to_string(other)
+  end
+
+  defp build_compensation(fun, args, _step_name, _env) do
+    undo_ast =
+      quote do
+        fn -> %{undo: {__MODULE__, unquote(fun), unquote(args)}} end
+      end
+
+    %{target: {fun, length(args)}, undo_ast: undo_ast}
+  end
+
+  defp checkpoint_slot({:&, _, [1]}), do: :__checkpoint__
+  defp checkpoint_slot(argument), do: argument
+
+  defp reject_bad_checkpoint_slot!(args, step_name, env) do
+    top_level = Enum.count(args, &match?({:&, _, [1]}, &1))
+    nested = count_captured_arguments(args) - top_level
+
+    cond do
+      top_level == 1 and nested == 0 ->
+        :ok
+
+      nested > 0 ->
+        raise CompileError,
+          file: env.file,
+          line: env.line,
+          description:
+            "step #{inspect(step_name)}'s compensate: may only use &1 as a whole argument, " <>
+              "not inside a larger expression — the checkpointed value is substituted into one " <>
+              "argument position. Take it apart in the compensating step's own body instead."
+
+      true ->
+        raise CompileError,
+          file: env.file,
+          line: env.line,
+          description:
+            "step #{inspect(step_name)}'s compensate: must use &1 exactly once, for the " <>
+              "checkpointed return value of #{inspect(step_name)}; found it #{top_level} times."
+    end
+  end
+
+  defp count_captured_arguments(ast) do
+    {_ast, count} =
+      Macro.prewalk(ast, 0, fn
+        {:&, _, [index]} = node, count when is_integer(index) -> {node, count + 1}
+        node, count -> {node, count}
+      end)
+
+    count
+  end
+
+  defp reject_unresolvable_compensations!(compensations, steps_meta, env) do
+    declared = MapSet.new(steps_meta, fn {_name, fun_arity, _meta} -> fun_arity end)
+
+    Enum.each(compensations, fn {step_name, {fun, arity}, line} ->
+      unless MapSet.member?(declared, {fun, arity}) do
+        raise CompileError,
+          file: env.file,
+          line: line,
+          description:
+            "step #{inspect(step_name)}'s compensate: names #{fun}/#{arity}, which is not a " <>
+              "defstep or deftransaction in #{inspect(env.module)}. A compensating action is " <>
+              "itself a durable step, and it must live alongside the step it reverses."
+      end
+    end)
   end
 
   defp wrap_run_step(step_name, run_opts, block) do
