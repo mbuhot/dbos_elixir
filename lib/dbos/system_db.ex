@@ -395,18 +395,29 @@ defmodule Dbos.SystemDb do
   it is reporting, so a workflow is never `ERROR` with compensable effects and no compensator to
   reverse them. Only when its history holds at least one compensation, and never for an unwind's
   own row — see `Dbos.Compensation`.
+
+  A `:success` outcome has no unwind to pair with, so it is a single statement rather than a
+  transaction: this runs once per workflow, and a transaction would triple its round-trips.
   """
   def update_workflow_outcome(%Config{} = config, workflow_id, attrs) do
-    {:ok, outcome} =
-      transaction(config, [], fn conn ->
-        tx_config = %{config | conn: conn}
-        result = write_workflow_outcome(tx_config, workflow_id, attrs)
-        maybe_enqueue_unwind(tx_config, workflow_id, Map.fetch!(attrs, :status))
-        result
-      end)
+    status = Map.fetch!(attrs, :status)
 
-    outcome
+    if unwind_status?(status) do
+      {:ok, outcome} =
+        transaction(config, [], fn conn ->
+          tx_config = %{config | conn: conn}
+          result = write_workflow_outcome(tx_config, workflow_id, attrs)
+          maybe_enqueue_unwind(tx_config, workflow_id, status)
+          result
+        end)
+
+      outcome
+    else
+      write_workflow_outcome(config, workflow_id, attrs)
+    end
   end
+
+  defp unwind_status?(status), do: status in [:error, :cancelled]
 
   # A forward outcome must not overwrite a cancellation already under way: the workflow was told to
   # stop, and the effects of the step it managed to finish are exactly what the unwind exists to
