@@ -82,7 +82,7 @@ defmodule Dbos.Testing do
            partition_key: partition_key,
            local_running_count: 0
          ) do
-      [] ->
+      {:blocked, _reason} ->
         0
 
       claimed ->

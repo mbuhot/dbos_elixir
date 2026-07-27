@@ -60,12 +60,17 @@ The tick is a fallback, not the mechanism:
 | The runner's last tick | Next interval |
 |---|---|
 | claimed work | back to `base_polling_interval_ms` — there may be more |
-| found nothing, `LISTEN` connected | backs off toward `max_polling_interval_ms` |
-| found nothing, polling fallback | stays at `base_polling_interval_ms` |
+| found the queue empty, `LISTEN` connected | backs off toward `max_polling_interval_ms` |
+| found the queue empty, polling fallback | stays at `base_polling_interval_ms` |
+| was held back by a concurrency or rate limit | stays at `base_polling_interval_ms` |
 | hit lock contention | backs off toward `max_polling_interval_ms` |
 
 So an idle queue settles at the ceiling and costs almost nothing, while a newly enqueued workflow
-still starts within milliseconds. Where no dedicated `LISTEN` connection can be established
+still starts within milliseconds.
+
+A saturated queue is deliberately not idle. Work is waiting on a slot or a rate-limit window, and
+neither a workflow finishing nor a window elapsing notifies anything, so the runner has to keep
+asking. `[:dbos, :queue, :dequeue]`'s `blocked` metadata tells the two apart. Where no dedicated `LISTEN` connection can be established
 (`Dbos.Notifications.mode/1` reports `:poll`), the tick is the only thing that will notice new work,
 so it stays at the base interval.
 

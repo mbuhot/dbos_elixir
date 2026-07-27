@@ -109,7 +109,13 @@ defmodule Dbos.WorkflowProcess do
     SystemDb.update_workflow_outcome(config, workflow_id, attrs)
     Notifications.notify_status(engine, workflow_id)
   rescue
-    Dbos.WorkflowCancelledError -> Notifications.notify_status(engine, workflow_id)
+    Dbos.WorkflowCancelledError ->
+      Notifications.notify_status(engine, workflow_id)
+
+    # This workflow ran to an outcome after being cancelled. The outcome is not reportable — the
+    # effects behind it are what the unwind reverses — so the cancellation is completed instead.
+    Dbos.WorkflowCancellingError ->
+      record_outcome(config, engine, workflow_id, :cancelling)
   end
 
   defp register_in_process_registry(engine, workflow_id, %{

@@ -3,10 +3,14 @@
 #
 # A ticking loop is the fallback, not the mechanism: the runner subscribes to its queue's
 # notifications, so an enqueue anywhere in the fleet wakes it within a debounce window, and a tick
-# that claims nothing backs the interval off toward max_polling_interval_ms. Where no LISTEN
+# that finds the queue empty backs the interval off toward max_polling_interval_ms. Where no LISTEN
 # connection is available (Dbos.Notifications.mode/1 is :poll) the interval stays at the base,
-# since the tick is then the only thing that will notice new work. Lock contention backs off the
-# same way, and multiplicative jitter is applied every tick.
+# since the tick is then the only thing that will notice new work.
+#
+# A tick held back by a concurrency or rate limit is not idle: work is waiting, and what releases it
+# is a running workflow finishing or a window elapsing, neither of which notifies anybody. Those
+# hold at the base interval, so the runner keeps asking. Lock contention backs off, since a peer
+# holding the lock is claiming the work anyway, and multiplicative jitter is applied every tick.
 #
 # Traps exits so a shutdown arriving mid-tick is handled after the tick returns, rather than
 # killing the process while it holds a database connection.
@@ -127,6 +131,7 @@ defmodule Dbos.Queue.Runner do
     cond do
       Enum.any?(outcomes, &(&1 == :contention)) -> :contention
       Enum.any?(outcomes, &(&1 == :claimed)) -> :claimed
+      Enum.any?(outcomes, &(&1 == :limited)) -> :limited
       true -> :idle
     end
   end
@@ -148,8 +153,7 @@ defmodule Dbos.Queue.Runner do
         )
       end)
 
-    dispatch_all(engine, claimed, queue.name, partition_key)
-    if claimed == [], do: :idle, else: :claimed
+    settle_dequeue(engine, claimed, queue.name, partition_key)
   rescue
     error ->
       if SystemDb.contention_error?(error) do
@@ -196,11 +200,24 @@ defmodule Dbos.Queue.Runner do
     end
   end
 
+  defp settle_dequeue(_engine, {:blocked, :empty}, _queue_name, _partition_key), do: :idle
+
+  # Work is waiting and a limit is holding it back. What releases it is a running workflow
+  # finishing or a rate-limit window elapsing, and neither notifies anybody, so the tick is the only
+  # thing that will notice — it must not back off past the base interval.
+  defp settle_dequeue(_engine, {:blocked, _reason}, _queue_name, _partition_key), do: :limited
+
+  defp settle_dequeue(engine, claimed, queue_name, partition_key) do
+    dispatch_all(engine, claimed, queue_name, partition_key)
+    :claimed
+  end
+
   defp adjust_interval(current_ms, %__MODULE__{queue: queue}, :contention),
     do: min(current_ms * @backoff_factor, queue.max_polling_interval_ms)
 
-  defp adjust_interval(_current_ms, %__MODULE__{queue: queue}, :claimed),
-    do: queue.base_polling_interval_ms
+  defp adjust_interval(_current_ms, %__MODULE__{queue: queue}, outcome)
+       when outcome in [:claimed, :limited],
+       do: queue.base_polling_interval_ms
 
   # An idle tick backs off only where a notification will bring the runner back sooner than the
   # interval would. Under the polling fallback the tick is the only thing that notices new work, so

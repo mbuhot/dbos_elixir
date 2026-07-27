@@ -187,6 +187,12 @@ defmodule Dbos.Waits do
     {:noreply, state}
   end
 
+  # A status wake's payload is the workflow id itself, not the "id::topic" the wait keyspaces use.
+  def handle_info({:dbos_notify, :status, workflow_id}, state) when is_binary(workflow_id) do
+    safely(workflow_id, fn -> wake(state.engine, workflow_id) end)
+    {:noreply, state}
+  end
+
   def handle_info({:dbos_notify, _keyspace, payload}, state) when is_binary(payload) do
     case workflow_id_from_payload(payload) do
       nil -> :ok
@@ -220,20 +226,34 @@ defmodule Dbos.Waits do
     :erlang.send_after(remaining_ms, self(), {:wake, workflow_id})
   end
 
-  defp subscribe(_engine, _workflow_id, :sleep), do: :ok
+  # Every parked wait also listens for its own workflow's status changes, whichever kind of wait it
+  # is: a cancellation is a reason to stop waiting that has nothing to do with what the wait is for,
+  # and it may have been recorded on another node. Subscribing per parked wait rather than
+  # engine-wide keeps the volume proportional to what is parked here.
+  defp subscribe(engine, workflow_id, waiting_for) do
+    Notifications.subscribe_status(engine, workflow_id)
+    subscribe_wait(engine, workflow_id, waiting_for)
+  end
 
-  defp subscribe(engine, workflow_id, {:recv, topic}),
+  defp unsubscribe(engine, workflow_id, waiting_for) do
+    Notifications.unsubscribe_status(engine, workflow_id)
+    unsubscribe_wait(engine, workflow_id, waiting_for)
+  end
+
+  defp subscribe_wait(_engine, _workflow_id, :sleep), do: :ok
+
+  defp subscribe_wait(engine, workflow_id, {:recv, topic}),
     do: Notifications.subscribe_recv(engine, workflow_id, topic)
 
-  defp subscribe(engine, _workflow_id, {:event, target_workflow_id, key}),
+  defp subscribe_wait(engine, _workflow_id, {:event, target_workflow_id, key}),
     do: Notifications.subscribe_event(engine, target_workflow_id, key)
 
-  defp unsubscribe(_engine, _workflow_id, :sleep), do: :ok
+  defp unsubscribe_wait(_engine, _workflow_id, :sleep), do: :ok
 
-  defp unsubscribe(engine, workflow_id, {:recv, topic}),
+  defp unsubscribe_wait(engine, workflow_id, {:recv, topic}),
     do: Notifications.unsubscribe_recv(engine, workflow_id, topic)
 
-  defp unsubscribe(engine, _workflow_id, {:event, target_workflow_id, key}),
+  defp unsubscribe_wait(engine, _workflow_id, {:event, target_workflow_id, key}),
     do: Notifications.unsubscribe_event(engine, target_workflow_id, key)
 
   defp resolved?(_config, _workflow_id, :sleep), do: false

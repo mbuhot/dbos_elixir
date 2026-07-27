@@ -64,7 +64,8 @@ defmodule Dbos.DequeueTest do
     enqueue(config, inputs: [1])
     queue = Queue.new("q", worker_concurrency: 1)
 
-    assert SystemDb.dequeue_workflows(config, queue, local_running_count: 1) == []
+    assert SystemDb.dequeue_workflows(config, queue, local_running_count: 1) ==
+             {:blocked, :no_capacity}
   end
 
   test "global_concurrency bounds the claim by counting PENDING rows for the queue", %{
@@ -91,7 +92,7 @@ defmodule Dbos.DequeueTest do
       enqueue(config, inputs: [1], application_version: nil)
 
     old_worker_config = %{config | application_version: "v0"}
-    assert SystemDb.dequeue_workflows(old_worker_config, Queue.new("q")) == []
+    assert SystemDb.dequeue_workflows(old_worker_config, Queue.new("q")) == {:blocked, :empty}
 
     claimed = SystemDb.dequeue_workflows(config, Queue.new("q"))
     assert Enum.map(claimed, & &1.workflow_id) == [null_version_id]
@@ -104,7 +105,7 @@ defmodule Dbos.DequeueTest do
     enqueue(config, inputs: [1], application_version: "v2")
 
     other_config = %{config | application_version: "v1"}
-    assert SystemDb.dequeue_workflows(other_config, Queue.new("q")) == []
+    assert SystemDb.dequeue_workflows(other_config, Queue.new("q")) == {:blocked, :empty}
   end
 
   test "rate limiting caps starts within the rolling window", %{config: config} do
@@ -118,7 +119,7 @@ defmodule Dbos.DequeueTest do
     assert length(claimed) == 2
 
     enqueue(config, inputs: [4])
-    assert SystemDb.dequeue_workflows(config, queue) == []
+    assert SystemDb.dequeue_workflows(config, queue) == {:blocked, :rate_limited}
   end
 
   test "partition keys are dequeued and counted independently", %{config: config} do
@@ -145,6 +146,6 @@ defmodule Dbos.DequeueTest do
         [id]
       )
 
-    assert SystemDb.dequeue_workflows(config, Queue.new("q")) == []
+    assert SystemDb.dequeue_workflows(config, Queue.new("q")) == {:blocked, :empty}
   end
 end

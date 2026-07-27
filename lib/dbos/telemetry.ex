@@ -14,13 +14,20 @@ defmodule Dbos.Telemetry do
     :telemetry.span([:dbos, :step], metadata, fn -> {fun.(), metadata} end)
   end
 
-  @doc "Spans one queue's per-tick dequeue call: `[:dbos, :queue, :dequeue, ...]`."
+  @doc """
+  Spans one queue's per-tick dequeue call: `[:dbos, :queue, :dequeue, ...]`. The `:stop` metadata
+  carries `count`, and a `blocked` reason (`:empty`, `:no_capacity`, `:rate_limited`) whenever that
+  count is zero — the difference between a quiet queue and a saturated one.
+  """
   def span_dequeue(metadata, fun) do
     :telemetry.span([:dbos, :queue, :dequeue], metadata, fn ->
-      claimed = fun.()
-      {claimed, Map.put(metadata, :count, length(claimed))}
+      result = fun.()
+      {result, Map.merge(metadata, dequeue_measurements(result))}
     end)
   end
+
+  defp dequeue_measurements({:blocked, reason}), do: %{count: 0, blocked: reason}
+  defp dequeue_measurements(claimed), do: %{count: length(claimed)}
 
   @doc "Spans one recovery/reclaim pass: `[:dbos, :recovery, ...]`."
   def span_recovery(metadata, fun) do

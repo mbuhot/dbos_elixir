@@ -408,6 +408,12 @@ defmodule Dbos.SystemDb do
     outcome
   end
 
+  # A forward outcome must not overwrite a cancellation already under way: the workflow was told to
+  # stop, and the effects of the step it managed to finish are exactly what the unwind exists to
+  # reverse. Only CANCELLED may follow CANCELLING, which is the cancellation completing.
+  defp refused_statuses(:cancelled), do: [:cancelled, :success, :error]
+  defp refused_statuses(_status), do: [:cancelled, :success, :error, :cancelling]
+
   defp maybe_enqueue_unwind(config, workflow_id, status) when status in [:error, :cancelled] do
     if unwindable?(config, workflow_id) do
       insert_enqueued_workflow(config, %{
@@ -466,22 +472,18 @@ defmodule Dbos.SystemDb do
     error = Map.get(attrs, :error)
     now = System.os_time(:millisecond)
 
+    refused = refused_statuses(status)
+    placeholders = Enum.map_join(6..(5 + length(refused)), ", ", &"$#{&1}")
+
     sql = """
     UPDATE #{table(config, "workflow_status")}
         SET status = $1, output = $2, error = $3, updated_at = $4, completed_at = $4, deduplication_id = NULL
-        WHERE workflow_uuid = $5 AND status NOT IN ($6, $7, $8)
+        WHERE workflow_uuid = $5 AND status NOT IN (#{placeholders})
     """
 
-    values = [
-      Status.to_string(status),
-      output,
-      error,
-      now,
-      workflow_id,
-      Status.to_string(:cancelled),
-      Status.to_string(:success),
-      Status.to_string(:error)
-    ]
+    values =
+      [Status.to_string(status), output, error, now, workflow_id] ++
+        Enum.map(refused, &Status.to_string/1)
 
     {:ok, %{num_rows: num_rows}} = query(config, sql, values)
 
@@ -1968,9 +1970,22 @@ defmodule Dbos.SystemDb do
 
   @doc """
   Claims up to a concurrency- and rate-limit-derived number of `ENQUEUED` workflows from `queue`
-  for this executor, transitioning them to `PENDING`. `opts`: `:partition_key` (default `nil`), `:local_running_count` (default
-  `0`, the caller's in-process count of workflows already running for this queue/partition).
-  Returns a list of `%{workflow_id:, name:, inputs:, config_name:}`, `inputs` already decoded.
+  for this executor, transitioning them to `PENDING`. `opts`: `:partition_key` (default `nil`),
+  `:local_running_count` (default `0`, the caller's in-process count of workflows already running
+  for this queue/partition).
+
+  Returns a list of `%{workflow_id:, name:, inputs:, config_name:}` with `inputs` already decoded,
+  or `{:blocked, reason}` when it claimed nothing:
+
+  | `reason` | Meaning |
+  |---|---|
+  | `:empty` | nothing was waiting |
+  | `:no_capacity` | this executor or the fleet is already at the queue's concurrency limit |
+  | `:rate_limited` | the queue's rate limit is spent for this window |
+
+  The reason matters to a caller deciding how long to wait before asking again: work is waiting in
+  the last two cases, and what will release it is a running workflow finishing or a window
+  elapsing — neither of which notifies anybody.
   """
   def dequeue_workflows(%Config{} = config, %Dbos.Queue{} = queue, opts \\ []) do
     partition_key = Keyword.get(opts, :partition_key)
@@ -1992,7 +2007,7 @@ defmodule Dbos.SystemDb do
 
     case result do
       {:ok, workflows} -> workflows
-      {:error, :nothing_claimed} -> []
+      {:error, {:nothing_claimed, reason}} -> {:blocked, reason}
     end
   end
 
@@ -2003,13 +2018,13 @@ defmodule Dbos.SystemDb do
       claimed = claim_candidates(config, queue, candidate_ids, num_recent)
 
       if claimed == [] do
-        config.db.rollback(config.conn, :nothing_claimed)
+        config.db.rollback(config.conn, {:nothing_claimed, :empty})
       else
         claimed
       end
     else
-      :rate_limited -> config.db.rollback(config.conn, :nothing_claimed)
-      :no_capacity -> config.db.rollback(config.conn, :nothing_claimed)
+      :rate_limited -> config.db.rollback(config.conn, {:nothing_claimed, :rate_limited})
+      :no_capacity -> config.db.rollback(config.conn, {:nothing_claimed, :no_capacity})
     end
   end
 
@@ -2209,6 +2224,7 @@ defmodule Dbos.SystemDb do
   defp handle_update_outcome_conflict(config, workflow_id) do
     sql = "SELECT status FROM #{table(config, "workflow_status")} WHERE workflow_uuid = $1"
     cancelled = Status.to_string(:cancelled)
+    cancelling = Status.to_string(:cancelling)
 
     case query(config, sql, [workflow_id]) do
       {:ok, %{rows: []}} ->
@@ -2216,6 +2232,9 @@ defmodule Dbos.SystemDb do
 
       {:ok, %{rows: [[^cancelled]]}} ->
         raise Dbos.WorkflowCancelledError, workflow_id: workflow_id
+
+      {:ok, %{rows: [[^cancelling]]}} ->
+        raise Dbos.WorkflowCancellingError, workflow_id: workflow_id
 
       {:ok, %{rows: [[_status]]}} ->
         :ok

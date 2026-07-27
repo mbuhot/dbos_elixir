@@ -145,6 +145,7 @@ defmodule Dbos.Migration do
 
   defp drop_functions do
     ~w(
+      ex_workflow_status_function
       ex_queue_function
       enqueue_workflow
       send_message

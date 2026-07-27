@@ -23,7 +23,10 @@ defmodule Dbos.QueueNotifyTest do
       name: name,
       db: {Dbos.DB.Postgrex, Dbos.TestConn},
       executor_id: "exec-#{System.unique_integer([:positive])}",
-      workflows: [{"add/2", {SampleWorkflows, :add, 2}}],
+      workflows: [
+        {"add/2", {SampleWorkflows, :add, 2}},
+        {"sleeper/1", {SampleWorkflows, :sleeper, 1}}
+      ],
       lease_sweep: [enabled: false],
       migrations: :skip,
       notifications_conn_opts: [database: Application.fetch_env!(:dbos, :test_database)]
@@ -145,6 +148,31 @@ defmodule Dbos.QueueNotifyTest do
     assert {:ok, 3} = Dbos.await(handle, timeout_ms: 2_000)
 
     assert :sys.get_state(runner).polling_interval_ms == 50
+  end
+
+  test "a runner held back by its worker-concurrency limit stays at the base interval" do
+    engine =
+      start_engine(
+        queues: [
+          Queue.new("orders", base_polling_interval_ms: 20, worker_concurrency: 1)
+        ]
+      )
+
+    await_listening(engine)
+
+    Dbos.put_engine(engine)
+
+    for _ <- 1..3 do
+      {:ok, _handle} = Dbos.enqueue("sleeper/1", [2_000], queue_name: "orders", engine: engine)
+    end
+
+    runner = engine |> Queue.Runner.process_name("orders") |> GenServer.whereis()
+
+    # One slot, three waiting: every tick from here claims nothing because the limit says so.
+    wait_until(fn -> :sys.get_state(runner).polling_interval_ms == 20 end)
+    Process.sleep(200)
+
+    assert :sys.get_state(runner).polling_interval_ms == 20
   end
 
   defp wait_until(fun, attempts \\ 300)

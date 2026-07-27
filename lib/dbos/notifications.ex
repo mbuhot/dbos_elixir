@@ -53,6 +53,7 @@ defmodule Dbos.Notifications do
   @workflow_events_channel "dbos_workflow_events_channel"
   @streams_channel "dbos_streams_channel"
   @queue_channel "dbos_queue_channel"
+  @workflow_status_channel "dbos_workflow_status_channel"
   @poll_interval_ms 1_000
   @reconnect_base_backoff_ms 200
   @reconnect_max_backoff_ms 5_000
@@ -145,7 +146,7 @@ defmodule Dbos.Notifications do
 
   @doc """
   Registers the caller to be woken whenever a `DELAYED` workflow is written or its wake time
-  moves, from any node — what `Dbos.Queue.Delayed` re-arms its timer on.
+  moves, from any node — what the engine's delayed-workflow timer re-arms on.
   """
   def subscribe_delayed(engine) do
     {:ok, _owner} = Registry.register(wait_registry_name(engine), :delayed, nil)
@@ -160,10 +161,16 @@ defmodule Dbos.Notifications do
   defp payload(id, topic_or_key), do: id <> "::" <> topic_or_key
 
   @doc """
-  Registers the caller to be woken when `workflow_id` completes. A purely in-process signal,
-  fired right after this engine durably records the outcome; `Dbos.await/2` falls back to polling
-  for a workflow finished by a process this engine instance didn't run (a different node, or
-  before this engine started).
+  Registers the caller to be woken whenever `workflow_id`'s status changes — reaching a terminal
+  outcome, but also being cancelled, claimed off a queue, or promoted out of a delay.
+
+  Fired twice over, from two transports that deliver the same message: in-process the moment this
+  engine records a transition itself, and over `LISTEN` for a transition on any node. The second
+  needs `mode/1` to be `:listen`; under the polling fallback only this engine's own transitions
+  reach a subscriber, and `Dbos.await/2` falls back to polling for the rest.
+
+  A subscriber may therefore be woken twice for one transition, and reads the current status rather
+  than inferring it — the wake carries no status.
   """
   def subscribe_status(engine, workflow_id) do
     {:ok, _owner} = Registry.register(wait_registry_name(engine), {:status, workflow_id}, nil)
@@ -175,7 +182,7 @@ defmodule Dbos.Notifications do
     release(wait_registry_name(engine), {:status, workflow_id})
   end
 
-  @doc "Wakes every waiter registered via `subscribe_status/2` for `workflow_id`."
+  @doc "Wakes every waiter registered via `subscribe_status/2` for `workflow_id`, and every engine-wide `:status` subscriber."
   def notify_status(engine, workflow_id) do
     broadcast(wait_registry_name(engine), {:status, workflow_id}, :status, workflow_id)
     notify_all(engine, :status, workflow_id, nil)
@@ -207,10 +214,13 @@ defmodule Dbos.Notifications do
   ## Transport
 
   `:recv`, `:event` and `:stream` ride Postgres `LISTEN`/`NOTIFY` and require `mode/1` to be
-  `:listen`; subscribing to any of them raises `ArgumentError` under `:poll`. `:status` is an
-  in-process signal fired by this engine instance, available under both transports, and covers
-  only workflows this instance finished — a workflow completed on another node reaches no
-  `:status` subscriber here.
+  `:listen`; subscribing to any of them raises `ArgumentError` under `:poll`. `:status` is
+  available under both transports: it is fired in-process for a transition this engine instance
+  records, and over `LISTEN` for one recorded on any node. Under `:poll` only the first reaches a
+  subscriber, so a workflow that changed on another node is invisible until something re-reads it.
+
+  A `:status` subscriber sees every transition, not only terminal ones, and may be woken twice for
+  the same transition — once per transport — so it must read the status rather than count wakes.
 
   ## Cost
 
@@ -337,6 +347,7 @@ defmodule Dbos.Notifications do
         Postgrex.Notifications.listen(pid, @workflow_events_channel)
         Postgrex.Notifications.listen(pid, @streams_channel)
         Postgrex.Notifications.listen(pid, @queue_channel)
+        Postgrex.Notifications.listen(pid, @workflow_status_channel)
         :persistent_term.put(mode_key(engine), :listen)
         %{state | listener: pid, retry_attempt: 0}
 
@@ -446,6 +457,12 @@ defmodule Dbos.Notifications do
 
   # The queue trigger's payload is "<status>::<queue_name>": an ENQUEUED row wakes that queue's
   # runner, a DELAYED one wakes the timer that will promote it.
+  # A status transition anywhere in the fleet, delivered in the same shape as this engine's own
+  # notify_status/2 so a subscriber cannot tell which node the workflow changed on.
+  defp dispatch_notification(engine, @workflow_status_channel, workflow_id) do
+    notify_status(engine, workflow_id)
+  end
+
   defp dispatch_notification(engine, @queue_channel, payload) do
     case String.split(payload, "::", parts: 2) do
       ["ENQUEUED", queue_name] ->

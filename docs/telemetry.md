@@ -90,6 +90,11 @@ Wraps one dequeue poll of one queue/partition pair.
 | `queue_name` | The queue being polled. |
 | `partition_key` | Which partition this poll covers (`nil` for an unpartitioned queue). |
 | `count` | `:stop` only — how many workflows this poll claimed (`0` on an empty poll). |
+| `blocked` | `:stop` only, and only when `count` is `0` — why nothing was claimed: `:empty` (nothing waiting), `:no_capacity` (a concurrency limit is holding work back), `:rate_limited` (the window is spent). |
+
+`blocked` separates a quiet queue from a saturated one. A run of `:no_capacity` or `:rate_limited`
+means work is waiting and the limit is what it is waiting on, which is a capacity signal rather
+than an idle one.
 
 Lock contention counts as an exception here: a `NOWAIT` claim lost under `GlobalConcurrency`
 raises, and contention is an expected, frequent outcome with concurrent dequeuers. Filter on

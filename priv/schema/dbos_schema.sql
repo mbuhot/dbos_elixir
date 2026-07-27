@@ -743,3 +743,29 @@ WHEN (NEW.queue_name IS NOT NULL AND NEW.status IN ('ENQUEUED', 'DELAYED')
 EXECUTE FUNCTION "dbos".ex_queue_function();
 
 UPDATE "dbos".extension_migrations SET version = 5;
+
+-- extension migration 6: workflow status notifications
+
+CREATE OR REPLACE FUNCTION "dbos".ex_workflow_status_function() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_notify('dbos_workflow_status_channel', NEW.workflow_uuid);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+ALTER FUNCTION "dbos".ex_workflow_status_function() SET search_path = pg_catalog, pg_temp;
+
+DROP TRIGGER IF EXISTS dbos_ex_workflow_status_insert_trigger ON "dbos".workflow_status;
+CREATE TRIGGER dbos_ex_workflow_status_insert_trigger
+AFTER INSERT ON "dbos".workflow_status
+FOR EACH ROW
+EXECUTE FUNCTION "dbos".ex_workflow_status_function();
+
+DROP TRIGGER IF EXISTS dbos_ex_workflow_status_update_trigger ON "dbos".workflow_status;
+CREATE TRIGGER dbos_ex_workflow_status_update_trigger
+AFTER UPDATE ON "dbos".workflow_status
+FOR EACH ROW
+WHEN (OLD.status IS DISTINCT FROM NEW.status)
+EXECUTE FUNCTION "dbos".ex_workflow_status_function();
+
+UPDATE "dbos".extension_migrations SET version = 6;
