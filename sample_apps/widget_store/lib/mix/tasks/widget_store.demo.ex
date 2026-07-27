@@ -5,6 +5,7 @@ defmodule Mix.Tasks.WidgetStore.Demo do
 
       mix widget_store.demo start    # seeds a product, starts a checkout, then hard-crashes
       mix widget_store.demo confirm  # restarts (recovery resumes the checkout), then pays
+      mix widget_store.demo decline  # restarts, then declines — the checkout unwinds itself
 
   Run `start`, watch it print that inventory was reserved and the charge was initiated, then
   watch the BEAM go down via `System.halt/1` — a real crash, not a graceful shutdown. Run
@@ -12,6 +13,11 @@ defmodule Mix.Tasks.WidgetStore.Demo do
   does anything else, `reserve_and_create_order` and `charge_customer` return their recorded
   outputs instead of running again, and only then does the payment confirmation arrive and let
   the workflow finish.
+
+  Run `decline` instead of `confirm` to see the saga unwind: the checkout calls `Dbos.abort/1`,
+  reaches `ERROR`, and the engine runs the compensations recorded on its checkpoints in reverse —
+  refunding the charge, then restoring inventory and cancelling the order — in a durable workflow
+  of its own.
   """
 
   use Mix.Task
@@ -53,6 +59,26 @@ defmodule Mix.Tasks.WidgetStore.Demo do
 
     {:ok, result} = Dbos.await(%Dbos.WorkflowHandle{engine: Dbos, workflow_id: @order_id})
     IO.inspect(result, label: "checkout result")
+  end
+
+  def run(["decline"]) do
+    boot()
+
+    IO.puts("Waiting for Dbos.Recovery to finish replaying every PENDING workflow...")
+    Dbos.Recovery.await_boot_recovery(Dbos)
+
+    IO.puts("Recovery finished. Declining the payment the checkout is waiting on...")
+    Dbos.send_message(@order_id, "payment", :declined)
+
+    {:error, reason} = Dbos.await(%Dbos.WorkflowHandle{engine: Dbos, workflow_id: @order_id})
+    IO.inspect(reason, label: "checkout failed with")
+
+    unwind_id = Dbos.Compensation.workflow_id(@order_id)
+    {:ok, undos} = Dbos.await(%Dbos.WorkflowHandle{engine: Dbos, workflow_id: unwind_id})
+    IO.puts("The unwind reversed #{undos} step(s).")
+
+    IO.inspect(WidgetStore.Repo.get(WidgetStore.Product, @product_id), label: "product")
+    IO.inspect(WidgetStore.Repo.get(WidgetStore.Order, @order_id), label: "order")
   end
 
   defp boot do

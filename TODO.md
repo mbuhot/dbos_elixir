@@ -43,7 +43,9 @@ only compensable effects are its children's still gets an unwind.
 `{module, function, args}` with `:__checkpoint__` marking the slot, normalised and validated by
 `Dbos.Compensation.record!/1`.
 
-Remaining phase:
+**Phase 7 is done**: `sample_apps/widget_store` is the saga demo. The checkout body describes only
+the happy path; the reservation and the charge declare their undos, an unfilled order raises so its
+failed step records none, and a declined payment calls `Dbos.abort/1`. `mix widget_store.demo
+decline` shows the unwind. `guides/tutorials/compensation.md` documents the feature.
 
-7. `widget_store` reworked as the saga demo, covering both the failure and the
-   nothing-to-unwind branches.
+Saga compensation is complete.

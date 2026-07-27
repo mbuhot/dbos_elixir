@@ -7,17 +7,26 @@ widget_store.demo confirm` here.
 
 ## What it demonstrates
 
-**Durability property**: a crash at any point during checkout — after the inventory write,
-mid-charge, or while durably parked waiting for payment — never double-decrements inventory,
-never double-charges, and never loses a refund. Restarting the application resumes the
-workflow from its last checkpoint instead of starting over.
+**Durability**: a crash at any point during checkout — after the inventory write, mid-charge, or
+while durably parked waiting for payment — never double-decrements inventory, never double-charges,
+and never loses a refund. Restarting the application resumes the workflow from its last checkpoint
+instead of starting over.
 
-| Step | Kind | Why |
+**Compensation**: the workflow body describes only the happy path. Each step that changes something
+declares how to change it back, and a checkout that cannot go on calls `Dbos.abort/1`. The engine
+then runs those undos in reverse — in a durable workflow of its own, so an interrupted unwind
+resumes rather than restarting.
+
+| Step | Kind | Undone by |
 |---|---|---|
-| `reserve_and_create_order/3` | `deftransaction` | Decrements `products.inventory` and inserts the `orders` row in one Postgres transaction — the write and its `Dbos` checkpoint commit together, or neither does. |
-| `charge_customer/2` | `defstep`, 3 retries | Calls the payment gateway; a transient failure retries instead of failing the whole order. |
-| Waiting for payment | `Dbos.recv_message/2` | Durably parks — no process pinned in memory for the whole wait — until a message arrives on the `"payment"` topic, or 30s pass. |
-| `dispatch_order/1` / `refund_and_restore/3` | `deftransaction` | Marks the order `DISPATCHED`, or restores inventory and marks it `CANCELLED`. |
+| `reserve_and_create_order/3` | `deftransaction` | `release_and_cancel_order/4` — puts the stock back and marks the order `CANCELLED`, in one write |
+| `charge_customer/2` | `defstep`, 3 retries | `refund_charge/2` — refunds the gateway, keyed on the order id so a retry is harmless |
+| Waiting for payment | `Dbos.recv_message/2` | nothing to undo; a decline or a timeout is what triggers the unwind |
+| `dispatch_order/1` | `deftransaction` | nothing after it can fail, so it needs no undo |
+
+An order that cannot be filled raises instead: the reservation step checkpoints a *failure*, which
+records no compensation, so the checkout fails with an empty unwind and no compensator is started
+at all.
 
 ## Running it
 
@@ -55,6 +64,21 @@ select workflow_id, status from dbos.workflow_status where workflow_id = 'demo-o
 Then run `confirm` and watch the same order finish as `dispatched`, with the product's
 inventory unchanged from what `start` already committed.
 
+Or run `decline` instead, and watch the saga unwind: the charge is refunded, the stock goes back,
+and the order ends `cancelled`.
+
+```sql
+select workflow_uuid, status from dbos.workflow_status
+ where workflow_uuid like 'demo-order-1%';
+-- demo-order-1              ERROR
+-- demo-order-1-compensate   SUCCESS
+
+select function_id, function_name from dbos.operation_outputs
+ where workflow_uuid = 'demo-order-1-compensate' order by function_id;
+-- 0  refund_charge/2
+-- 1  release_and_cancel_order/4
+```
+
 ## Tests
 
 ```sh
@@ -65,5 +89,8 @@ mix test
 workflow's own process mid-checkout with `Process.exit(pid, :kill)`, confirms the workflow's
 status is still `PENDING` in `dbos.workflow_status`, drives recovery with
 `Dbos.Recovery.recover_pending/1`, and asserts the order finishes with inventory decremented by
-exactly the ordered quantity — not twice. Two further tests cover a declined/timed-out payment
-(refund and restore) and an out-of-stock order (rejected without touching inventory).
+exactly the ordered quantity — not twice.
+
+Three further tests cover the saga: a declined payment refunds and restores stock, the unwind
+records each undo as its own checkpointed step in reverse order, and an out-of-stock order fails
+with no compensator started.

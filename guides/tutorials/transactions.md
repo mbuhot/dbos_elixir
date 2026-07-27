@@ -72,6 +72,7 @@ end
 | Any other durable operation (`Dbos.send_message/4`, `Dbos.recv_message/3`, `Dbos.set_event/3`, starting or awaiting a workflow, ...) inside a `deftransaction`'s body | Raises `Dbos.OperationInStepError`. |
 | `deftransaction` inside a plain `defstep`'s body | Allowed. Runs a real transaction and commits it, recording no checkpoint row of its own — it rides on the enclosing step's checkpoint. A replay that re-runs the enclosing step re-runs this inner transaction, so its body must tolerate re-execution. |
 
+
 ## What happens on failure
 
 A raised exception rolls the transaction back — the write and the checkpoint undo together — and
@@ -83,3 +84,8 @@ and re-raised verbatim on every replay.
 Uncaught, the exception reaches the workflow body and the workflow is recorded `ERROR`.
 
 `isolation:` is the only option a transactional step acts on.
+
+## Undoing a transaction
+
+`compensate:` works as it does on `defstep` — see [Compensation](compensation.md). The compensating
+action is a new write that negates the old one; a committed transaction cannot be un-committed.

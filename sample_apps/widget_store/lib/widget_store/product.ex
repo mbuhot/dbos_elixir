@@ -5,8 +5,8 @@ defmodule WidgetStore.Product do
 
   @primary_key {:product_id, :string, autogenerate: false}
   schema "products" do
-    field :name, :string
-    field :inventory, :integer
+    field(:name, :string)
+    field(:inventory, :integer)
 
     timestamps(type: :utc_datetime_usec)
   end

@@ -88,6 +88,23 @@ defmodule Dbos.CompensationCancelTest do
     status.status
   end
 
+  # Stops the workflow's process the way a dying executor would, so the row is nobody's and
+  # nothing re-stamps its executor_id underneath the test.
+  defp abandon(engine, workflow_id) do
+    {:ok, pid} = Dbos.WorkflowSup.whereis(engine, workflow_id)
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 1_000
+  end
+
+  defp force_cancelling(workflow_id, executor_id) do
+    Postgrex.query!(
+      Dbos.TestConn,
+      ~s(UPDATE "dbos".workflow_status SET status = 'CANCELLING', executor_id = $2 WHERE workflow_uuid = $1),
+      [workflow_id, executor_id]
+    )
+  end
+
   @tag timeout: 15_000
   test "cancelling a running workflow stops its blocked wait rather than waiting it out", %{
     config: config
@@ -149,12 +166,8 @@ defmodule Dbos.CompensationCancelTest do
     } do
       {:ok, handle} = Sagas.long("t4")
       Ledger.await({:reserved, "t4"})
-
-      Postgrex.query!(
-        Dbos.TestConn,
-        ~s(UPDATE "dbos".workflow_status SET status = 'CANCELLING', executor_id = 'exec-gone' WHERE workflow_uuid = $1),
-        [handle.workflow_id]
-      )
+      abandon(engine, handle.workflow_id)
+      force_cancelling(handle.workflow_id, "exec-gone")
 
       assert status(config, handle.workflow_id) == :cancelling
 
@@ -167,12 +180,8 @@ defmodule Dbos.CompensationCancelTest do
     test "is left alone while its executor's lease is live", %{engine: engine, config: config} do
       {:ok, handle} = Sagas.long("t5")
       Ledger.await({:reserved, "t5"})
-
-      Postgrex.query!(
-        Dbos.TestConn,
-        ~s(UPDATE "dbos".workflow_status SET status = 'CANCELLING' WHERE workflow_uuid = $1),
-        [handle.workflow_id]
-      )
+      abandon(engine, handle.workflow_id)
+      force_cancelling(handle.workflow_id, config.executor_id)
 
       LeaseSweep.sweep_now(engine)
 
@@ -180,17 +189,16 @@ defmodule Dbos.CompensationCancelTest do
     end
   end
 
-  test "CANCELLING is not terminal, so recovery does not replay it forward", %{config: config} do
+  test "CANCELLING is not terminal, so recovery does not replay it forward", %{
+    engine: engine,
+    config: config
+  } do
     {:ok, handle} = Sagas.long("t6")
     Ledger.await({:reserved, "t6"})
+    abandon(engine, handle.workflow_id)
+    force_cancelling(handle.workflow_id, config.executor_id)
 
-    Postgrex.query!(
-      Dbos.TestConn,
-      ~s(UPDATE "dbos".workflow_status SET status = 'CANCELLING' WHERE workflow_uuid = $1),
-      [handle.workflow_id]
-    )
-
-    Recovery.recover_pending(Dbos.current_engine())
+    Recovery.recover_pending(engine)
 
     assert status(config, handle.workflow_id) == :cancelling
     refute Enum.any?(Ledger.entries(), &match?({:charged, _}, &1))

@@ -190,6 +190,7 @@ defmodule Dbos.MixProject do
       "guides/tutorials/workflow-communication.md",
       "guides/tutorials/workflow-management.md",
       "guides/tutorials/scheduled-workflows.md",
+      "guides/tutorials/compensation.md",
       "guides/tutorials/upgrading-workflows.md",
       "guides/tutorials/testing.md",
       "docs/determinism.md",

@@ -4,15 +4,21 @@ defmodule WidgetStore.Checkout do
   the customer, then wait for a payment confirmation that arrives out of band (a webhook, or
   `mix widget_store.demo confirm` standing in for one).
 
-  A crash at any point — before the inventory write, after it but before the charge is
-  initiated, or while parked waiting on the payment confirmation — costs only time. Restarting
-  the application replays every checkpointed step from its recorded output and resumes exactly
-  where it left off: never a double decrement, never a double charge, never a lost refund.
+  The happy path is the only path this body describes. Each step that changes something declares
+  how to change it back, and a checkout that cannot go on calls `Dbos.abort/1` — the engine then
+  runs those undos in reverse, in a durable workflow of its own, so an interrupted unwind resumes
+  rather than restarting.
+
+  A crash at any point — before the inventory write, after it but before the charge is initiated,
+  or while parked waiting on the payment confirmation — costs only time. Restarting the
+  application replays every checkpointed step from its recorded output and resumes exactly where
+  it left off: never a double decrement, never a double charge, never a lost refund.
   """
 
   use Dbos, repo: WidgetStore.Repo
 
   alias WidgetStore.Order
+  alias WidgetStore.OutOfStockError
   alias WidgetStore.PaymentGateway
   alias WidgetStore.Product
   alias WidgetStore.Repo
@@ -20,40 +26,34 @@ defmodule WidgetStore.Checkout do
   @payment_timeout_ms :timer.seconds(30)
 
   defworkflow checkout(order_id, product_id, quantity), name: "checkout" do
-    case reserve_and_create_order(order_id, product_id, quantity) do
-      {:error, reason} ->
-        %{order_id: order_id, status: :rejected, reason: reason}
+    amount = reserve_and_create_order(order_id, product_id, quantity)
+    charge_customer(order_id, amount)
 
-      {:ok, amount} ->
-        :ok = charge_customer(order_id, amount)
-
-        payment_outcome =
-          try do
-            Dbos.recv_message("payment", @payment_timeout_ms)
-          rescue
-            Dbos.RecvTimeoutError -> :timeout
-          end
-
-        case payment_outcome do
-          :paid ->
-            dispatch_order(order_id)
-            %{order_id: order_id, status: :dispatched}
-
-          _other ->
-            refund_and_restore(order_id, product_id, quantity)
-            %{order_id: order_id, status: :refunded}
-        end
+    case await_payment() do
+      :paid -> :ok
+      other -> Dbos.abort({:payment_not_confirmed, other})
     end
+
+    dispatch_order(order_id)
+    %{order_id: order_id, status: :dispatched}
   end
 
-  @doc "Decrements `product_id`'s inventory and inserts the `PENDING` order, or rejects the order — one atomic write plus its checkpoint."
-  deftransaction reserve_and_create_order(order_id, product_id, quantity) do
+  @doc """
+  Decrements `product_id`'s inventory and inserts the `PENDING` order — one atomic write plus its
+  checkpoint. Raises `WidgetStore.OutOfStockError` when there is not enough stock, which fails the
+  checkout before anything has been reserved.
+  """
+  deftransaction reserve_and_create_order(order_id, product_id, quantity),
+    compensate: &release_and_cancel_order(order_id, product_id, quantity, &1) do
     case Repo.get(Product, product_id) do
       nil ->
-        {:error, :product_not_found}
+        raise OutOfStockError, product_id: product_id, requested: quantity, available: 0
 
       %Product{inventory: inventory} when inventory < quantity ->
-        {:error, :out_of_stock}
+        raise OutOfStockError,
+          product_id: product_id,
+          requested: quantity,
+          available: inventory
 
       product ->
         product
@@ -63,13 +63,33 @@ defmodule WidgetStore.Checkout do
         %Order{order_id: order_id, product_id: product_id, quantity: quantity, status: "pending"}
         |> Repo.insert!()
 
-        {:ok, quantity}
+        quantity
     end
   end
 
+  @doc "Puts `quantity` back on the shelf and marks `order_id` `CANCELLED` — one atomic write."
+  deftransaction release_and_cancel_order(order_id, product_id, quantity, _reserved) do
+    product_id
+    |> fetch_product!()
+    |> restore_inventory(quantity)
+
+    order_id
+    |> fetch_order!()
+    |> Ecto.Changeset.change(status: "cancelled")
+    |> Repo.update!()
+  end
+
   @doc "Asks the payment gateway to charge the customer, retrying on a transient failure."
-  defstep charge_customer(order_id, amount), max_retries: 3, base_interval_ms: 200 do
+  defstep charge_customer(order_id, amount),
+    max_retries: 3,
+    base_interval_ms: 200,
+    compensate: &refund_charge(order_id, &1) do
     PaymentGateway.initiate(order_id, amount)
+  end
+
+  @doc "Refunds a charge the checkout has decided not to keep. Idempotent on `order_id`."
+  defstep refund_charge(order_id, _charge) do
+    PaymentGateway.refund(order_id)
   end
 
   @doc "Marks `order_id` `DISPATCHED` once payment is confirmed."
@@ -80,16 +100,10 @@ defmodule WidgetStore.Checkout do
     |> Repo.update!()
   end
 
-  @doc "Restores `product_id`'s inventory and marks `order_id` `CANCELLED` after a declined or timed-out payment."
-  deftransaction refund_and_restore(order_id, product_id, quantity) do
-    product_id
-    |> fetch_product!()
-    |> restore_inventory(quantity)
-
-    order_id
-    |> fetch_order!()
-    |> Ecto.Changeset.change(status: "cancelled")
-    |> Repo.update!()
+  defp await_payment do
+    Dbos.recv_message("payment", @payment_timeout_ms)
+  rescue
+    Dbos.RecvTimeoutError -> :timeout
   end
 
   defp restore_inventory(product, quantity) do

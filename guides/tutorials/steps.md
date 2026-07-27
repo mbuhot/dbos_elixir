@@ -112,6 +112,19 @@ onto the wrong one. A nested *step* is exempt because it takes no id at all.
 This mirrors upstream DBOS, where a step body receives a plain context rather than a DBOS one,
 making every operation in that table unrepresentable inside it.
 
+## Undoing a step
+
+`compensate:` names the step that reverses this one, so a workflow that fails later can be unwound:
+
+```elixir
+defstep reserve_stock(product_id, quantity),
+  compensate: &release_stock(product_id, quantity, &1) do
+  Inventory.reserve(product_id, quantity)
+end
+```
+
+`&1` is this step's checkpointed return value. See [Compensation](compensation.md).
+
 ## Retries
 
 By default a step does not retry — `max_retries: 0` — and a raised exception propagates straight
