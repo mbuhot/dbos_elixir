@@ -44,8 +44,10 @@ defmodule Dbos.Supervisor do
   `:notifications` (default `:listen`) — `:listen` starts a dedicated `LISTEN` connection
   (`Dbos.Notifications`) for `recv`/`getEvent`/streams to wake on, falling back to `:poll` and
   logging a warning if one can't be established; `:poll` skips the listener entirely.
-  `:notifications_conn_opts` overrides the Postgrex connection options used for that dedicated
-  connection (otherwise derived from the Ecto repo's own config, when `:db` is `Dbos.DB.Ecto`).
+  `:notifications_conn_opts` sets the Postgrex connection options used for that dedicated
+  connection. Left out, it falls back to `Application.get_env(:dbos, :notifications_conn_opts)`, then
+  to the Ecto repo's own config when `:db` is `Dbos.DB.Ecto`. A bare Postgrex pool exposes no
+  connection options, so an engine on one needs this set for `LISTEN` to be reachable.
 
   `:lease` opts (see `docs/executor-leases.md`): `:ttl_ms` (default `60_000`) — how long this
   executor's lease stays valid without a renewal; `:renew_interval_ms` (default `10_000`) — how
@@ -144,7 +146,7 @@ defmodule Dbos.Supervisor do
       lease_ttl_ms: Keyword.get(lease_opts, :ttl_ms, 60_000),
       lease_renew_interval_ms: Keyword.get(lease_opts, :renew_interval_ms, 10_000),
       notifications: Keyword.get(opts, :notifications, :listen),
-      notifications_conn_opts: Keyword.get(opts, :notifications_conn_opts),
+      notifications_conn_opts: resolve_notifications_conn_opts(opts),
       scheduler_poll_interval_ms: Keyword.get(opts, :scheduler_poll_interval_ms, 30_000),
       delayed_fallback_interval_ms: Keyword.get(opts, :delayed_fallback_interval_ms, 60_000),
       park_exit_threshold_ms: Keyword.get(opts, :park_exit_threshold_ms, 60_000),
@@ -152,6 +154,12 @@ defmodule Dbos.Supervisor do
       testing: testing,
       queues: queues
     }
+  end
+
+  defp resolve_notifications_conn_opts(opts) do
+    Keyword.get_lazy(opts, :notifications_conn_opts, fn ->
+      Application.get_env(:dbos, :notifications_conn_opts)
+    end)
   end
 
   defp testing_children(name, workflows) do

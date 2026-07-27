@@ -9,6 +9,10 @@ database = System.get_env("DBOS_TEST_DATABASE", "dbos_test")
 
 Application.put_env(:dbos, :test_database, database)
 
+# Every engine here runs on the Dbos.TestConn pool, which exposes no connection options for a
+# dedicated LISTEN connection to be derived from.
+Application.put_env(:dbos, :notifications_conn_opts, database: database)
+
 Application.put_env(:dbos, Dbos.TestRepo,
   database: database,
   pool_size: 5,
