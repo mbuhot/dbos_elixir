@@ -40,16 +40,39 @@ children = [
 | `:global_concurrency` | `nil` | Cap across every engine sharing the database. |
 | `:rate_limit` | `nil` | `%{limit: pos_integer, period_ms: pos_integer}`. |
 | `:partition_queue` | `false` | See Partitioned queues, below. |
-| `:base_polling_interval_ms` | `1_000` | Starting poll interval for this queue's runner. |
+| `:base_polling_interval_ms` | `1_000` | Poll interval while the runner is busy, and the fallback cadence where `LISTEN` is unavailable. |
+| `:max_polling_interval_ms` | `120_000` | Ceiling the interval backs off to while the queue is idle or contended. |
 
 `Dbos.Queue.new/2` raises `Dbos.InvalidQueueOptionError` when `worker_concurrency` exceeds
 `global_concurrency`, when `base_polling_interval_ms` is not positive, when `rate_limit`'s `limit`
 and `period_ms` are not both positive, or when the name is the reserved internal one.
 
-Each declared queue gets its own polling runner. A tick that hits lock contention backs the
-interval off (up to 120s); a quiet tick scales it back toward the base interval. Every engine also
-runs a reserved internal queue — the default target `Dbos.resume/2`, `Dbos.retry/2` and
-`Dbos.fork/3` re-enqueue onto.
+Every engine also runs a reserved internal queue — the default target `Dbos.resume/2`,
+`Dbos.retry/2` and `Dbos.fork/3` re-enqueue onto.
+
+## How a runner learns there is work
+
+Each declared queue gets its own runner, woken by a Postgres `NOTIFY` the moment a workflow lands
+`ENQUEUED` on it — from any node in the fleet. Bursts are debounced into a single poll.
+
+The tick is a fallback, not the mechanism:
+
+| The runner's last tick | Next interval |
+|---|---|
+| claimed work | back to `base_polling_interval_ms` — there may be more |
+| found nothing, `LISTEN` connected | backs off toward `max_polling_interval_ms` |
+| found nothing, polling fallback | stays at `base_polling_interval_ms` |
+| hit lock contention | backs off toward `max_polling_interval_ms` |
+
+So an idle queue settles at the ceiling and costs almost nothing, while a newly enqueued workflow
+still starts within milliseconds. Where no dedicated `LISTEN` connection can be established
+(`Dbos.Notifications.mode/1` reports `:poll`), the tick is the only thing that will notice new work,
+so it stays at the base interval.
+
+Delayed workflows are not polled for either: one timer per engine sleeps until the earliest
+`delay_until_epoch_ms` and promotes what is due, re-arming when a `DELAYED` workflow is written or
+its wake time moves. `:delayed_fallback_interval_ms` on `Dbos.Supervisor` (default `60_000`) bounds
+how long it will sleep without hearing anything.
 
 ## Enqueueing
 

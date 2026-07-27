@@ -57,6 +57,10 @@ defmodule Dbos.Supervisor do
   `30_000`) — how often it scans; `:batch_size` (default `50`) — how many rows one reclaim pass
   claims.
 
+  `:delayed_fallback_interval_ms` (default `60_000`) — how long the delayed-workflow timer will
+  sleep without hearing a notification before re-reading the earliest delayed wake time. It
+  normally sleeps until that time exactly; this only bounds a missed notification.
+
   `:admin_server` opts, off by default: `:enabled` — starts `Dbos.AdminServer`; `:port` (default
   `3001`). `:scheduler_poll_interval_ms` (default `30_000`) controls how often `Dbos.Scheduler`
   reconciles cron schedules from `workflow_schedules`.
@@ -142,6 +146,7 @@ defmodule Dbos.Supervisor do
       notifications: Keyword.get(opts, :notifications, :listen),
       notifications_conn_opts: Keyword.get(opts, :notifications_conn_opts),
       scheduler_poll_interval_ms: Keyword.get(opts, :scheduler_poll_interval_ms, 30_000),
+      delayed_fallback_interval_ms: Keyword.get(opts, :delayed_fallback_interval_ms, 60_000),
       park_exit_threshold_ms: Keyword.get(opts, :park_exit_threshold_ms, 60_000),
       park_replay_ceiling: Keyword.get(opts, :park_replay_ceiling, 500),
       testing: testing,

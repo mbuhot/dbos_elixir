@@ -1,8 +1,12 @@
-# One polling loop per declared queue. Each tick: sweeps DELAYED workflows globally
-# (Dbos.SystemDb.transition_delayed_workflows/1), dequeues from every live partition (or the queue
-# itself, if unpartitioned), and dispatches every claimed workflow into Dbos.WorkflowSup. The
-# polling interval backs off exponentially on lock contention and scales back toward the base
-# interval otherwise, with multiplicative jitter applied every tick.
+# One runner per declared queue. Each tick dequeues from every live partition (or the queue itself,
+# if unpartitioned) and dispatches every claimed workflow into Dbos.WorkflowSup.
+#
+# A ticking loop is the fallback, not the mechanism: the runner subscribes to its queue's
+# notifications, so an enqueue anywhere in the fleet wakes it within a debounce window, and a tick
+# that claims nothing backs the interval off toward max_polling_interval_ms. Where no LISTEN
+# connection is available (Dbos.Notifications.mode/1 is :poll) the interval stays at the base,
+# since the tick is then the only thing that will notice new work. Lock contention backs off the
+# same way, and multiplicative jitter is applied every tick.
 #
 # Traps exits so a shutdown arriving mid-tick is handled after the tick returns, rather than
 # killing the process while it holds a database connection.
@@ -13,6 +17,7 @@ defmodule Dbos.Queue.Runner do
 
   require Logger
 
+  alias Dbos.Notifications
   alias Dbos.Queue
   alias Dbos.Registry, as: WorkflowRegistry
   alias Dbos.SystemDb
@@ -20,11 +25,13 @@ defmodule Dbos.Queue.Runner do
   alias Dbos.WorkflowSup
 
   @backoff_factor 2.0
+  @idle_backoff_factor 1.5
   @scaleback_factor 0.9
   @jitter_min 0.95
   @jitter_max 1.05
+  @notify_debounce_ms 25
 
-  defstruct [:engine, :queue, :config, :polling_interval_ms]
+  defstruct [:engine, :queue, :config, :polling_interval_ms, :timer_ref, :poll_due_at_ms]
 
   @doc "Starts the runner for `opts[:queue]` (a `Dbos.Queue`) on the engine named `opts[:engine]`."
   def start_link(opts) do
@@ -44,6 +51,8 @@ defmodule Dbos.Queue.Runner do
   def init({engine, %Queue{} = queue}) do
     Process.flag(:trap_exit, true)
 
+    Notifications.subscribe_queue(engine, queue.name)
+
     state = %__MODULE__{
       engine: engine,
       queue: queue,
@@ -51,27 +60,75 @@ defmodule Dbos.Queue.Runner do
       polling_interval_ms: queue.base_polling_interval_ms
     }
 
-    schedule_poll(0)
-    {:ok, state}
+    {:ok, schedule_poll(state, 0)}
   end
 
   @impl true
   def handle_info(:poll, state) do
-    backoff? = poll_once(state)
-    new_interval = adjust_interval(state.polling_interval_ms, state.queue, backoff?)
-    schedule_poll(jittered(new_interval))
-    {:noreply, %{state | polling_interval_ms: new_interval}}
+    outcome = poll_once(state)
+    new_interval = adjust_interval(state.polling_interval_ms, state, outcome)
+
+    {:noreply,
+     state
+     |> Map.put(:polling_interval_ms, new_interval)
+     |> schedule_poll(jittered(new_interval))}
   end
 
-  defp schedule_poll(delay_ms), do: Process.send_after(self(), :poll, round(delay_ms))
+  # An enqueue anywhere in the fleet. Debounced, so a burst of them costs one poll rather than one
+  # per workflow, and ignored outright when a poll is already due sooner than the debounce window.
+  @impl true
+  def handle_info({:dbos_notify, :queue, _payload}, state) do
+    {:noreply, poll_soon(state)}
+  end
+
+  @impl true
+  def handle_info({:dbos_notify, :reconnect, _payload}, state) do
+    {:noreply, poll_soon(state)}
+  end
+
+  @impl true
+  def handle_info(_message, state), do: {:noreply, state}
+
+  defp poll_soon(state) do
+    if due_within?(state, @notify_debounce_ms) do
+      state
+    else
+      schedule_poll(state, @notify_debounce_ms)
+    end
+  end
+
+  defp due_within?(%__MODULE__{poll_due_at_ms: nil}, _ms), do: false
+
+  defp due_within?(%__MODULE__{poll_due_at_ms: due_at}, ms),
+    do: due_at - System.monotonic_time(:millisecond) <= ms
+
+  defp schedule_poll(state, delay_ms) do
+    cancel_timer(state.timer_ref)
+    delay_ms = round(delay_ms)
+
+    %{
+      state
+      | timer_ref: Process.send_after(self(), :poll, delay_ms),
+        poll_due_at_ms: System.monotonic_time(:millisecond) + delay_ms
+    }
+  end
+
+  defp cancel_timer(nil), do: :ok
+  defp cancel_timer(timer_ref), do: Process.cancel_timer(timer_ref)
 
   defp poll_once(%__MODULE__{config: config, queue: queue, engine: engine}) do
-    SystemDb.transition_delayed_workflows(config)
-
     queue
     |> partition_keys(config)
     |> Enum.map(&dequeue_and_dispatch(engine, config, queue, &1))
-    |> Enum.any?(&(&1 == :contention))
+    |> summarise_tick()
+  end
+
+  defp summarise_tick(outcomes) do
+    cond do
+      Enum.any?(outcomes, &(&1 == :contention)) -> :contention
+      Enum.any?(outcomes, &(&1 == :claimed)) -> :claimed
+      true -> :idle
+    end
   end
 
   defp partition_keys(%Queue{partition_queue: false}, _config), do: [nil]
@@ -92,7 +149,7 @@ defmodule Dbos.Queue.Runner do
       end)
 
     dispatch_all(engine, claimed, queue.name, partition_key)
-    :ok
+    if claimed == [], do: :idle, else: :claimed
   rescue
     error ->
       if SystemDb.contention_error?(error) do
@@ -103,7 +160,7 @@ defmodule Dbos.Queue.Runner do
             Exception.format_banner(:error, error, __STACKTRACE__)
         )
 
-        :ok
+        :idle
       end
   end
 
@@ -139,11 +196,22 @@ defmodule Dbos.Queue.Runner do
     end
   end
 
-  defp adjust_interval(current_ms, %Queue{max_polling_interval_ms: max_ms}, true),
-    do: min(current_ms * @backoff_factor, max_ms)
+  defp adjust_interval(current_ms, %__MODULE__{queue: queue}, :contention),
+    do: min(current_ms * @backoff_factor, queue.max_polling_interval_ms)
 
-  defp adjust_interval(current_ms, %Queue{base_polling_interval_ms: base_ms}, false),
-    do: max(current_ms * @scaleback_factor, base_ms)
+  defp adjust_interval(_current_ms, %__MODULE__{queue: queue}, :claimed),
+    do: queue.base_polling_interval_ms
+
+  # An idle tick backs off only where a notification will bring the runner back sooner than the
+  # interval would. Under the polling fallback the tick is the only thing that notices new work, so
+  # the base interval is the floor.
+  defp adjust_interval(current_ms, %__MODULE__{engine: engine, queue: queue}, :idle) do
+    if Notifications.mode(engine) == :listen do
+      min(current_ms * @idle_backoff_factor, queue.max_polling_interval_ms)
+    else
+      max(current_ms * @scaleback_factor, queue.base_polling_interval_ms)
+    end
+  end
 
   defp jittered(interval_ms),
     do: interval_ms * (@jitter_min + :rand.uniform() * (@jitter_max - @jitter_min))

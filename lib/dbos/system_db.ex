@@ -1775,8 +1775,25 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  Promotes every `DELAYED` workflow whose `delay_until_epoch_ms` has passed to `ENQUEUED`. Run
-  once per reconcile tick by `Dbos.Queue.Sup`, globally across all queues.
+  The earliest wake time among `DELAYED` workflows, or `nil` if none are waiting — what
+  `Dbos.Queue.Delayed` arms its timer on instead of polling for the ones that are due.
+
+  An index scan of `idx_workflow_status_delayed`, and read only when the set of delayed workflows
+  changes rather than on a tick.
+  """
+  def next_delayed_wake_epoch_ms(%Config{} = config) do
+    sql = """
+    SELECT min(delay_until_epoch_ms) FROM #{table(config, "workflow_status")}
+    WHERE status = $1
+    """
+
+    {:ok, %{rows: [[wake_at]]}} = query(config, sql, [Status.to_string(:delayed)])
+    wake_at
+  end
+
+  @doc """
+  Promotes every `DELAYED` workflow whose `delay_until_epoch_ms` has passed to `ENQUEUED`,
+  globally across all queues. Driven by `Dbos.Queue.Delayed`'s timer.
   """
   def transition_delayed_workflows(%Config{} = config) do
     sql = """

@@ -713,3 +713,33 @@ UPDATE "dbos".extension_migrations SET version = 3;
 ALTER TABLE "dbos".operation_outputs ADD COLUMN IF NOT EXISTS ex_compensation TEXT;
 
 UPDATE "dbos".extension_migrations SET version = 4;
+
+-- extension migration 5: queue notifications
+
+CREATE OR REPLACE FUNCTION "dbos".ex_queue_function() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_notify('dbos_queue_channel', NEW.status || '::' || NEW.queue_name);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+ALTER FUNCTION "dbos".ex_queue_function() SET search_path = pg_catalog, pg_temp;
+
+DROP TRIGGER IF EXISTS dbos_ex_queue_insert_trigger ON "dbos".workflow_status;
+CREATE TRIGGER dbos_ex_queue_insert_trigger
+AFTER INSERT ON "dbos".workflow_status
+FOR EACH ROW
+WHEN (NEW.queue_name IS NOT NULL AND NEW.status IN ('ENQUEUED', 'DELAYED'))
+EXECUTE FUNCTION "dbos".ex_queue_function();
+
+DROP TRIGGER IF EXISTS dbos_ex_queue_update_trigger ON "dbos".workflow_status;
+CREATE TRIGGER dbos_ex_queue_update_trigger
+AFTER UPDATE ON "dbos".workflow_status
+FOR EACH ROW
+WHEN (NEW.queue_name IS NOT NULL AND NEW.status IN ('ENQUEUED', 'DELAYED')
+      AND (OLD.status IS DISTINCT FROM NEW.status
+           OR OLD.queue_name IS DISTINCT FROM NEW.queue_name
+           OR OLD.delay_until_epoch_ms IS DISTINCT FROM NEW.delay_until_epoch_ms))
+EXECUTE FUNCTION "dbos".ex_queue_function();
+
+UPDATE "dbos".extension_migrations SET version = 5;

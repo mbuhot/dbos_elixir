@@ -9,7 +9,7 @@ defmodule Dbos.Migrator do
   alias Dbos.Config
 
   @expected_version 42
-  @expected_extension_version 4
+  @expected_extension_version 5
   @extension_marker "-- Extension tables:"
   @extension_section_marker ~r/^-- extension migration (\d+):/m
 

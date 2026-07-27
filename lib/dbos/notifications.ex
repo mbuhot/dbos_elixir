@@ -52,6 +52,7 @@ defmodule Dbos.Notifications do
   @notifications_channel "dbos_notifications_channel"
   @workflow_events_channel "dbos_workflow_events_channel"
   @streams_channel "dbos_streams_channel"
+  @queue_channel "dbos_queue_channel"
   @poll_interval_ms 1_000
   @reconnect_base_backoff_ms 200
   @reconnect_max_backoff_ms 5_000
@@ -124,6 +125,36 @@ defmodule Dbos.Notifications do
   @doc "Releases a `subscribe_stream/3` registration."
   def unsubscribe_stream(engine, workflow_id, key) do
     release(wait_registry_name(engine), {:stream, payload(workflow_id, key)})
+  end
+
+  @doc """
+  Registers the caller to be woken whenever a workflow lands `ENQUEUED` on `queue_name`, from any
+  node. This is what lets a queue runner poll on a long fallback interval instead of a short one:
+  the wake-up is the notification, and the interval is only there for the case where no `LISTEN`
+  connection is available.
+  """
+  def subscribe_queue(engine, queue_name) do
+    {:ok, _owner} = Registry.register(wait_registry_name(engine), {:queue, queue_name}, nil)
+    :ok
+  end
+
+  @doc "Releases a `subscribe_queue/2` registration."
+  def unsubscribe_queue(engine, queue_name) do
+    release(wait_registry_name(engine), {:queue, queue_name})
+  end
+
+  @doc """
+  Registers the caller to be woken whenever a `DELAYED` workflow is written or its wake time
+  moves, from any node — what `Dbos.Queue.Delayed` re-arms its timer on.
+  """
+  def subscribe_delayed(engine) do
+    {:ok, _owner} = Registry.register(wait_registry_name(engine), :delayed, nil)
+    :ok
+  end
+
+  @doc "Releases a `subscribe_delayed/1` registration."
+  def unsubscribe_delayed(engine) do
+    release(wait_registry_name(engine), :delayed)
   end
 
   defp payload(id, topic_or_key), do: id <> "::" <> topic_or_key
@@ -305,6 +336,7 @@ defmodule Dbos.Notifications do
         Postgrex.Notifications.listen(pid, @notifications_channel)
         Postgrex.Notifications.listen(pid, @workflow_events_channel)
         Postgrex.Notifications.listen(pid, @streams_channel)
+        Postgrex.Notifications.listen(pid, @queue_channel)
         :persistent_term.put(mode_key(engine), :listen)
         %{state | listener: pid, retry_attempt: 0}
 
@@ -410,6 +442,21 @@ defmodule Dbos.Notifications do
   defp dispatch_notification(engine, @streams_channel, payload) do
     broadcast(wait_registry_name(engine), {:stream, payload}, :stream, payload)
     notify_all_from_payload(engine, :stream, payload)
+  end
+
+  # The queue trigger's payload is "<status>::<queue_name>": an ENQUEUED row wakes that queue's
+  # runner, a DELAYED one wakes the timer that will promote it.
+  defp dispatch_notification(engine, @queue_channel, payload) do
+    case String.split(payload, "::", parts: 2) do
+      ["ENQUEUED", queue_name] ->
+        broadcast(wait_registry_name(engine), {:queue, queue_name}, :queue, queue_name)
+
+      ["DELAYED", queue_name] ->
+        broadcast(wait_registry_name(engine), :delayed, :delayed, queue_name)
+
+      _other ->
+        :ok
+    end
   end
 
   defp notify_all_from_payload(engine, kind, payload) do
