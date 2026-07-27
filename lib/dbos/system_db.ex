@@ -212,6 +212,31 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
+  A workflow's recorded compensations, newest checkpoint first — the order `Dbos.Compensation`
+  reverses them in. Each is the decoded `ex_compensation` map with the `function_id` and
+  `function_name` of the step that recorded it merged in.
+
+  Only rows carrying a compensation are returned, so a step that declared none never reaches the
+  unwind and the reserved `DBOS.` names are absent until one of them records a recipe of its own.
+  """
+  def list_compensations(%Config{} = config, workflow_id) do
+    sql = """
+    SELECT function_id, function_name, ex_compensation
+    FROM #{table(config, "operation_outputs")}
+    WHERE workflow_uuid = $1 AND ex_compensation IS NOT NULL
+    ORDER BY function_id DESC
+    """
+
+    {:ok, result} = query(config, sql, [workflow_id])
+
+    Enum.map(result.rows, fn [function_id, function_name, compensation] ->
+      compensation
+      |> Serialization.decode()
+      |> Map.merge(%{function_id: function_id, function_name: function_name})
+    end)
+  end
+
+  @doc """
   Returns a workflow's outcome: `{:ok, term}`, `{:error, exception}`, `{:error,
   %Dbos.WorkflowCancelledError{}}`, `{:error, %Dbos.MaxRecoveryAttemptsExceededError{}}`, or
   `:pending` while still running. Distinguishes `:cancelled` and

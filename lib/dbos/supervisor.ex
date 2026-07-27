@@ -103,6 +103,7 @@ defmodule Dbos.Supervisor do
       workflow_entries
       |> Enum.flat_map(&normalize_workflow_entry/1)
       |> Enum.map(&resolve_version(&1, config.application_version))
+      |> prepend_builtin_workflows()
 
     children =
       if testing in [:inline, :manual] do
@@ -266,6 +267,11 @@ defmodule Dbos.Supervisor do
       {name, mfa, version}
     end)
   end
+
+  # The unwind is library code, registered on every engine rather than declared by the host, so an
+  # existing deployment gains it on upgrade without touching its `:workflows`. It declares no
+  # version: every build carries the same body, so any executor may recover one.
+  defp prepend_builtin_workflows(workflows), do: [Dbos.Compensation.workflow_entry() | workflows]
 
   # `version: :application_version` on a defworkflow resolves here, where the engine's own version
   # is known: the workflow's version becomes whatever this deploy is called, so every deploy holds

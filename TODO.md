@@ -12,11 +12,14 @@ on `defstep`/`deftransaction` expands to a closure the runtime calls only on the
 checkpoints a success, and the `@before_compile` check rejects a target that is not a step of
 matching arity in the same module.
 
+**Phase 2 is done**: `Dbos.Compensation` is registered on every engine under `"DBOS.compensate"`,
+with no declared version. It takes a target workflow id, walks that one history newest-first over
+the rows carrying a compensation, and runs each undo by calling the step it names — so each undo
+checkpoints itself. Nothing is caught; `[:dbos, :compensation, :stuck]` carries the step id to
+`Dbos.fork/3` from. `Dbos.unwind/2` starts one at the deterministic `"<id>-compensate"`.
+
 Remaining phases:
 
-2. The compensation workflow: it takes a target workflow id, walks that one history in reverse,
-   filters `DBOS.` names, runs each undo as its own step, fails fast, and emits
-   `[:dbos, :compensation, :stuck]`.
 3. Triggers: automatic enqueue in the terminal transaction for the exception path, and
    `Dbos.abort/1`.
 4. `CANCELLING` status, the process-side transition, and lease-sweep pickup.

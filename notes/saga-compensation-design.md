@@ -182,13 +182,15 @@ failure, converge on one workflow id rather than two unwinds of the same history
 
 Fail fast. The compensator stops at the first undo that exhausts its retries and lands in `ERROR`.
 
-Because each undo is its own checkpoint, the resume point is exact — everything before the failure
-is done, everything after is untouched, and `Dbos.retry/2` continues from there once the downstream
-system is repaired. The parent stays in its non-terminal state, so the sweep and the admin views
-still show outstanding work.
+Because each undo is its own checkpoint, the resume point is exact: everything before the failure
+is done and everything after is untouched. Resuming is `Dbos.fork/3` at the failed undo's step id,
+not `Dbos.retry/2` — a failed step checkpoints its failure, so re-running the same workflow replays
+that failure instead of retrying the undo. The parent stays in its non-terminal state, so the sweep
+and the admin views still show outstanding work.
 
-Emits `[:dbos, :compensation, :stuck]`. A stuck compensator is a louder alarm than a stuck forward
-workflow: confirmed side effects are outstanding with no automatic path to reversal.
+Emits `[:dbos, :compensation, :stuck]`, carrying that step id so an operator has the fork point. A
+stuck compensator is a louder alarm than a stuck forward workflow: confirmed side effects are
+outstanding with no automatic path to reversal.
 
 ## Rejected
 

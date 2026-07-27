@@ -55,7 +55,7 @@ defmodule Dbos.LeaseTest do
 
     lease = SystemDb.get_executor_lease(config, config.executor_id)
 
-    assert lease.capabilities == [%{name: "add/2", version: "3"}]
+    assert %{name: "add/2", version: "3"} in lease.capabilities
   end
 
   test "a workflow declaring no version publishes a null one" do
@@ -64,7 +64,16 @@ defmodule Dbos.LeaseTest do
 
     lease = SystemDb.get_executor_lease(config, config.executor_id)
 
-    assert lease.capabilities == [%{name: "add/2", version: nil}]
+    assert %{name: "add/2", version: nil} in lease.capabilities
+  end
+
+  test "the lease publishes the built-in unwind, so the fleet knows this executor can run one" do
+    name = start_engine()
+    config = Dbos.config(name)
+
+    lease = SystemDb.get_executor_lease(config, config.executor_id)
+
+    assert %{name: "DBOS.compensate", version: nil} in lease.capabilities
   end
 
   test "an executor that has never published its capabilities reports none rather than an empty set" do

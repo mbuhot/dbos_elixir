@@ -412,6 +412,26 @@ defmodule Dbos do
   end
 
   @doc """
+  Starts the workflow that unwinds `workflow_id`: every step of its history that declared
+  `compensate:` is run in reverse. Returns `{:ok, %Dbos.WorkflowHandle{}}` without waiting for it;
+  `Dbos.await/2` blocks for the count of undos it ran.
+
+  The compensator's id is derived from `workflow_id`, so calling this twice converges on one
+  workflow rather than unwinding the same history twice. Called from inside a workflow, it starts a
+  child — which is how a workflow unwinds a descendant of its own.
+
+  Unwind a workflow that has reached a terminal status. Its history is what the walk reads, and a
+  workflow still running may yet add to it.
+  """
+  def unwind(workflow_id, opts \\ []) do
+    start(
+      Dbos.Compensation.workflow_name(),
+      [workflow_id],
+      Keyword.put(opts, :workflow_id, Dbos.Compensation.workflow_id(workflow_id))
+    )
+  end
+
+  @doc """
   Marks `workflow_id` `CANCELLED`, waking a live process so a blocked wait ends promptly.
 
   `opts[:cancel_children]` (default `false`) cancels its descendant tree in the same

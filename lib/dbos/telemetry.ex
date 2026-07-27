@@ -46,6 +46,16 @@ defmodule Dbos.Telemetry do
   end
 
   @doc """
+  Reports an unwind that stopped on a failed undo: `[:dbos, :compensation, :stuck]`, measuring
+  `%{reversed: n, outstanding: n}`. Confirmed side effects are outstanding with no automatic path
+  to reversing them, which is a louder alarm than a stuck forward workflow. `step_id` is where
+  `Dbos.fork/3` resumes the unwind.
+  """
+  def compensation_stuck(metadata, measurements) do
+    :telemetry.execute([:dbos, :compensation, :stuck], measurements, metadata)
+  end
+
+  @doc """
   Spans one blocking wait — sleep, recv, or get_event: `[:dbos, :wait, ...]`. `fun` returns
   `{result, outcome}` and `outcome` (`:resolved` or `:timeout`) is merged into the `:stop`
   metadata. A `Dbos.Waits.Parked` unwinding the wait stops the span with `outcome: :parked` and
