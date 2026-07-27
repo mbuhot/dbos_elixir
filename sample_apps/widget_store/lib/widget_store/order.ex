@@ -5,9 +5,9 @@ defmodule WidgetStore.Order do
 
   @primary_key {:order_id, :string, autogenerate: false}
   schema "orders" do
-    field(:product_id, :string)
-    field(:quantity, :integer)
-    field(:status, :string)
+    field :product_id, :string
+    field :quantity, :integer
+    field :status, :string
 
     timestamps(type: :utc_datetime_usec)
   end
