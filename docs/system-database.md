@@ -126,14 +126,24 @@ that carry no error. `SUCCESS` is final.
 
 ## Notification channels
 
-Three Postgres `LISTEN`/`NOTIFY` channels, each fired by an `AFTER INSERT` trigger on its table.
-The payload is always `<id> || '::' || <sub-key>`:
+Five Postgres `LISTEN`/`NOTIFY` channels, each fired by a trigger on its table. The payload is
+`<id> || '::' || <sub-key>`, except on the status channel where it is a workflow id alone:
 
-| Channel | Fired by inserting into | Payload |
-|---|---|---|
-| `dbos_notifications_channel` | `notifications` | `destination_uuid::topic` |
-| `dbos_workflow_events_channel` | `workflow_events` | `workflow_uuid::key` |
-| `dbos_streams_channel` | `streams` | `workflow_uuid::key` |
+| Channel | Table | Fires on | Payload |
+|---|---|---|---|
+| `dbos_notifications_channel` | `notifications` | insert | `destination_uuid::topic` |
+| `dbos_workflow_events_channel` | `workflow_events` | insert, update | `workflow_uuid::key` |
+| `dbos_streams_channel` | `streams` | insert | `workflow_uuid::key` |
+| `dbos_queue_channel` | `workflow_status` | a row arriving `ENQUEUED` or `DELAYED` | `status::queue_name` |
+| `dbos_workflow_status_channel` | `workflow_status` | insert, a status changing | `workflow_uuid` |
+
+`notifications` and `streams` are append-only, so an insert covers every write. `workflow_events` is
+a key-value store that `Dbos.set_event/3` upserts, so its trigger covers updates as well — a key set
+a second time announces the new value.
+
+The two `workflow_status` triggers carry `WHEN` clauses so the updates that re-stamp `executor_id` on
+every checkpoint fire nothing. The queue payload names the queue rather than the workflow, which lets
+Postgres fold the notifications from one transaction enqueueing a thousand workflows into one.
 
 A listener splits the payload on `::` to learn which row changed and re-queries for the value; the
 payload never carries the value itself.

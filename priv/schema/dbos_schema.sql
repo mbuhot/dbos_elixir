@@ -769,3 +769,18 @@ WHEN (OLD.status IS DISTINCT FROM NEW.status)
 EXECUTE FUNCTION "dbos".ex_workflow_status_function();
 
 UPDATE "dbos".extension_migrations SET version = 6;
+
+-- extension migration 7: announce a re-set event
+--
+-- workflow_events is a mutable key-value store: set_event upserts on (workflow_uuid, key), so every
+-- write after a key's first is an UPDATE. dbos_workflow_events_trigger fires AFTER INSERT, so a
+-- subscriber sees a key appear and nothing after. Replacing it with one trigger over both events
+-- announces every write, and the base schema's function is reused unchanged.
+
+DROP TRIGGER IF EXISTS dbos_workflow_events_trigger ON "dbos".workflow_events;
+CREATE TRIGGER dbos_workflow_events_trigger
+AFTER INSERT OR UPDATE ON "dbos".workflow_events
+FOR EACH ROW
+EXECUTE FUNCTION "dbos".workflow_events_function();
+
+UPDATE "dbos".extension_migrations SET version = 7;
