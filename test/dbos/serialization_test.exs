@@ -55,6 +55,29 @@ defmodule Dbos.SerializationTest do
     assert Serialization.decode(encoded) == nil
   end
 
+  # A failure recorded by a VM that had raised it, decoded by a VM that never has. The atoms in
+  # here — the exception module, the anonymous-function names in the stacktrace, and the
+  # compiler-internal atoms an Ash error carries in its changeset — do not exist until this
+  # decodes, which is exactly the case `:erlang.binary_to_term/2`'s `:safe` option refuses.
+  @absent_atom_failure "g3QAAAADdwV2YWx1ZXQAAAADdwdtZXNzYWdlbQAAAARib29tdwpfX3N0cnVjdF9fdx5FbGl4aXIuRGJvcy5BYnNlbnRGaXh0dXJlRXJyb3J3CWNoYW5nZXNldHQAAAABdxYtcmVjb3JkX3F1b3RlLzItZnVuLTAtbAAAAAN3D2VsaXhpcl9lcmxfcGFzc3cQbm9fcGFyZW5zX3JlbW90ZXcEdmFyc2p3CnN0YWNrdHJhY2VsAAAAAWgEdx9FbGl4aXIuRGJvcy5BYnNlbnRGaXh0dXJlTW9kdWxldyUtdHJhbnNhY3Rpb24gKG92ZXJyaWRhYmxlIDEpLzItZnVuLTAtYQJsAAAAAmgCdwRmaWxlawANbGliL2Fic2VudC5leGgCdwRsaW5lYQFqancEa2luZHcFZXJyb3I="
+
+  # Every atom from the fixture is compared as a string. Writing one as a literal here would have
+  # the compiler intern it before the test runs, and the test would then pass against either
+  # implementation.
+  test "decodes a failure whose atoms this VM has never seen" do
+    decoded = Serialization.decode(@absent_atom_failure)
+
+    assert decoded.kind == :error
+    assert Atom.to_string(decoded.value.__struct__) == "Elixir.Dbos.AbsentFixtureError"
+
+    assert decoded.value.changeset |> Map.keys() |> Enum.map(&Atom.to_string/1) ==
+             ["-record_quote/2-fun-0-"]
+
+    assert [{module, function, 2, _location}] = decoded.stacktrace
+    assert Atom.to_string(module) == "Elixir.Dbos.AbsentFixtureModule"
+    assert Atom.to_string(function) == "-transaction (overridable 1)/2-fun-0-"
+  end
+
   test "rejects a decoded pid" do
     encoded = Serialization.encode(self())
     assert_raise ArgumentError, fn -> Serialization.decode(encoded) end

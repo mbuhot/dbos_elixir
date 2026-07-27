@@ -3,6 +3,20 @@
 # Terms are encoded with the External Term Format (:erlang.term_to_binary/1) and then
 # base64-encoded, since the underlying columns are TEXT, not BYTEA, and raw ETF bytes are not
 # guaranteed to be valid UTF-8. The format name stored alongside the value is "erl_etf".
+#
+# Decoding does not pass :safe. That option refuses to create atoms the decoding VM has never
+# seen, and a recorded failure is full of them: the exception's own module, the anonymous-function
+# names in its stacktrace, and whatever atoms the exception carries in its fields. A VM that has
+# not itself raised that failure cannot name them, so :safe cannot read back what this module
+# wrote — the very rows the engine exists to replay. Preloading modules does not help; a stacktrace
+# entry's function name is an atom no module defines.
+#
+# What that costs is the atom table, which is never garbage collected, so a row is trusted not to
+# have been crafted to exhaust it. That trust is already unavoidable: the system database holds the
+# arguments a workflow replays with and the {module, function, args} an unwind applies
+# (Dbos.Compensation), so anything able to write to it can already choose what this node runs.
+# Pids, ports and references are still refused after decoding — a dead pid read back as live is a
+# correctness problem rather than a security one.
 defmodule Dbos.Serialization do
   @moduledoc false
 
@@ -23,7 +37,7 @@ defmodule Dbos.Serialization do
     term =
       binary
       |> Base.decode64!()
-      |> :erlang.binary_to_term([:safe])
+      |> :erlang.binary_to_term()
 
     if contains_unsafe?(term) do
       raise ArgumentError, "refusing to decode a term containing a pid, port, or reference"
