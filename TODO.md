@@ -30,10 +30,16 @@ breaks out of `:cancelling` as it does out of `:cancelled`, so a blocked workflo
 rather than waiting out its timeout. The lease sweep finishes a `CANCELLING` row whose executor's
 lease has lapsed.
 
+**Phase 5 is done**: the walk also returns rows naming a descendant
+(`getResult`/`enqueue`/`forkWorkflow`), and reverses each by handing that workflow to its own
+compensator. A descendant's state is read as a step of its own, so the branch taken for it is
+checkpointed and reproduced on replay: still running is cancelled and awaited, `SUCCESS` with
+something to reverse gets its own compensator awaited, and anything already unwinding or with
+nothing to reverse is skipped. `unwindable?/2` now counts a spawning step too, so a workflow whose
+only compensable effects are its children's still gets an unwind.
+
 Remaining phases:
 
-5. Descendants named by `getResult`/`enqueue`/`forkWorkflow`: each resolved to a workflow id and
-   handed its own compensator, awaited in reverse order.
 6. `compensate:` on `send_message`/`set_event`/`write_stream`.
 7. `widget_store` reworked as the saga demo, covering both the failure and the
    nothing-to-unwind branches.

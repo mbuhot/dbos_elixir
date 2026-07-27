@@ -50,4 +50,14 @@ defmodule Dbos.StepNames do
 
   @doc "The `function_name` for `Dbos.retry/2` called from within a workflow."
   def retry_workflow, do: "DBOS.retryWorkflow"
+
+  @doc """
+  The `function_name`s whose checkpoint names another workflow this one spawned — what
+  `Dbos.Compensation` follows to unwind a descendant. `get_result/0` records the new id in
+  `child_workflow_id`; the other two return it as the step's output.
+  """
+  def spawning, do: [get_result(), enqueue(), fork_workflow()]
+
+  @doc "The `function_name` for the unwind's own checkpointed read of a descendant's status."
+  def compensation_status, do: "DBOS.compensate.status"
 end

@@ -20,6 +20,7 @@ defmodule Dbos.SystemDb do
   alias Dbos.Serialization
   alias Dbos.Status
   alias Dbos.StepInfo
+  alias Dbos.StepNames
   alias Dbos.Uuid
   alias Dbos.WorkflowStatus
 
@@ -213,28 +214,64 @@ defmodule Dbos.SystemDb do
   end
 
   @doc """
-  A workflow's recorded compensations, newest checkpoint first — the order `Dbos.Compensation`
-  reverses them in. Each is the decoded `ex_compensation` map with the `function_id` and
-  `function_name` of the step that recorded it merged in.
+  What `Dbos.Compensation` walks: one workflow's checkpoints that need reversing, newest first.
 
-  Only rows carrying a compensation are returned, so a step that declared none never reaches the
-  unwind and the reserved `DBOS.` names are absent until one of them records a recipe of its own.
+  Two kinds of entry, each carrying the `function_id` and `function_name` of the step that
+  recorded it:
+
+  | `:kind` | Meaning |
+  |---|---|
+  | `:undo` | the decoded `ex_compensation` map, under `:undo` |
+  | `:descendant` | the id of a workflow this step spawned, under `:workflow_id` |
+
+  Rows that are neither are absent, so a step declaring no compensation never reaches the unwind.
+  A row that is both is an `:undo` — reversing the step is more specific than unwinding whatever
+  it spawned.
   """
-  def list_compensations(%Config{} = config, workflow_id) do
+  def list_unwind_steps(%Config{} = config, workflow_id) do
     sql = """
-    SELECT function_id, function_name, ex_compensation
+    SELECT function_id, function_name, ex_compensation, output, child_workflow_id
     FROM #{table(config, "operation_outputs")}
-    WHERE workflow_uuid = $1 AND ex_compensation IS NOT NULL
+    WHERE workflow_uuid = $1
+      AND (ex_compensation IS NOT NULL OR function_name = ANY($2))
     ORDER BY function_id DESC
     """
 
-    {:ok, result} = query(config, sql, [workflow_id])
+    {:ok, result} = query(config, sql, [workflow_id, StepNames.spawning()])
 
-    Enum.map(result.rows, fn [function_id, function_name, compensation] ->
-      compensation
-      |> Serialization.decode()
-      |> Map.merge(%{function_id: function_id, function_name: function_name})
-    end)
+    result.rows
+    |> Enum.map(&unwind_step/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp unwind_step([function_id, function_name, compensation, _output, _child_id])
+       when is_binary(compensation) do
+    compensation
+    |> Serialization.decode()
+    |> Map.merge(%{kind: :undo, function_id: function_id, function_name: function_name})
+  end
+
+  defp unwind_step([function_id, function_name, _compensation, output, child_id]) do
+    case spawned_workflow_id(function_name, output, child_id) do
+      nil ->
+        nil
+
+      spawned_id ->
+        %{
+          kind: :descendant,
+          function_id: function_id,
+          function_name: function_name,
+          workflow_id: spawned_id
+        }
+    end
+  end
+
+  defp spawned_workflow_id(function_name, output, child_id) do
+    if function_name == StepNames.get_result() do
+      child_id
+    else
+      decode_or_nil(output)
+    end
   end
 
   @doc """
@@ -387,17 +424,24 @@ defmodule Dbos.SystemDb do
 
   defp maybe_enqueue_unwind(_config, _workflow_id, _status), do: :ok
 
-  # Whether this workflow has anything to unwind: at least one checkpoint carrying a compensation,
-  # and not an unwind itself — an undo that declared its own `compensate:` would otherwise start
-  # the recursion the compensation workflow exists to end.
-  defp unwindable?(config, workflow_id) do
+  @doc """
+  Whether this workflow has anything to unwind: at least one checkpoint carrying a compensation or
+  naming a descendant, and not an unwind itself — an undo that declared its own `compensate:` would
+  otherwise start the recursion `Dbos.Compensation` exists to end.
+
+  Only a settled answer for a workflow that has stopped running; one still writing checkpoints may
+  gain something to unwind after this returns.
+  """
+  def unwindable?(config, workflow_id) do
     sql = """
-    SELECT #{unwindable_predicate(config, 2)}
+    SELECT #{unwindable_predicate(config, 2, 3)}
     FROM #{table(config, "workflow_status")} ws
     WHERE ws.workflow_uuid = $1
     """
 
-    case query(config, sql, [workflow_id, Compensation.workflow_name()]) do
+    params = [workflow_id, Compensation.workflow_name(), StepNames.spawning()]
+
+    case query(config, sql, params) do
       {:ok, %{rows: [[unwindable]]}} -> unwindable
       {:ok, %{rows: []}} -> false
     end
@@ -406,11 +450,12 @@ defmodule Dbos.SystemDb do
   # Whether the `ws` row in scope has anything to unwind, with the compensator's own name at
   # `$name_index`. An unwind is excluded from unwinding: an undo declaring its own `compensate:`
   # would otherwise start the recursion the compensation workflow exists to end.
-  defp unwindable_predicate(config, name_index) do
+  defp unwindable_predicate(config, name_index, spawning_index) do
     """
     (ws.name <> $#{name_index} AND EXISTS (
       SELECT 1 FROM #{table(config, "operation_outputs")} oo
-      WHERE oo.workflow_uuid = ws.workflow_uuid AND oo.ex_compensation IS NOT NULL
+      WHERE oo.workflow_uuid = ws.workflow_uuid
+        AND (oo.ex_compensation IS NOT NULL OR oo.function_name = ANY($#{spawning_index}))
     ))\
     """
   end
@@ -992,14 +1037,14 @@ defmodule Dbos.SystemDb do
 
     sql = """
     UPDATE #{table(config, "workflow_status")} ws
-        SET status = CASE WHEN #{unwindable_predicate(config, 6)} AND ws.status = $7
+        SET status = CASE WHEN #{unwindable_predicate(config, 6, 9)} AND ws.status = $7
                           THEN $8 ELSE $1 END,
             updated_at = $2,
-            completed_at = CASE WHEN #{unwindable_predicate(config, 6)} AND ws.status = $7
+            completed_at = CASE WHEN #{unwindable_predicate(config, 6, 9)} AND ws.status = $7
                                 THEN ws.completed_at ELSE $2 END,
-            started_at_epoch_ms = CASE WHEN #{unwindable_predicate(config, 6)} AND ws.status = $7
+            started_at_epoch_ms = CASE WHEN #{unwindable_predicate(config, 6, 9)} AND ws.status = $7
                                        THEN ws.started_at_epoch_ms ELSE NULL END,
-            queue_name = CASE WHEN #{unwindable_predicate(config, 6)} AND ws.status = $7
+            queue_name = CASE WHEN #{unwindable_predicate(config, 6, 9)} AND ws.status = $7
                               THEN ws.queue_name ELSE NULL END,
             deduplication_id = NULL
         WHERE ws.workflow_uuid = ANY($3) AND ws.status NOT IN ($4, $5, $1, $8)
@@ -1014,7 +1059,8 @@ defmodule Dbos.SystemDb do
       Status.to_string(:error),
       Compensation.workflow_name(),
       Status.to_string(:pending),
-      Status.to_string(:cancelling)
+      Status.to_string(:cancelling),
+      StepNames.spawning()
     ]
 
     {:ok, result} = query(config, sql, params)

@@ -6,6 +6,10 @@ defmodule Dbos.Compensation do
   (`Dbos.Macros.defstep/3`). This workflow reads one workflow's history back in reverse and runs
   each recorded recipe, so the effects are undone in the opposite order they happened.
 
+  A step that spawned another workflow is reversed by unwinding that workflow, not by reaching into
+  its history: each workflow's effects are its own to reverse. So the walk hands a descendant to
+  its own compensator and waits for it, and depth is ordinary workflow nesting.
+
   It is registered by `Dbos.Supervisor` on every engine under a reserved name, rather than declared
   with `defworkflow`, so a host application gains it on upgrade without touching its `:workflows`
   list. Its input is the id of the workflow to unwind — which is not always a workflow that
@@ -17,6 +21,10 @@ defmodule Dbos.Compensation do
   exists only once that workflow has reached a terminal status, and a terminal workflow writes no
   further checkpoints. So the same rows come back in the same order on every replay, and each undo
   keeps the step id it took the first time.
+
+  A descendant's state is read as a step of its own, so the branch taken for it is checkpointed
+  too. A replay reproduces that branch — and so the ids it consumed — from the recorded state
+  rather than from whatever the descendant looks like now.
 
   ## When an undo fails
 
@@ -30,6 +38,7 @@ defmodule Dbos.Compensation do
   """
 
   alias Dbos.Runtime
+  alias Dbos.StepNames
   alias Dbos.SystemDb
   alias Dbos.Telemetry
 
@@ -57,42 +66,93 @@ defmodule Dbos.Compensation do
     config = Runtime.current_config()
 
     config
-    |> SystemDb.list_compensations(target_workflow_id)
-    |> run_undos(config, target_workflow_id)
+    |> SystemDb.list_unwind_steps(target_workflow_id)
+    |> run_steps(config, target_workflow_id)
   end
 
-  defp run_undos(compensations, config, target_workflow_id) do
-    total = length(compensations)
+  defp run_steps(steps, config, target_workflow_id) do
+    total = length(steps)
 
-    compensations
+    steps
     |> Enum.with_index()
-    |> Enum.each(fn {compensation, reversed} ->
-      run_undo(compensation, config, target_workflow_id, reversed, total)
+    |> Enum.each(fn {step, reversed} ->
+      run_step(step, config, target_workflow_id, reversed, total)
     end)
 
     total
   end
 
-  defp run_undo(compensation, config, target_workflow_id, reversed, total) do
-    %{undo: {module, function, args}} = compensation
+  defp run_step(step, config, target_workflow_id, reversed, total) do
+    reverse(step, config)
+  catch
+    kind, reason ->
+      report_stuck(step, config, target_workflow_id, reversed, total, kind, reason)
+      :erlang.raise(kind, reason, __STACKTRACE__)
+  end
 
-    try do
-      apply(module, function, args)
-    catch
-      kind, reason ->
-        report_stuck(compensation, config, target_workflow_id, reversed, total, kind, reason)
-        :erlang.raise(kind, reason, __STACKTRACE__)
+  defp reverse(%{kind: :undo, undo: {module, function, args}}, _config) do
+    apply(module, function, args)
+  end
+
+  defp reverse(%{kind: :descendant, workflow_id: workflow_id}, config) do
+    unwind_descendant(config, workflow_id, descendant_state(config, workflow_id))
+  end
+
+  # Read as its own step, so the branch below is decided once and reproduced on every replay.
+  defp descendant_state(config, workflow_id) do
+    Dbos.step(StepNames.compensation_status(), fn ->
+      case SystemDb.get_workflow_status(config, workflow_id) do
+        {:ok, %{status: status}} -> {status, SystemDb.unwindable?(config, workflow_id)}
+        {:error, :not_found} -> {:not_found, false}
+      end
+    end)
+  end
+
+  defp unwind_descendant(config, workflow_id, {status, _unwindable})
+       when status in [:enqueued, :delayed, :pending] do
+    Dbos.cancel(workflow_id)
+    await(config, workflow_id)
+    unwind_cancelled_descendant(config, workflow_id)
+  end
+
+  defp unwind_descendant(_config, workflow_id, {:success, true}) do
+    {:ok, handle} = Dbos.unwind(workflow_id)
+    await_handle(handle)
+  end
+
+  defp unwind_descendant(_config, _workflow_id, _state), do: :skipped
+
+  # Cancelling a descendant that was running enqueues its unwind only if it had anything to
+  # reverse, so whether one exists is read as a step before waiting on it. By now the descendant is
+  # terminal, which is what makes that answer stable across replays.
+  defp unwind_cancelled_descendant(config, workflow_id) do
+    unwind_id = workflow_id(workflow_id)
+
+    case descendant_state(config, unwind_id) do
+      {:not_found, _unwindable} -> :nothing_to_unwind
+      _state -> await(config, unwind_id)
     end
   end
 
-  defp report_stuck(compensation, config, target_workflow_id, reversed, total, kind, reason) do
+  defp await(config, workflow_id) do
+    await_handle(%Dbos.WorkflowHandle{engine: config.name, workflow_id: workflow_id})
+  end
+
+  defp await_handle(handle) do
+    case Dbos.await(handle) do
+      {:ok, value} -> value
+      {:error, exception} -> exception
+    end
+  end
+
+  defp report_stuck(step, config, target_workflow_id, reversed, total, kind, reason) do
     Telemetry.compensation_stuck(
       %{
         engine: config.name,
         workflow_id: Runtime.current_workflow_id(),
         step_id: Runtime.current_step_id(),
         target_workflow_id: target_workflow_id,
-        function_name: compensation.function_name,
+        function_name: step.function_name,
         kind: kind,
         reason: reason
       },
