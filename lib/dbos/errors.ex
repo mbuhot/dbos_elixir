@@ -189,6 +189,30 @@ defmodule Dbos.StepInTransactionError do
   end
 end
 
+defmodule Dbos.OperationInStepError do
+  @moduledoc """
+  Raised when a durable operation other than a step runs inside a step body: starting,
+  enqueuing, forking or awaiting a workflow, or `send_message`, `recv_message`, `set_event`,
+  `get_event`, `sleep` and the rest of the engine's own primitives.
+
+  A step is one checkpoint. Any of these would consume a step id of its own, and replay returns
+  the enclosing step from its checkpoint without running the body, so that id is never consumed
+  again and every later step shifts onto the wrong one. Perform them from the workflow body.
+
+  Calling a step from a step is allowed: the inner call becomes part of the caller's execution
+  rather than a checkpoint of its own.
+  """
+
+  defexception [:workflow_id, :step, :operation]
+
+  @impl true
+  def message(%__MODULE__{workflow_id: workflow_id, step: step, operation: operation}) do
+    "workflow #{workflow_id}: cannot #{operation} from within step #{inspect(step)}. " <>
+      "A step is a single checkpoint; run this from the workflow body. Calling another step " <>
+      "from here is fine — it becomes part of this step rather than a checkpoint of its own."
+  end
+end
+
 defmodule Dbos.PatchInStepError do
   @moduledoc """
   Raised when `Dbos.patch/1` or `Dbos.deprecate_patch/1` is called from inside a step or a

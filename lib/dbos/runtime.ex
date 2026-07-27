@@ -35,7 +35,7 @@ defmodule Dbos.Runtime do
             replay: boolean,
             deadline_epoch_ms: integer | nil,
             step_id: integer,
-            in_step: boolean,
+            in_step: String.t() | false,
             in_transaction: boolean
           }
   end
@@ -122,11 +122,28 @@ defmodule Dbos.Runtime do
   def run_step(name, opts \\ [], fun)
 
   def run_step(name, opts, fun) do
-    if in_workflow?() do
-      function_id = next_function_id()
-      run_step_at(function_id, name, opts, fun)
-    else
-      fun.()
+    cond do
+      not in_workflow?() ->
+        fun.()
+
+      current_step() && not engine_operation?(name) ->
+        fun.()
+
+      true ->
+        run_step_at(next_function_id(), name, opts, fun)
+    end
+  end
+
+  # The engine's own primitives all record a reserved "DBOS." name (Dbos.StepNames); a user's
+  # step never does. That is the line between an inner call folded into its caller and a durable
+  # operation that would need a checkpoint of its own.
+  defp engine_operation?(name), do: String.starts_with?(name, "DBOS.")
+
+  @doc "The name of the step this process is inside, or `nil` when it is not inside one."
+  def current_step do
+    case Process.get(@context_key) do
+      %Context{in_step: name} when is_binary(name) -> name
+      _other -> nil
     end
   end
 
@@ -141,6 +158,13 @@ defmodule Dbos.Runtime do
 
     if context.in_transaction do
       raise Dbos.StepInTransactionError, workflow_id: context.workflow_id, function_name: name
+    end
+
+    if context.in_step do
+      raise Dbos.OperationInStepError,
+        workflow_id: context.workflow_id,
+        step: context.in_step,
+        operation: "call #{name}"
     end
 
     case SystemDb.check_operation_execution(
@@ -164,7 +188,7 @@ defmodule Dbos.Runtime do
     started_at = System.os_time(:millisecond)
 
     outcome =
-      with_flag(:in_step, true, fn -> run_with_retries(context.workflow_id, name, opts, fun) end)
+      with_flag(:in_step, name, fn -> run_with_retries(context.workflow_id, name, opts, fun) end)
 
     completed_at = System.os_time(:millisecond)
 

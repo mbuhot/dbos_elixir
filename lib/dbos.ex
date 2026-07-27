@@ -189,6 +189,7 @@ defmodule Dbos do
   defp await_within_workflow(handle, opts) do
     config = Runtime.current_config()
     workflow_id = Runtime.current_workflow_id()
+    refuse_in_step!("await workflow #{handle.workflow_id}")
     peeked_id = Runtime.peek_next_function_id()
 
     case SystemDb.check_operation_execution(
@@ -534,6 +535,22 @@ defmodule Dbos do
     if Runtime.in_workflow?(), do: Runtime.current_config(), else: config(engine(opts))
   end
 
+  # A step is one checkpoint, so a workflow dispatched from inside one would consume a step id
+  # that replay never consumes again. Calling a step from a step is fine — it becomes part of
+  # the caller's execution rather than a checkpoint of its own.
+  defp refuse_in_step!(operation) do
+    case Runtime.current_step() do
+      nil ->
+        :ok
+
+      step ->
+        raise Dbos.OperationInStepError,
+          workflow_id: Runtime.current_workflow_id(),
+          step: step,
+          operation: operation
+    end
+  end
+
   defp engine_and_config(opts) do
     if Runtime.in_workflow?() do
       config = Runtime.current_config()
@@ -671,6 +688,7 @@ defmodule Dbos do
 
   defp start_child_workflow(config, engine, name, mfa, args, opts) do
     parent_id = Runtime.current_workflow_id()
+    refuse_in_step!("start workflow #{inspect(name)}")
     step_id = Runtime.next_function_id()
 
     case SystemDb.check_child_workflow(config, parent_id, step_id, name) do

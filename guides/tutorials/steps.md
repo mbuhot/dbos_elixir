@@ -86,6 +86,28 @@ end)
 Reach for it when a named function would be pure ceremony. `defstep` is the better fit when the
 step has a stable identity worth naming and reusing.
 
+## What a step may contain
+
+A step may call another step. The inner call is folded into the caller: it runs as ordinary code,
+takes no step id, and writes no checkpoint of its own. Factoring one step out of another is
+therefore safe, and the extracted function keeps working whether it is reached from a workflow
+body or from another step.
+
+Everything else durable belongs in the workflow body, and raises `Dbos.OperationInStepError`
+from inside a step:
+
+| Refused inside a step | Where it belongs |
+|---|---|
+| `Dbos.start/3`, `Dbos.enqueue/3`, `Dbos.fork/3`, awaiting a workflow | The workflow body |
+| `Dbos.send_message/4`, `Dbos.recv_message/2` | The workflow body |
+| `Dbos.set_event/2`, `Dbos.get_event/3` | The workflow body |
+| `Dbos.sleep/1`, stream writes | The workflow body |
+
+The reason is the step-id sequence. Each of those is a durable operation that takes an id of its
+own, but a step is one checkpoint: replay returns it from that checkpoint without running its
+body, so an id consumed inside would never be consumed again and every later step would shift
+onto the wrong one. A nested *step* is exempt because it takes no id at all.
+
 ## Retries
 
 By default a step does not retry — `max_retries: 0` — and a raised exception propagates straight
