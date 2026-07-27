@@ -17,4 +17,4 @@ Application.put_env(:dbos, Dbos.TestRepo,
 
 {:ok, _pid} = Dbos.TestRepo.start_link()
 
-ExUnit.start(exclude: [:integration])
+ExUnit.start(exclude: [:integration, :bench])

@@ -58,7 +58,8 @@ defmodule Dbos.MixProject do
 
   defp aliases do
     [
-      "test.integration": ["test test/integration --include integration"]
+      "test.integration": ["test test/integration --include integration"],
+      "test.bench": ["test test/bench --include bench"]
     ]
   end
 
@@ -197,6 +198,7 @@ defmodule Dbos.MixProject do
       "docs/system-database.md",
       "docs/executor-leases.md",
       "docs/telemetry.md",
+      "docs/performance.md",
       "guides/production-checklist.md",
       "guides/faq.md"
     ]
