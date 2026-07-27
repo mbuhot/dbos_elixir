@@ -20,10 +20,10 @@ defmodule Dbos.Messaging do
   Sends `message` to `destination_id` on `topic` (`nil` normalizes to `null_topic/0`). A
   durable, checkpointed step (one id) inside a workflow; a direct write (no id) outside one.
   """
-  def send_message(config, destination_id, topic, message) do
+  def send_message(config, destination_id, topic, message, opts \\ []) do
     topic = topic || null_topic()
 
-    Runtime.run_step(StepNames.send_message(), [], fn ->
+    Runtime.run_step(StepNames.send_message(), compensation_opts(opts), fn ->
       SystemDb.send_notification(config, destination_id, topic, message)
       :ok
     end)
@@ -138,11 +138,11 @@ defmodule Dbos.Messaging do
   Sets `workflow_events[key]` for the current workflow, upserting `workflow_events_history`
   under this call's step id. One step id.
   """
-  def set_event(config, key, value) do
+  def set_event(config, key, value, opts \\ []) do
     workflow_id = Runtime.current_workflow_id()
     function_id = Runtime.next_function_id()
 
-    Runtime.run_step_at(function_id, StepNames.set_event(), [], fn ->
+    Runtime.run_step_at(function_id, StepNames.set_event(), compensation_opts(opts), fn ->
       SystemDb.set_event_value(config, workflow_id, function_id, key, value)
     end)
   end
@@ -286,11 +286,11 @@ defmodule Dbos.Messaging do
   end
 
   @doc "Appends `value` to stream `key` for the current workflow. One step id."
-  def write_stream(config, key, value) do
+  def write_stream(config, key, value, opts \\ []) do
     workflow_id = Runtime.current_workflow_id()
     function_id = Runtime.next_function_id()
 
-    Runtime.run_step_at(function_id, StepNames.write_stream(), [], fn ->
+    Runtime.run_step_at(function_id, StepNames.write_stream(), compensation_opts(opts), fn ->
       case SystemDb.write_stream(config, workflow_id, function_id, key, value) do
         :ok ->
           value
@@ -435,6 +435,19 @@ defmodule Dbos.Messaging do
       target_workflow_id: target_workflow_id,
       timeout_ms: timeout_ms
     }
+  end
+
+  # A durable primitive's `compensate:`, resolved once here so the runtime writes it onto the
+  # checkpoint only if the operation actually commits one.
+  defp compensation_opts(opts) do
+    case Keyword.get(opts, :compensate) do
+      nil ->
+        []
+
+      compensate ->
+        record = Dbos.Compensation.record!(compensate)
+        [compensation: fn -> record end]
+    end
   end
 
   defp raise_if_cancelled!(config, workflow_id) do

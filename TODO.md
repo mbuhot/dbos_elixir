@@ -38,8 +38,12 @@ something to reverse gets its own compensator awaited, and anything already unwi
 nothing to reverse is skipped. `unwindable?/2` now counts a spawning step too, so a workflow whose
 only compensable effects are its children's still gets an unwind.
 
-Remaining phases:
+**Phase 6 is done**: `Dbos.send_message/4`, `Dbos.set_event/3` and `Dbos.write_stream/3` take
+`opts[:compensate]`. They are functions, not macros, so the form is `&Module.fun/1` or an explicit
+`{module, function, args}` with `:__checkpoint__` marking the slot, normalised and validated by
+`Dbos.Compensation.record!/1`.
 
-6. `compensate:` on `send_message`/`set_event`/`write_stream`.
+Remaining phase:
+
 7. `widget_store` reworked as the saga demo, covering both the failure and the
    nothing-to-unwind branches.

@@ -14,8 +14,8 @@ defmodule Dbos.WorkflowCancellingError do
   Raised at a workflow's next checkpoint check once its status is `:cancelling`: it has been
   cancelled, and has compensable effects to reverse before it can be `:cancelled`.
 
-  Caught by `Dbos.WorkflowProcess`, which stops the forward path and commits `CANCELLED` together
-  with the workflow's unwind. Not an error a workflow should catch — see `Dbos.Compensation`.
+  Caught by the engine, which stops the forward path and commits `CANCELLED` together with the
+  workflow's unwind. Not an error a workflow should catch — see `Dbos.Compensation`.
   """
 
   defexception [:workflow_id]

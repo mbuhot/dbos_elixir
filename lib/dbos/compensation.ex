@@ -58,6 +58,58 @@ defmodule Dbos.Compensation do
   def workflow_id(target_workflow_id), do: target_workflow_id <> "-compensate"
 
   @doc """
+  Normalises the `compensate:` option the durable primitives take into the record stored on their
+  checkpoint, or `nil` for no compensation.
+
+  `defstep`'s own `compensate:` is a macro and takes a capture of a step in the same module.
+  `Dbos.send_message/4` and friends are ordinary functions, so they take one of:
+
+  | Form | Undo |
+  |---|---|
+  | `&MyApp.retract/1` | `MyApp.retract(checkpointed_value)` |
+  | `{MyApp, :retract, [key, :__checkpoint__]}` | the given arguments, with the checkpointed value in the marked slot |
+
+  Raises `ArgumentError` on anything else, on a local capture (its module and name are the
+  enclosing function's, not the target's), and on a target that is not exported at that arity.
+  """
+  def record!(nil), do: nil
+
+  def record!({module, function, args})
+      when is_atom(module) and is_atom(function) and is_list(args) do
+    ensure_exported!(module, function, length(args))
+    %{undo: {module, function, args}}
+  end
+
+  def record!(capture) when is_function(capture, 1) do
+    info = Function.info(capture)
+
+    case Keyword.get(info, :type) do
+      :external ->
+        record!({Keyword.fetch!(info, :module), Keyword.fetch!(info, :name), [:__checkpoint__]})
+
+      :local ->
+        raise ArgumentError,
+              "compensate: needs a capture of a named function, such as &MyApp.retract/1, or an " <>
+                "explicit {module, function, args}. An anonymous function cannot be stored on a " <>
+                "checkpoint and read back by whatever runs the unwind."
+    end
+  end
+
+  def record!(other) do
+    raise ArgumentError,
+          "compensate: must be &Module.fun/1 or {module, function, args}, got: #{inspect(other)}"
+  end
+
+  defp ensure_exported!(module, function, arity) do
+    Code.ensure_loaded(module)
+
+    unless function_exported?(module, function, arity) do
+      raise ArgumentError,
+            "compensate: names #{inspect(module)}.#{function}/#{arity}, which is not exported"
+    end
+  end
+
+  @doc """
   Unwinds `target_workflow_id`: runs every compensation recorded in its history, newest first.
   Returns how many undos ran. This is the compensator's workflow body — call `Dbos.unwind/2`
   rather than this function.

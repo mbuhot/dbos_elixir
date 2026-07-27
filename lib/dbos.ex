@@ -256,10 +256,13 @@ defmodule Dbos do
   A durable, checkpointed step inside a workflow; a direct write outside one. Named
   `send_message` (not `send`) to avoid reading like a call to `Kernel.send/2` at the call site.
   `opts[:engine]` (default `Dbos`) is only consulted outside a workflow.
+
+  `opts[:compensate]` records how to take this message back if the workflow later unwinds — see
+  `Dbos.Compensation.record!/1` for the forms it accepts.
   """
   def send_message(destination_id, topic, message, opts \\ []) do
     config = workflow_or_engine_config(opts)
-    Messaging.send_message(config, destination_id, topic, message)
+    Messaging.send_message(config, destination_id, topic, message, opts)
   end
 
   @doc """
@@ -270,9 +273,14 @@ defmodule Dbos do
     Messaging.recv_message(Runtime.current_config(), topic, timeout_ms)
   end
 
-  @doc "Sets `key` to `value` in this workflow's event store. Must be called from inside a workflow."
-  def set_event(key, value, _opts \\ []) do
-    Messaging.set_event(Runtime.current_config(), key, value)
+  @doc """
+  Sets `key` to `value` in this workflow's event store. Must be called from inside a workflow.
+
+  `opts[:compensate]` records how to undo the setting if the workflow later unwinds — see
+  `Dbos.Compensation.record!/1` for the forms it accepts.
+  """
+  def set_event(key, value, opts \\ []) do
+    Messaging.set_event(Runtime.current_config(), key, value, opts)
   end
 
   @doc """
@@ -285,9 +293,14 @@ defmodule Dbos do
     Messaging.get_event(config, target_workflow_id, key, timeout_ms)
   end
 
-  @doc "Appends `value` to this workflow's stream `key`. Must be called from inside a workflow."
-  def write_stream(key, value, _opts \\ []) do
-    Messaging.write_stream(Runtime.current_config(), key, value)
+  @doc """
+  Appends `value` to this workflow's stream `key`. Must be called from inside a workflow.
+
+  `opts[:compensate]` records how to retract the item if the workflow later unwinds — see
+  `Dbos.Compensation.record!/1` for the forms it accepts.
+  """
+  def write_stream(key, value, opts \\ []) do
+    Messaging.write_stream(Runtime.current_config(), key, value, opts)
   end
 
   @doc "Writes the close sentinel for this workflow's stream `key`. Must be called from inside a workflow."
